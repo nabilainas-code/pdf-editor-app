@@ -1,9 +1,10 @@
 import 'dart:io';
-import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_pdfview/flutter_pdfview.dart';
-import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+
+const _channel = MethodChannel("com.nabilainas.pdfeditor/open_pdf");
 
 void main() => runApp(const MaterialApp(home: Accueil()));
 
@@ -17,35 +18,22 @@ class Accueil extends StatefulWidget {
 class _AccueilState extends State<Accueil> {
   String? pdfPath;
   String statut = "Chargement...";
-  late StreamSubscription _intentSub;
 
   @override
   void initState() {
     super.initState();
-
-    _intentSub = ReceiveSharingIntent.instance.getMediaStream().listen((files) {
-      if (files.isNotEmpty) {
-        setState(() {
-          pdfPath = files.first.path;
-        });
-      }
-    });
-
-    ReceiveSharingIntent.instance.getInitialMedia().then((files) {
-      if (files.isNotEmpty) {
-        setState(() {
-          pdfPath = files.first.path;
-        });
-      } else {
-        _chargerPdfDeTest();
-      }
-    });
+    _init();
   }
 
-  @override
-  void dispose() {
-    _intentSub.cancel();
-    super.dispose();
+  Future<void> _init() async {
+    try {
+      final path = await _channel.invokeMethod<String>("getInitialPdfPath");
+      if (path != null) {
+        setState(() => pdfPath = path);
+        return;
+      }
+    } catch (_) {}
+    _chargerPdfDeTest();
   }
 
   Future<void> _chargerPdfDeTest() async {
@@ -61,13 +49,9 @@ class _AccueilState extends State<Accueil> {
       }
       final fichier = File("${Directory.systemTemp.path}/test.pdf");
       await fichier.writeAsBytes(bytesBuilder.toBytes());
-      setState(() {
-        pdfPath = fichier.path;
-      });
+      setState(() => pdfPath = fichier.path);
     } catch (e) {
-      setState(() {
-        statut = "Erreur : $e";
-      });
+      setState(() => statut = "Erreur : $e");
     }
   }
 
@@ -80,5 +64,4 @@ class _AccueilState extends State<Accueil> {
           : PDFView(filePath: pdfPath!),
     );
   }
-} 
-
+}
