@@ -23,6 +23,13 @@ jobs:
           cp -r lib/. temp_app/lib/
           cp pubspec.yaml temp_app/pubspec.yaml
 
+      - name: Forcer une version de SDK Android suffisante
+        run: |
+          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' temp_app/android/app/build.gradle.kts || true
+          sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/' temp_app/android/app/build.gradle || true
+          sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 36/' temp_app/android/app/build.gradle.kts || true
+          sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 36/' temp_app/android/app/build.gradle || true
+
       - name: Installer les dépendances
         working-directory: temp_app
         run: flutter pub get
