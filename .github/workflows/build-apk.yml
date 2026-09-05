@@ -1,3 +1,4 @@
+
 name: Build APK
 
 on:
@@ -23,15 +24,16 @@ jobs:
           cp -r lib/. temp_app/lib/
           cp pubspec.yaml temp_app/pubspec.yaml
 
-      - name: Forcer le SDK Android pour tous les modules
+      - name: Forcer le SDK Android de l'app
         run: |
-          echo 'subprojects {' >> temp_app/android/build.gradle.kts
-          echo '    afterEvaluate {' >> temp_app/android/build.gradle.kts
-          echo '        extensions.findByType(com.android.build.gradle.BaseExtension::class.java)?.let {' >> temp_app/android/build.gradle.kts
-          echo '            it.compileSdkVersion(36)' >> temp_app/android/build.gradle.kts
-          echo '        }' >> temp_app/android/build.gradle.kts
-          echo '    }' >> temp_app/android/build.gradle.kts
-          echo '}' >> temp_app/android/build.gradle.kts
+          python3 -c "
+          import re
+          path = 'temp_app/android/app/build.gradle.kts'
+          content = open(path).read()
+          content = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 36', content)
+          content = re.sub(r'targetSdk\s*=\s*\S+', 'targetSdk = 36', content)
+          open(path, 'w').write(content)
+          "
 
       - name: Installer les dépendances
         working-directory: temp_app
