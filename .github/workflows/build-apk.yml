@@ -1,4 +1,3 @@
-
 name: Build APK
 
 on:
@@ -24,16 +23,11 @@ jobs:
           cp -r lib/. temp_app/lib/
           cp pubspec.yaml temp_app/pubspec.yaml
 
-      - name: Forcer le SDK Android de l'app
+      - name: Mettre à jour les versions Android nécessaires
         run: |
-          python3 -c "
-          import re
-          path = 'temp_app/android/app/build.gradle.kts'
-          content = open(path).read()
-          content = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 36', content)
-          content = re.sub(r'targetSdk\s*=\s*\S+', 'targetSdk = 36', content)
-          open(path, 'w').write(content)
-          "
+          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' temp_app/android/app/build.gradle.kts
+          sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 36/' temp_app/android/app/build.gradle.kts
+          sed -i 's/id("com.android.application") version "[^"]*"/id("com.android.application") version "8.7.2"/' temp_app/android/settings.gradle.kts
 
       - name: Installer les dépendances
         working-directory: temp_app
