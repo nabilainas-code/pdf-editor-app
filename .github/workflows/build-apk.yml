@@ -15,6 +15,7 @@ jobs:
       - name: Installer Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.47.2'
           channel: 'stable'
 
       - name: Générer la structure Android standard
@@ -22,12 +23,6 @@ jobs:
           flutter create --platforms=android --org com.nabilainas.pdfeditor temp_app
           cp -r lib/. temp_app/lib/
           cp pubspec.yaml temp_app/pubspec.yaml
-
-      - name: Mettre à jour les versions Android nécessaires
-        run: |
-          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' temp_app/android/app/build.gradle.kts
-          sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 36/' temp_app/android/app/build.gradle.kts
-          sed -i 's/id("com.android.application") version "[^"]*"/id("com.android.application") version "8.7.2"/' temp_app/android/settings.gradle.kts
 
       - name: Installer les dépendances
         working-directory: temp_app
