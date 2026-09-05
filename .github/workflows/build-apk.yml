@@ -1,4 +1,3 @@
-
 name: Build APK
 
 on:
@@ -25,19 +24,15 @@ jobs:
           cp -r lib/. temp_app/lib/
           cp pubspec.yaml temp_app/pubspec.yaml
 
-      - name: Autoriser l'accès à internet
+      - name: Autoriser l'accès à internet et l'ouverture de PDF
         run: |
           sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />' temp_app/android/app/src/main/AndroidManifest.xml
-
-      - name: Permettre d'ouvrir des PDF depuis d'autres apps
-        run: |
           cat > /tmp/fix_manifest.py << 'PYEOF'
           path = 'temp_app/android/app/src/main/AndroidManifest.xml'
           content = open(path).read()
           intent_filter = '''
                   <intent-filter>
                       <action android:name="android.intent.action.VIEW" />
-                      <action android:name="android.intent.action.SEND" />
                       <category android:name="android.intent.category.DEFAULT" />
                       <category android:name="android.intent.category.BROWSABLE" />
                       <data android:mimeType="application/pdf" />
@@ -47,6 +42,52 @@ jobs:
           open(path, 'w').write(content)
           PYEOF
           python3 /tmp/fix_manifest.py
+
+      - name: Écrire le code natif de récupération du PDF
+        run: |
+          cat > /tmp/write_main_activity.py << 'PYEOF'
+          path = 'temp_app/android/app/src/main/kotlin/com/nabilainas/pdfeditor/temp_app/MainActivity.kt'
+          content = '''package com.nabilainas.pdfeditor.temp_app
+
+          import android.net.Uri
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+          import java.io.File
+          import java.io.FileOutputStream
+
+          class MainActivity : FlutterActivity() {
+              private val CHANNEL = "com.nabilainas.pdfeditor/open_pdf"
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      if (call.method == "getInitialPdfPath") {
+                          result.success(resolveIncomingPdfPath())
+                      } else {
+                          result.notImplemented()
+                      }
+                  }
+              }
+
+              private fun resolveIncomingPdfPath(): String? {
+                  val uri: Uri = intent?.data ?: return null
+                  return try {
+                      val inputStream = contentResolver.openInputStream(uri) ?: return null
+                      val outFile = File(cacheDir, "shared_input.pdf")
+                      FileOutputStream(outFile).use { output ->
+                          inputStream.copyTo(output)
+                      }
+                      outFile.absolutePath
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+          }
+          '''
+          open(path, 'w').write(content)
+          PYEOF
+          python3 /tmp/write_main_activity.py
 
       - name: Installer les dépendances
         working-directory: temp_app
