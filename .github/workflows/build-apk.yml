@@ -23,18 +23,15 @@ jobs:
           cp -r lib/. temp_app/lib/
           cp pubspec.yaml temp_app/pubspec.yaml
 
-      - name: Forcer le SDK Android pour tous les modules (app + bibliothèques)
+      - name: Forcer le SDK Android pour tous les modules
         run: |
-          cat >> temp_app/android/build.gradle.kts << 'EOF'
-
-subprojects {
-    afterEvaluate {
-        extensions.findByType<com.android.build.gradle.BaseExtension>()?.let {
-            it.compileSdkVersion(36)
-        }
-    }
-}
-EOF
+          echo 'subprojects {' >> temp_app/android/build.gradle.kts
+          echo '    afterEvaluate {' >> temp_app/android/build.gradle.kts
+          echo '        extensions.findByType(com.android.build.gradle.BaseExtension::class.java)?.let {' >> temp_app/android/build.gradle.kts
+          echo '            it.compileSdkVersion(36)' >> temp_app/android/build.gradle.kts
+          echo '        }' >> temp_app/android/build.gradle.kts
+          echo '    }' >> temp_app/android/build.gradle.kts
+          echo '}' >> temp_app/android/build.gradle.kts
 
       - name: Installer les dépendances
         working-directory: temp_app
