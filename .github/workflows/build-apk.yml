@@ -1,0 +1,39 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Générer la structure Android standard
+        run: |
+          flutter create --platforms=android --org com.nabilainas.pdfeditor temp_app
+          cp -r lib/. temp_app/lib/
+          cp pubspec.yaml temp_app/pubspec.yaml
+
+      - name: Installer les dépendances
+        working-directory: temp_app
+        run: flutter pub get
+
+      - name: Compiler l'APK
+        working-directory: temp_app
+        run: flutter build apk --release
+
+      - name: Publier l'APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-pdf-apk
+          path: temp_app/build/app/outputs/flutter-apk/app-release.apk
