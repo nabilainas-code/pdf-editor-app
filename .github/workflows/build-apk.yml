@@ -1,4 +1,5 @@
-name: Build APK- 
+
+name: Build APK
 
 on:
   push:
@@ -27,6 +28,25 @@ jobs:
       - name: Autoriser l'accès à internet
         run: |
           sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />' temp_app/android/app/src/main/AndroidManifest.xml
+
+      - name: Permettre d'ouvrir des PDF depuis d'autres apps
+        run: |
+          cat > /tmp/fix_manifest.py << 'PYEOF'
+          path = 'temp_app/android/app/src/main/AndroidManifest.xml'
+          content = open(path).read()
+          intent_filter = '''
+                  <intent-filter>
+                      <action android:name="android.intent.action.VIEW" />
+                      <action android:name="android.intent.action.SEND" />
+                      <category android:name="android.intent.category.DEFAULT" />
+                      <category android:name="android.intent.category.BROWSABLE" />
+                      <data android:mimeType="application/pdf" />
+                  </intent-filter>
+          '''
+          content = content.replace('</activity>', intent_filter + '        </activity>', 1)
+          open(path, 'w').write(content)
+          PYEOF
+          python3 /tmp/fix_manifest.py
 
       - name: Installer les dépendances
         working-directory: temp_app
