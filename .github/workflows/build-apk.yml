@@ -33,6 +33,7 @@ jobs:
           intent_filter = '''
                   <intent-filter>
                       <action android:name="android.intent.action.VIEW" />
+                      <action android:name="android.intent.action.SEND" />
                       <category android:name="android.intent.category.DEFAULT" />
                       <category android:name="android.intent.category.BROWSABLE" />
                       <data android:mimeType="application/pdf" />
@@ -49,7 +50,9 @@ jobs:
           path = 'temp_app/android/app/src/main/kotlin/com/nabilainas/pdfeditor/temp_app/MainActivity.kt'
           content = '''package com.nabilainas.pdfeditor.temp_app
 
+          import android.content.Intent
           import android.net.Uri
+          import android.os.Build
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
@@ -71,7 +74,19 @@ jobs:
               }
 
               private fun resolveIncomingPdfPath(): String? {
-                  val uri: Uri = intent?.data ?: return null
+                  val uri: Uri? = when (intent?.action) {
+                      Intent.ACTION_VIEW -> intent?.data
+                      Intent.ACTION_SEND -> {
+                          if (Build.VERSION.SDK_INT >= 33) {
+                              intent?.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                          } else {
+                              @Suppress("DEPRECATION")
+                              intent?.getParcelableExtra(Intent.EXTRA_STREAM)
+                          }
+                      }
+                      else -> null
+                  }
+                  if (uri == null) return null
                   return try {
                       val inputStream = contentResolver.openInputStream(uri) ?: return null
                       val outFile = File(cacheDir, "shared_input.pdf")
