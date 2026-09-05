@@ -2,6 +2,8 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 const _channel = MethodChannel("com.nabilainas.pdfeditor/open_pdf");
@@ -9,7 +11,7 @@ const _channel = MethodChannel("com.nabilainas.pdfeditor/open_pdf");
 void main() => runApp(const MaterialApp(home: Accueil()));
 
 class MotDetecte {
-  final String texte;
+  String texte;
   final Rect zone;
   MotDetecte(this.texte, this.zone);
 }
@@ -22,15 +24,23 @@ class Accueil extends StatefulWidget {
 }
 
 class _AccueilState extends State<Accueil> {
+  PdfDocument? document;
   List<MotDetecte> mots = [];
   Size taillePage = const Size(595, 842);
   String statut = "Chargement...";
   MotDetecte? motSelectionne;
+  bool enregistrementEnCours = false;
 
   @override
   void initState() {
     super.initState();
     _init();
+  }
+
+  @override
+  void dispose() {
+    document?.dispose();
+    super.dispose();
   }
 
   Future<void> _init() async {
@@ -63,11 +73,11 @@ class _AccueilState extends State<Accueil> {
 
   Future<void> _analyser(Uint8List octets) async {
     try {
-      final document = PdfDocument(inputBytes: octets);
-      final extracteur = PdfTextExtractor(document);
+      final doc = PdfDocument(inputBytes: octets);
+      final extracteur = PdfTextExtractor(doc);
       final lignes = extracteur.extractTextLines(startPageIndex: 0, endPageIndex: 0);
 
-      final page = document.pages[0];
+      final page = doc.pages[0];
       final trouves = <MotDetecte>[];
 
       for (final ligne in lignes) {
@@ -86,21 +96,117 @@ class _AccueilState extends State<Accueil> {
       }
 
       setState(() {
+        document = doc;
         mots = trouves;
         taillePage = Size(page.size.width, page.size.height);
         statut = "${trouves.length} mot(s) détecté(s)";
       });
-
-      document.dispose();
     } catch (e) {
       setState(() => statut = "Erreur d'analyse : $e");
+    }
+  }
+
+  Future<void> _modifierMot(MotDetecte mot) async {
+    final controleur = TextEditingController(text: mot.texte);
+    final nouveauTexte = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Modifier le mot"),
+        content: TextField(controller: controleur, autofocus: true),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Annuler"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controleur.text),
+            child: const Text("Valider"),
+          ),
+        ],
+      ),
+    );
+
+    if (nouveauTexte == null) return;
+    final texteNettoye = nouveauTexte.trim();
+    if (texteNettoye.isEmpty || texteNettoye == mot.texte) return;
+
+    final doc = document;
+    if (doc == null) return;
+
+    final page = doc.pages[0];
+    final zoneCouverture = Rect.fromLTWH(
+      mot.zone.left - 1,
+      mot.zone.top - 1,
+      mot.zone.width + 2,
+      mot.zone.height + 2,
+    );
+
+    page.graphics.drawRectangle(
+      brush: PdfSolidBrush(PdfColor(255, 255, 255)),
+      bounds: zoneCouverture,
+    );
+
+    page.graphics.drawString(
+      texteNettoye,
+      PdfStandardFont(PdfFontFamily.helvetica, mot.zone.height * 0.75),
+      bounds: mot.zone,
+      brush: PdfSolidBrush(PdfColor(0, 0, 0)),
+      format: PdfStringFormat(
+        alignment: PdfTextAlignment.left,
+        lineAlignment: PdfVerticalAlignment.middle,
+      ),
+    );
+
+    setState(() {
+      mot.texte = texteNettoye;
+      motSelectionne = mot;
+    });
+  }
+
+  Future<void> _enregistrer() async {
+    final doc = document;
+    if (doc == null) return;
+
+    setState(() => enregistrementEnCours = true);
+    try {
+      final List<int> octets = await doc.save();
+      final dossier = await getTemporaryDirectory();
+      final horodatage = DateTime.now().millisecondsSinceEpoch;
+      final fichier = File('${dossier.path}/pdf_modifie_$horodatage.pdf');
+      await fichier.writeAsBytes(octets, flush: true);
+      await Share.shareXFiles([XFile(fichier.path)], text: "PDF modifié");
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Erreur d'enregistrement : $e")),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => enregistrementEnCours = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Mon éditeur PDF")),
+      appBar: AppBar(
+        title: const Text("Mon éditeur PDF"),
+        actions: [
+          IconButton(
+            icon: enregistrementEnCours
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.save),
+            tooltip: "Enregistrer et partager",
+            onPressed: (document == null || enregistrementEnCours)
+                ? null
+                : _enregistrer,
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
@@ -130,8 +236,7 @@ class _AccueilState extends State<Accueil> {
                                   width: mot.zone.width * echelle,
                                   height: mot.zone.height * echelle,
                                   child: GestureDetector(
-                                    onTap: () =>
-                                        setState(() => motSelectionne = mot),
+                                    onTap: () => _modifierMot(mot),
                                     child: Container(
                                       decoration: BoxDecoration(
                                         border: Border.all(
