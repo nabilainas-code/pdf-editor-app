@@ -104,6 +104,15 @@ jobs:
           PYEOF
           python3 /tmp/write_main_activity.py
 
+      - name: Ignorer les classes ML Kit optionnelles non utilisées (R8)
+        run: |
+          cat >> temp_app/android/app/proguard-rules.pro << 'EOF'
+          -dontwarn com.google.mlkit.vision.text.chinese.**
+          -dontwarn com.google.mlkit.vision.text.devanagari.**
+          -dontwarn com.google.mlkit.vision.text.japanese.**
+          -dontwarn com.google.mlkit.vision.text.korean.**
+          EOF
+
       - name: Installer les dépendances
         working-directory: temp_app
         run: flutter pub get
