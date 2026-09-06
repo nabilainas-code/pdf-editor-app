@@ -1,8 +1,12 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
+import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
@@ -30,6 +34,10 @@ class _AccueilState extends State<Accueil> {
   String statut = "Chargement...";
   MotDetecte? motSelectionne;
   bool enregistrementEnCours = false;
+
+  Uint8List? imageDeFond;
+  img.Image? imageDecodee;
+  double echelleOcr = 1;
 
   @override
   void initState() {
@@ -71,19 +79,43 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  Future<void> _importerDocument() async {
+    try {
+      final resultat = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf'],
+      );
+      final chemin = resultat?.files.single.path;
+      if (chemin == null) return;
+      setState(() {
+        motSelectionne = null;
+        statut = "Chargement...";
+      });
+      await _analyser(File(chemin).readAsBytesSync());
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Erreur d'importation : $e")),
+        );
+      }
+    }
+  }
+
   Future<void> _analyser(Uint8List octets) async {
+    document?.dispose();
+    document = null;
     try {
       final doc = PdfDocument(inputBytes: octets);
       final extracteur = PdfTextExtractor(doc);
       final lignes = extracteur.extractTextLines(startPageIndex: 0, endPageIndex: 0);
 
       final page = doc.pages[0];
-      final trouves = <MotDetecte>[];
+      final trouvesTexte = <MotDetecte>[];
 
       for (final ligne in lignes) {
         for (final mot in ligne.wordCollection) {
           if (mot.text.trim().isEmpty) continue;
-          trouves.add(MotDetecte(
+          trouvesTexte.add(MotDetecte(
             mot.text,
             Rect.fromLTWH(
               mot.bounds.left,
@@ -95,15 +127,98 @@ class _AccueilState extends State<Accueil> {
         }
       }
 
+      if (trouvesTexte.isNotEmpty) {
+        setState(() {
+          document = doc;
+          mots = trouvesTexte;
+          taillePage = Size(page.size.width, page.size.height);
+          imageDeFond = null;
+          imageDecodee = null;
+          motSelectionne = null;
+          statut = "${trouvesTexte.length} mot(s) détecté(s)";
+        });
+        return;
+      }
+
+      setState(() => statut = "Page scannée détectée, analyse OCR en cours...");
+      await _analyserParOcr(doc, page);
+    } catch (e) {
+      setState(() => statut = "Erreur d'analyse : $e");
+    }
+  }
+
+  Future<void> _analyserParOcr(PdfDocument doc, PdfPage page) async {
+    const dpi = 200.0;
+    TextRecognizer? recognizer;
+    try {
+      final octetsDoc = Uint8List.fromList(await doc.save());
+
+      PdfRaster? raster;
+      await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
+        raster = r;
+        break;
+      }
+      if (raster == null) {
+        throw Exception("Impossible de générer l'image de la page");
+      }
+
+      final pngOctets = await raster.toPng();
+      final dossier = await getTemporaryDirectory();
+      final fichierImage = File(
+          '${dossier.path}/page_ocr_${DateTime.now().millisecondsSinceEpoch}.png');
+      await fichierImage.writeAsBytes(pngOctets, flush: true);
+
+      recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+      final texteReconnu = await recognizer.processImage(
+        InputImage.fromFilePath(fichierImage.path),
+      );
+
+      final echelle = dpi / 72.0;
+      final trouves = <MotDetecte>[];
+      for (final bloc in texteReconnu.blocks) {
+        for (final ligne in bloc.lines) {
+          for (final element in ligne.elements) {
+            final b = element.boundingBox;
+            trouves.add(MotDetecte(
+              element.text,
+              Rect.fromLTWH(
+                b.left / echelle,
+                b.top / echelle,
+                b.width / echelle,
+                b.height / echelle,
+              ),
+            ));
+          }
+        }
+      }
+
       setState(() {
         document = doc;
         mots = trouves;
         taillePage = Size(page.size.width, page.size.height);
-        statut = "${trouves.length} mot(s) détecté(s)";
+        imageDeFond = pngOctets;
+        imageDecodee = img.decodePng(pngOctets);
+        echelleOcr = echelle;
+        motSelectionne = null;
+        statut = "${trouves.length} mot(s) détecté(s) (OCR)";
       });
     } catch (e) {
-      setState(() => statut = "Erreur d'analyse : $e");
+      setState(() => statut = "Erreur OCR : $e");
+    } finally {
+      await recognizer?.close();
     }
+  }
+
+  PdfColor _couleurDeFond(MotDetecte mot) {
+    final image = imageDecodee;
+    if (image == null) return PdfColor(255, 255, 255);
+
+    final x = ((mot.zone.left + mot.zone.width / 2) * echelleOcr)
+        .round()
+        .clamp(0, image.width - 1);
+    final y = ((mot.zone.top * echelleOcr) - 4).round().clamp(0, image.height - 1);
+    final pixel = image.getPixel(x, y);
+    return PdfColor(pixel.r.toInt(), pixel.g.toInt(), pixel.b.toInt());
   }
 
   Future<void> _modifierMot(MotDetecte mot) async {
@@ -142,7 +257,7 @@ class _AccueilState extends State<Accueil> {
     );
 
     page.graphics.drawRectangle(
-      brush: PdfSolidBrush(PdfColor(255, 255, 255)),
+      brush: PdfSolidBrush(_couleurDeFond(mot)),
       bounds: zoneCouverture,
     );
 
@@ -193,6 +308,11 @@ class _AccueilState extends State<Accueil> {
         title: const Text("Mon éditeur PDF"),
         actions: [
           IconButton(
+            icon: const Icon(Icons.folder_open),
+            tooltip: "Importer un document",
+            onPressed: _importerDocument,
+          ),
+          IconButton(
             icon: enregistrementEnCours
                 ? const SizedBox(
                     width: 20,
@@ -228,7 +348,11 @@ class _AccueilState extends State<Accueil> {
                           height: taillePage.height * echelle,
                           child: Stack(
                             children: [
-                              Container(color: Colors.white),
+                              SizedBox.expand(
+                                child: imageDeFond != null
+                                    ? Image.memory(imageDeFond!, fit: BoxFit.fill)
+                                    : Container(color: Colors.white),
+                              ),
                               for (final mot in mots)
                                 Positioned(
                                   left: mot.zone.left * echelle,
