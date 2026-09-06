@@ -56,6 +56,8 @@ class _AccueilState extends State<Accueil> {
 
   static const double _pasDeplacement = 3.0;
 
+  bool _occupe = false;
+
   @override
   void initState() {
     super.initState();
@@ -413,20 +415,30 @@ class _AccueilState extends State<Accueil> {
 
   Future<void> _annuler() async {
     final doc = document;
-    if (doc == null || historique.isEmpty) return;
-    final etatActuel = await _etatActuel(doc);
-    final precedent = historique.removeLast();
-    setState(() => futur.add(etatActuel));
-    await _restaurerEtat(precedent);
+    if (doc == null || historique.isEmpty || _occupe) return;
+    setState(() => _occupe = true);
+    try {
+      final etatActuel = await _etatActuel(doc);
+      final precedent = historique.removeLast();
+      setState(() => futur.add(etatActuel));
+      await _restaurerEtat(precedent);
+    } finally {
+      setState(() => _occupe = false);
+    }
   }
 
   Future<void> _retablir() async {
     final doc = document;
-    if (doc == null || futur.isEmpty) return;
-    final etatActuel = await _etatActuel(doc);
-    final suivant = futur.removeLast();
-    setState(() => historique.add(etatActuel));
-    await _restaurerEtat(suivant);
+    if (doc == null || futur.isEmpty || _occupe) return;
+    setState(() => _occupe = true);
+    try {
+      final etatActuel = await _etatActuel(doc);
+      final suivant = futur.removeLast();
+      setState(() => historique.add(etatActuel));
+      await _restaurerEtat(suivant);
+    } finally {
+      setState(() => _occupe = false);
+    }
   }
 
   Future<void> _modifierMot(MotDetecte mot) async {
@@ -480,95 +492,103 @@ class _AccueilState extends State<Accueil> {
     if (texteNettoye == mot.texte && grasFinal == mot.gras) return;
 
     final doc = document;
-    if (doc == null) return;
+    if (doc == null || _occupe) return;
+    setState(() => _occupe = true);
+    try {
+      historique.add(await _etatActuel(doc));
+      futur.clear();
 
-    historique.add(await _etatActuel(doc));
-    futur.clear();
-
-    final page = doc.pages[0];
-    final zoneCouverture = Rect.fromLTWH(
-      mot.zone.left - 3,
-      mot.zone.top - 3,
-      mot.zone.width + 6,
-      mot.zone.height + 6,
-    );
-
-    page.graphics.drawRectangle(
-      brush: PdfSolidBrush(_couleurDeFond(mot)),
-      bounds: zoneCouverture,
-    );
-
-    mot.gras = grasFinal;
-
-    if (texteNettoye.isNotEmpty) {
-      page.graphics.drawString(
-        texteNettoye,
-        _police(mot),
-        bounds: mot.zone,
-        brush: PdfSolidBrush(PdfColor(0, 0, 0)),
-        format: PdfStringFormat(
-          alignment: PdfTextAlignment.left,
-          lineAlignment: PdfVerticalAlignment.middle,
-        ),
+      final page = doc.pages[0];
+      final zoneCouverture = Rect.fromLTWH(
+        mot.zone.left - 3,
+        mot.zone.top - 3,
+        mot.zone.width + 6,
+        mot.zone.height + 6,
       );
-    }
 
-    setState(() {
-      mot.texte = texteNettoye;
-      motSelectionne = texteNettoye.isEmpty ? null : mot;
-    });
+      page.graphics.drawRectangle(
+        brush: PdfSolidBrush(_couleurDeFond(mot)),
+        bounds: zoneCouverture,
+      );
 
-    if (imageDeFond != null) {
-      await _rafraichirApercuOcr(doc);
+      mot.gras = grasFinal;
+
+      if (texteNettoye.isNotEmpty) {
+        page.graphics.drawString(
+          texteNettoye,
+          _police(mot),
+          bounds: mot.zone,
+          brush: PdfSolidBrush(PdfColor(0, 0, 0)),
+          format: PdfStringFormat(
+            alignment: PdfTextAlignment.left,
+            lineAlignment: PdfVerticalAlignment.middle,
+          ),
+        );
+      }
+
+      setState(() {
+        mot.texte = texteNettoye;
+        motSelectionne = texteNettoye.isEmpty ? null : mot;
+      });
+
+      if (imageDeFond != null) {
+        await _rafraichirApercuOcr(doc);
+      }
+    } finally {
+      setState(() => _occupe = false);
     }
   }
 
   Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) async {
     if (dx == 0 && dy == 0) return;
     final doc = document;
-    if (doc == null) return;
+    if (doc == null || _occupe) return;
+    setState(() => _occupe = true);
+    try {
+      historique.add(await _etatActuel(doc));
+      futur.clear();
 
-    historique.add(await _etatActuel(doc));
-    futur.clear();
-
-    final page = doc.pages[0];
-    final ancienneZone = mot.zone;
-    final zoneCouverture = Rect.fromLTWH(
-      ancienneZone.left - 3,
-      ancienneZone.top - 3,
-      ancienneZone.width + 6,
-      ancienneZone.height + 6,
-    );
-
-    page.graphics.drawRectangle(
-      brush: PdfSolidBrush(_couleurDeFond(mot)),
-      bounds: zoneCouverture,
-    );
-
-    final nouvelleZone = Rect.fromLTWH(
-      ancienneZone.left + dx,
-      ancienneZone.top + dy,
-      ancienneZone.width,
-      ancienneZone.height,
-    );
-
-    if (mot.texte.isNotEmpty) {
-      page.graphics.drawString(
-        mot.texte,
-        _police(mot),
-        bounds: nouvelleZone,
-        brush: PdfSolidBrush(PdfColor(0, 0, 0)),
-        format: PdfStringFormat(
-          alignment: PdfTextAlignment.left,
-          lineAlignment: PdfVerticalAlignment.middle,
-        ),
+      final page = doc.pages[0];
+      final ancienneZone = mot.zone;
+      final zoneCouverture = Rect.fromLTWH(
+        ancienneZone.left - 3,
+        ancienneZone.top - 3,
+        ancienneZone.width + 6,
+        ancienneZone.height + 6,
       );
-    }
 
-    setState(() => mot.zone = nouvelleZone);
+      page.graphics.drawRectangle(
+        brush: PdfSolidBrush(_couleurDeFond(mot)),
+        bounds: zoneCouverture,
+      );
 
-    if (imageDeFond != null) {
-      await _rafraichirApercuOcr(doc);
+      final nouvelleZone = Rect.fromLTWH(
+        ancienneZone.left + dx,
+        ancienneZone.top + dy,
+        ancienneZone.width,
+        ancienneZone.height,
+      );
+
+      if (mot.texte.isNotEmpty) {
+        page.graphics.drawString(
+          mot.texte,
+          _police(mot),
+          bounds: nouvelleZone,
+          brush: PdfSolidBrush(PdfColor(0, 0, 0)),
+          format: PdfStringFormat(
+            alignment: PdfTextAlignment.left,
+            lineAlignment: PdfVerticalAlignment.middle,
+          ),
+        );
+      }
+
+      setState(() => mot.zone = nouvelleZone);
+
+      if (imageDeFond != null) {
+        await _rafraichirApercuOcr(doc);
+      }
+    } finally {
+      setState(() => _occupe = false);
     }
   }
 
@@ -577,39 +597,43 @@ class _AccueilState extends State<Accueil> {
   /// ligne de texte et qui n'est donc pas sélectionnable autrement.
   Future<void> _ajouterZoneEffacee(double xPage, double yPage) async {
     final doc = document;
-    if (doc == null) return;
+    if (doc == null || _occupe) return;
+    setState(() => _occupe = true);
+    try {
+      historique.add(await _etatActuel(doc));
+      futur.clear();
 
-    historique.add(await _etatActuel(doc));
-    futur.clear();
+      const largeur = 30.0;
+      const hauteur = 14.0;
+      final zone = Rect.fromLTWH(
+        xPage - largeur / 2,
+        yPage - hauteur / 2,
+        largeur,
+        hauteur,
+      );
 
-    const largeur = 30.0;
-    const hauteur = 14.0;
-    final zone = Rect.fromLTWH(
-      xPage - largeur / 2,
-      yPage - hauteur / 2,
-      largeur,
-      hauteur,
-    );
+      final page = doc.pages[0];
+      page.graphics.drawRectangle(
+        brush: PdfSolidBrush(couleurPage),
+        bounds: Rect.fromLTWH(
+          zone.left - 2,
+          zone.top - 2,
+          zone.width + 4,
+          zone.height + 4,
+        ),
+      );
 
-    final page = doc.pages[0];
-    page.graphics.drawRectangle(
-      brush: PdfSolidBrush(couleurPage),
-      bounds: Rect.fromLTWH(
-        zone.left - 2,
-        zone.top - 2,
-        zone.width + 4,
-        zone.height + 4,
-      ),
-    );
+      final nouvelleLigne = MotDetecte("", zone);
+      setState(() {
+        mots = [...mots, nouvelleLigne];
+        motSelectionne = nouvelleLigne;
+      });
 
-    final nouvelleLigne = MotDetecte("", zone);
-    setState(() {
-      mots = [...mots, nouvelleLigne];
-      motSelectionne = nouvelleLigne;
-    });
-
-    if (imageDeFond != null) {
-      await _rafraichirApercuOcr(doc);
+      if (imageDeFond != null) {
+        await _rafraichirApercuOcr(doc);
+      }
+    } finally {
+      setState(() => _occupe = false);
     }
   }
 
@@ -645,12 +669,12 @@ class _AccueilState extends State<Accueil> {
           IconButton(
             icon: const Icon(Icons.undo),
             tooltip: "Annuler",
-            onPressed: historique.isEmpty ? null : _annuler,
+            onPressed: (historique.isEmpty || _occupe) ? null : _annuler,
           ),
           IconButton(
             icon: const Icon(Icons.redo),
             tooltip: "Rétablir",
-            onPressed: futur.isEmpty ? null : _retablir,
+            onPressed: (futur.isEmpty || _occupe) ? null : _retablir,
           ),
           IconButton(
             icon: const Icon(Icons.folder_open),
@@ -692,26 +716,34 @@ class _AccueilState extends State<Accueil> {
                       IconButton(
                         icon: const Icon(Icons.arrow_back, size: 20),
                         tooltip: "Déplacer à gauche",
-                        onPressed: () => _deplacerLigne(
-                            motSelectionne!, -_pasDeplacement, 0),
+                        onPressed: _occupe
+                            ? null
+                            : () => _deplacerLigne(
+                                motSelectionne!, -_pasDeplacement, 0),
                       ),
                       IconButton(
                         icon: const Icon(Icons.arrow_upward, size: 20),
                         tooltip: "Déplacer vers le haut",
-                        onPressed: () => _deplacerLigne(
-                            motSelectionne!, 0, -_pasDeplacement),
+                        onPressed: _occupe
+                            ? null
+                            : () => _deplacerLigne(
+                                motSelectionne!, 0, -_pasDeplacement),
                       ),
                       IconButton(
                         icon: const Icon(Icons.arrow_downward, size: 20),
                         tooltip: "Déplacer vers le bas",
-                        onPressed: () => _deplacerLigne(
-                            motSelectionne!, 0, _pasDeplacement),
+                        onPressed: _occupe
+                            ? null
+                            : () => _deplacerLigne(
+                                motSelectionne!, 0, _pasDeplacement),
                       ),
                       IconButton(
                         icon: const Icon(Icons.arrow_forward, size: 20),
                         tooltip: "Déplacer à droite",
-                        onPressed: () => _deplacerLigne(
-                            motSelectionne!, _pasDeplacement, 0),
+                        onPressed: _occupe
+                            ? null
+                            : () => _deplacerLigne(
+                                motSelectionne!, _pasDeplacement, 0),
                       ),
                       IconButton(
                         icon: const Icon(Icons.close, size: 20),
