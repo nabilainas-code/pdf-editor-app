@@ -16,8 +16,9 @@ void main() => runApp(const MaterialApp(home: Accueil()));
 
 class MotDetecte {
   String texte;
-  final Rect zone;
-  MotDetecte(this.texte, this.zone);
+  Rect zone;
+  bool gras;
+  MotDetecte(this.texte, this.zone, {this.gras = false});
 }
 
 class Etat {
@@ -48,6 +49,9 @@ class _AccueilState extends State<Accueil> {
 
   final List<Etat> historique = [];
   final List<Etat> futur = [];
+
+  MotDetecte? ligneEnDeplacement;
+  Offset deplacementEnCours = Offset.zero;
 
   @override
   void initState() {
@@ -134,6 +138,7 @@ class _AccueilState extends State<Accueil> {
             ligne.bounds.width,
             ligne.bounds.height,
           ),
+          gras: ligne.fontStyle.contains(PdfFontStyle.bold),
         ));
       }
 
@@ -155,6 +160,83 @@ class _AccueilState extends State<Accueil> {
     } catch (e) {
       setState(() => statut = "Erreur d'analyse : $e");
     }
+  }
+
+  /// Regroupe les fragments de ligne détectés par l'OCR qui appartiennent à
+  /// la même rangée horizontale (ex : une puce "-" séparée du texte qui suit).
+  List<MotDetecte> _fusionnerParRangee(List<MotDetecte> brutes) {
+    if (brutes.isEmpty) return brutes;
+    final triees = [...brutes]..sort((a, b) => a.zone.top.compareTo(b.zone.top));
+    final rangees = <List<MotDetecte>>[];
+
+    for (final ligne in triees) {
+      final centre = ligne.zone.top + ligne.zone.height / 2;
+      List<MotDetecte>? cible;
+      for (final rangee in rangees) {
+        final refCentre = rangee.first.zone.top + rangee.first.zone.height / 2;
+        final tolerance =
+            (rangee.first.zone.height + ligne.zone.height) / 2 * 0.6;
+        if ((centre - refCentre).abs() < tolerance) {
+          cible = rangee;
+          break;
+        }
+      }
+      if (cible != null) {
+        cible.add(ligne);
+      } else {
+        rangees.add([ligne]);
+      }
+    }
+
+    final resultat = <MotDetecte>[];
+    for (final rangee in rangees) {
+      rangee.sort((a, b) => a.zone.left.compareTo(b.zone.left));
+      final texte = rangee.map((l) => l.texte).join(' ');
+      var gauche = rangee.first.zone.left;
+      var haut = rangee.first.zone.top;
+      var droite = rangee.first.zone.left + rangee.first.zone.width;
+      var bas = rangee.first.zone.top + rangee.first.zone.height;
+      for (final l in rangee.skip(1)) {
+        if (l.zone.left < gauche) gauche = l.zone.left;
+        if (l.zone.top < haut) haut = l.zone.top;
+        final d = l.zone.left + l.zone.width;
+        final b = l.zone.top + l.zone.height;
+        if (d > droite) droite = d;
+        if (b > bas) bas = b;
+      }
+      resultat.add(MotDetecte(
+        texte,
+        Rect.fromLTWH(gauche, haut, droite - gauche, bas - haut),
+      ));
+    }
+    return resultat;
+  }
+
+  /// Estime si une zone de l'image scannée correspond à du texte gras, en
+  /// mesurant la densité de pixels sombres (une image scannée n'a pas de
+  /// métadonnées de police, contrairement à un PDF texte natif).
+  bool _detecterGras(img.Image image, Rect zonePdf, double echelle) {
+    final gauche = (zonePdf.left * echelle).round().clamp(0, image.width - 1);
+    final haut = (zonePdf.top * echelle).round().clamp(0, image.height - 1);
+    final droite = ((zonePdf.left + zonePdf.width) * echelle)
+        .round()
+        .clamp(gauche + 1, image.width);
+    final bas = ((zonePdf.top + zonePdf.height) * echelle)
+        .round()
+        .clamp(haut + 1, image.height);
+
+    var sombres = 0;
+    var total = 0;
+    for (var y = haut; y < bas; y += 2) {
+      for (var x = gauche; x < droite; x += 2) {
+        final pixel = image.getPixel(x, y);
+        final luminance = (pixel.r + pixel.g + pixel.b) / 3;
+        if (luminance < 140) sombres++;
+        total++;
+      }
+    }
+    if (total == 0) return false;
+    return (sombres / total) > 0.16;
   }
 
   Future<void> _analyserParOcr(PdfDocument doc, PdfPage page) async {
@@ -184,12 +266,12 @@ class _AccueilState extends State<Accueil> {
       );
 
       final echelle = dpi / 72.0;
-      final trouves = <MotDetecte>[];
+      final brutes = <MotDetecte>[];
       for (final bloc in texteReconnu.blocks) {
         for (final ligne in bloc.lines) {
           if (ligne.text.trim().isEmpty) continue;
           final b = ligne.boundingBox;
-          trouves.add(MotDetecte(
+          brutes.add(MotDetecte(
             ligne.text,
             Rect.fromLTWH(
               b.left / echelle,
@@ -201,15 +283,23 @@ class _AccueilState extends State<Accueil> {
         }
       }
 
+      final imageAnalysee = img.decodePng(pngOctets);
+      final fusionnees = _fusionnerParRangee(brutes);
+      if (imageAnalysee != null) {
+        for (final ligne in fusionnees) {
+          ligne.gras = _detecterGras(imageAnalysee, ligne.zone, echelle);
+        }
+      }
+
       setState(() {
         document = doc;
-        mots = trouves;
+        mots = fusionnees;
         taillePage = Size(page.size.width, page.size.height);
         imageDeFond = pngOctets;
-        imageDecodee = img.decodePng(pngOctets);
+        imageDecodee = imageAnalysee;
         echelleOcr = echelle;
         motSelectionne = null;
-        statut = "${trouves.length} ligne(s) détectée(s) (OCR)";
+        statut = "${fusionnees.length} ligne(s) détectée(s) (OCR)";
       });
     } catch (e) {
       setState(() => statut = "Erreur OCR : $e");
@@ -249,9 +339,18 @@ class _AccueilState extends State<Accueil> {
     return PdfColor(pixel.r.toInt(), pixel.g.toInt(), pixel.b.toInt());
   }
 
+  PdfStandardFont _police(MotDetecte mot) {
+    return PdfStandardFont(
+      PdfFontFamily.helvetica,
+      mot.zone.height * 0.75,
+      style: mot.gras ? PdfFontStyle.bold : PdfFontStyle.regular,
+    );
+  }
+
   Future<Etat> _etatActuel(PdfDocument doc) async {
     final octetsDocument = Uint8List.fromList(await doc.save());
-    final motsCopie = mots.map((m) => MotDetecte(m.texte, m.zone)).toList();
+    final motsCopie =
+        mots.map((m) => MotDetecte(m.texte, m.zone, gras: m.gras)).toList();
     return Etat(octetsDocument, motsCopie, imageDeFond);
   }
 
@@ -260,7 +359,9 @@ class _AccueilState extends State<Accueil> {
     final doc = PdfDocument(inputBytes: etat.octetsDocument);
     setState(() {
       document = doc;
-      mots = etat.mots.map((m) => MotDetecte(m.texte, m.zone)).toList();
+      mots = etat.mots
+          .map((m) => MotDetecte(m.texte, m.zone, gras: m.gras))
+          .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
       motSelectionne = null;
@@ -287,31 +388,52 @@ class _AccueilState extends State<Accueil> {
 
   Future<void> _modifierMot(MotDetecte mot) async {
     final controleur = TextEditingController(text: mot.texte);
-    final nouveauTexte = await showDialog<String>(
+    var grasChoisi = mot.gras;
+    final resultat = await showDialog<Map<String, Object>>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Modifier la ligne"),
-        content: TextField(controller: controleur, autofocus: true),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("Annuler"),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text("Modifier la ligne"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: controleur, autofocus: true),
+              Row(
+                children: [
+                  Checkbox(
+                    value: grasChoisi,
+                    onChanged: (v) =>
+                        setDialogState(() => grasChoisi = v ?? false),
+                  ),
+                  const Text("Gras"),
+                ],
+              ),
+            ],
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, ""),
-            child: const Text("Supprimer"),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controleur.text),
-            child: const Text("Valider"),
-          ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler"),
+            ),
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(ctx, {"texte": "", "gras": grasChoisi}),
+              child: const Text("Supprimer"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                  ctx, {"texte": controleur.text, "gras": grasChoisi}),
+              child: const Text("Valider"),
+            ),
+          ],
+        ),
       ),
     );
 
-    if (nouveauTexte == null) return;
-    final texteNettoye = nouveauTexte.trim();
-    if (texteNettoye == mot.texte) return;
+    if (resultat == null) return;
+    final texteNettoye = (resultat["texte"] as String).trim();
+    final grasFinal = resultat["gras"] as bool;
+    if (texteNettoye == mot.texte && grasFinal == mot.gras) return;
 
     final doc = document;
     if (doc == null) return;
@@ -332,10 +454,12 @@ class _AccueilState extends State<Accueil> {
       bounds: zoneCouverture,
     );
 
+    mot.gras = grasFinal;
+
     if (texteNettoye.isNotEmpty) {
       page.graphics.drawString(
         texteNettoye,
-        PdfStandardFont(PdfFontFamily.helvetica, mot.zone.height * 0.75),
+        _police(mot),
         bounds: mot.zone,
         brush: PdfSolidBrush(PdfColor(0, 0, 0)),
         format: PdfStringFormat(
@@ -349,6 +473,55 @@ class _AccueilState extends State<Accueil> {
       mot.texte = texteNettoye;
       motSelectionne = texteNettoye.isEmpty ? null : mot;
     });
+
+    if (imageDeFond != null) {
+      await _rafraichirApercuOcr(doc);
+    }
+  }
+
+  Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) async {
+    if (dx == 0 && dy == 0) return;
+    final doc = document;
+    if (doc == null) return;
+
+    historique.add(await _etatActuel(doc));
+    futur.clear();
+
+    final page = doc.pages[0];
+    final ancienneZone = mot.zone;
+    final zoneCouverture = Rect.fromLTWH(
+      ancienneZone.left - 1,
+      ancienneZone.top - 1,
+      ancienneZone.width + 2,
+      ancienneZone.height + 2,
+    );
+
+    page.graphics.drawRectangle(
+      brush: PdfSolidBrush(_couleurDeFond(mot)),
+      bounds: zoneCouverture,
+    );
+
+    final nouvelleZone = Rect.fromLTWH(
+      ancienneZone.left + dx,
+      ancienneZone.top + dy,
+      ancienneZone.width,
+      ancienneZone.height,
+    );
+
+    if (mot.texte.isNotEmpty) {
+      page.graphics.drawString(
+        mot.texte,
+        _police(mot),
+        bounds: nouvelleZone,
+        brush: PdfSolidBrush(PdfColor(0, 0, 0)),
+        format: PdfStringFormat(
+          alignment: PdfTextAlignment.left,
+          lineAlignment: PdfVerticalAlignment.middle,
+        ),
+      );
+    }
+
+    setState(() => mot.zone = nouvelleZone);
 
     if (imageDeFond != null) {
       await _rafraichirApercuOcr(doc);
@@ -442,12 +615,34 @@ class _AccueilState extends State<Accueil> {
                               ),
                               for (final mot in mots)
                                 Positioned(
-                                  left: mot.zone.left * echelle,
-                                  top: mot.zone.top * echelle,
+                                  left: mot.zone.left * echelle +
+                                      (mot == ligneEnDeplacement
+                                          ? deplacementEnCours.dx
+                                          : 0),
+                                  top: mot.zone.top * echelle +
+                                      (mot == ligneEnDeplacement
+                                          ? deplacementEnCours.dy
+                                          : 0),
                                   width: mot.zone.width * echelle,
                                   height: mot.zone.height * echelle,
                                   child: GestureDetector(
                                     onTap: () => _modifierMot(mot),
+                                    onPanStart: (_) => setState(() {
+                                      ligneEnDeplacement = mot;
+                                      deplacementEnCours = Offset.zero;
+                                    }),
+                                    onPanUpdate: (details) => setState(() {
+                                      deplacementEnCours += details.delta;
+                                    }),
+                                    onPanEnd: (_) async {
+                                      final dx = deplacementEnCours.dx / echelle;
+                                      final dy = deplacementEnCours.dy / echelle;
+                                      setState(() {
+                                        ligneEnDeplacement = null;
+                                        deplacementEnCours = Offset.zero;
+                                      });
+                                      await _deplacerLigne(mot, dx, dy);
+                                    },
                                     child: Container(
                                       decoration: BoxDecoration(
                                         border: Border.all(
@@ -461,7 +656,14 @@ class _AccueilState extends State<Accueil> {
                                           ? null
                                           : FittedBox(
                                               fit: BoxFit.contain,
-                                              child: Text(mot.texte),
+                                              child: Text(
+                                                mot.texte,
+                                                style: TextStyle(
+                                                  fontWeight: mot.gras
+                                                      ? FontWeight.bold
+                                                      : FontWeight.normal,
+                                                ),
+                                              ),
                                             ),
                                     ),
                                   ),
