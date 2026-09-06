@@ -113,18 +113,16 @@ class _AccueilState extends State<Accueil> {
       final trouvesTexte = <MotDetecte>[];
 
       for (final ligne in lignes) {
-        for (final mot in ligne.wordCollection) {
-          if (mot.text.trim().isEmpty) continue;
-          trouvesTexte.add(MotDetecte(
-            mot.text,
-            Rect.fromLTWH(
-              mot.bounds.left,
-              mot.bounds.top,
-              mot.bounds.width,
-              mot.bounds.height,
-            ),
-          ));
-        }
+        if (ligne.text.trim().isEmpty) continue;
+        trouvesTexte.add(MotDetecte(
+          ligne.text,
+          Rect.fromLTWH(
+            ligne.bounds.left,
+            ligne.bounds.top,
+            ligne.bounds.width,
+            ligne.bounds.height,
+          ),
+        ));
       }
 
       if (trouvesTexte.isNotEmpty) {
@@ -135,7 +133,7 @@ class _AccueilState extends State<Accueil> {
           imageDeFond = null;
           imageDecodee = null;
           motSelectionne = null;
-          statut = "${trouvesTexte.length} mot(s) détecté(s)";
+          statut = "${trouvesTexte.length} ligne(s) détectée(s)";
         });
         return;
       }
@@ -177,18 +175,17 @@ class _AccueilState extends State<Accueil> {
       final trouves = <MotDetecte>[];
       for (final bloc in texteReconnu.blocks) {
         for (final ligne in bloc.lines) {
-          for (final element in ligne.elements) {
-            final b = element.boundingBox;
-            trouves.add(MotDetecte(
-              element.text,
-              Rect.fromLTWH(
-                b.left / echelle,
-                b.top / echelle,
-                b.width / echelle,
-                b.height / echelle,
-              ),
-            ));
-          }
+          if (ligne.text.trim().isEmpty) continue;
+          final b = ligne.boundingBox;
+          trouves.add(MotDetecte(
+            ligne.text,
+            Rect.fromLTWH(
+              b.left / echelle,
+              b.top / echelle,
+              b.width / echelle,
+              b.height / echelle,
+            ),
+          ));
         }
       }
 
@@ -200,13 +197,32 @@ class _AccueilState extends State<Accueil> {
         imageDecodee = img.decodePng(pngOctets);
         echelleOcr = echelle;
         motSelectionne = null;
-        statut = "${trouves.length} mot(s) détecté(s) (OCR)";
+        statut = "${trouves.length} ligne(s) détectée(s) (OCR)";
       });
     } catch (e) {
       setState(() => statut = "Erreur OCR : $e");
     } finally {
       await recognizer?.close();
     }
+  }
+
+  Future<void> _rafraichirApercuOcr(PdfDocument doc) async {
+    const dpi = 200.0;
+    try {
+      final octetsDoc = Uint8List.fromList(await doc.save());
+      PdfRaster? raster;
+      await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
+        raster = r;
+        break;
+      }
+      if (raster == null) return;
+      final pngOctets = await raster.toPng();
+      if (!mounted) return;
+      setState(() {
+        imageDeFond = pngOctets;
+        imageDecodee = img.decodePng(pngOctets);
+      });
+    } catch (_) {}
   }
 
   PdfColor _couleurDeFond(MotDetecte mot) {
@@ -226,12 +242,16 @@ class _AccueilState extends State<Accueil> {
     final nouveauTexte = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("Modifier le mot"),
+        title: const Text("Modifier la ligne"),
         content: TextField(controller: controleur, autofocus: true),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
             child: const Text("Annuler"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ""),
+            child: const Text("Supprimer"),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, controleur.text),
@@ -243,7 +263,7 @@ class _AccueilState extends State<Accueil> {
 
     if (nouveauTexte == null) return;
     final texteNettoye = nouveauTexte.trim();
-    if (texteNettoye.isEmpty || texteNettoye == mot.texte) return;
+    if (texteNettoye == mot.texte) return;
 
     final doc = document;
     if (doc == null) return;
@@ -261,21 +281,27 @@ class _AccueilState extends State<Accueil> {
       bounds: zoneCouverture,
     );
 
-    page.graphics.drawString(
-      texteNettoye,
-      PdfStandardFont(PdfFontFamily.helvetica, mot.zone.height * 0.75),
-      bounds: mot.zone,
-      brush: PdfSolidBrush(PdfColor(0, 0, 0)),
-      format: PdfStringFormat(
-        alignment: PdfTextAlignment.left,
-        lineAlignment: PdfVerticalAlignment.middle,
-      ),
-    );
+    if (texteNettoye.isNotEmpty) {
+      page.graphics.drawString(
+        texteNettoye,
+        PdfStandardFont(PdfFontFamily.helvetica, mot.zone.height * 0.75),
+        bounds: mot.zone,
+        brush: PdfSolidBrush(PdfColor(0, 0, 0)),
+        format: PdfStringFormat(
+          alignment: PdfTextAlignment.left,
+          lineAlignment: PdfVerticalAlignment.middle,
+        ),
+      );
+    }
 
     setState(() {
       mot.texte = texteNettoye;
-      motSelectionne = mot;
+      motSelectionne = texteNettoye.isEmpty ? null : mot;
     });
+
+    if (imageDeFond != null) {
+      await _rafraichirApercuOcr(doc);
+    }
   }
 
   Future<void> _enregistrer() async {
@@ -332,7 +358,7 @@ class _AccueilState extends State<Accueil> {
           Padding(
             padding: const EdgeInsets.all(8),
             child: Text(
-              motSelectionne == null ? statut : "Mot : ${motSelectionne!.texte}",
+              motSelectionne == null ? statut : "Ligne : ${motSelectionne!.texte}",
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
           ),
