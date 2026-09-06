@@ -20,6 +20,13 @@ class MotDetecte {
   MotDetecte(this.texte, this.zone);
 }
 
+class Etat {
+  final Uint8List octetsDocument;
+  final List<MotDetecte> mots;
+  final Uint8List? image;
+  Etat(this.octetsDocument, this.mots, this.image);
+}
+
 class Accueil extends StatefulWidget {
   const Accueil({super.key});
 
@@ -38,6 +45,9 @@ class _AccueilState extends State<Accueil> {
   Uint8List? imageDeFond;
   img.Image? imageDecodee;
   double echelleOcr = 1;
+
+  final List<Etat> historique = [];
+  final List<Etat> futur = [];
 
   @override
   void initState() {
@@ -104,6 +114,8 @@ class _AccueilState extends State<Accueil> {
   Future<void> _analyser(Uint8List octets) async {
     document?.dispose();
     document = null;
+    historique.clear();
+    futur.clear();
     try {
       final doc = PdfDocument(inputBytes: octets);
       final extracteur = PdfTextExtractor(doc);
@@ -237,6 +249,42 @@ class _AccueilState extends State<Accueil> {
     return PdfColor(pixel.r.toInt(), pixel.g.toInt(), pixel.b.toInt());
   }
 
+  Future<Etat> _etatActuel(PdfDocument doc) async {
+    final octetsDocument = Uint8List.fromList(await doc.save());
+    final motsCopie = mots.map((m) => MotDetecte(m.texte, m.zone)).toList();
+    return Etat(octetsDocument, motsCopie, imageDeFond);
+  }
+
+  Future<void> _restaurerEtat(Etat etat) async {
+    document?.dispose();
+    final doc = PdfDocument(inputBytes: etat.octetsDocument);
+    setState(() {
+      document = doc;
+      mots = etat.mots.map((m) => MotDetecte(m.texte, m.zone)).toList();
+      imageDeFond = etat.image;
+      imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
+      motSelectionne = null;
+    });
+  }
+
+  Future<void> _annuler() async {
+    final doc = document;
+    if (doc == null || historique.isEmpty) return;
+    final etatActuel = await _etatActuel(doc);
+    final precedent = historique.removeLast();
+    setState(() => futur.add(etatActuel));
+    await _restaurerEtat(precedent);
+  }
+
+  Future<void> _retablir() async {
+    final doc = document;
+    if (doc == null || futur.isEmpty) return;
+    final etatActuel = await _etatActuel(doc);
+    final suivant = futur.removeLast();
+    setState(() => historique.add(etatActuel));
+    await _restaurerEtat(suivant);
+  }
+
   Future<void> _modifierMot(MotDetecte mot) async {
     final controleur = TextEditingController(text: mot.texte);
     final nouveauTexte = await showDialog<String>(
@@ -267,6 +315,9 @@ class _AccueilState extends State<Accueil> {
 
     final doc = document;
     if (doc == null) return;
+
+    historique.add(await _etatActuel(doc));
+    futur.clear();
 
     final page = doc.pages[0];
     final zoneCouverture = Rect.fromLTWH(
@@ -333,6 +384,16 @@ class _AccueilState extends State<Accueil> {
       appBar: AppBar(
         title: const Text("Mon éditeur PDF"),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.undo),
+            tooltip: "Annuler",
+            onPressed: historique.isEmpty ? null : _annuler,
+          ),
+          IconButton(
+            icon: const Icon(Icons.redo),
+            tooltip: "Rétablir",
+            onPressed: futur.isEmpty ? null : _retablir,
+          ),
           IconButton(
             icon: const Icon(Icons.folder_open),
             tooltip: "Importer un document",
