@@ -387,8 +387,12 @@ class _AccueilState extends State<Accueil> {
   }
 
   Future<void> _modifierMot(MotDetecte mot) async {
+    const pas = 3.0;
     final controleur = TextEditingController(text: mot.texte);
     var grasChoisi = mot.gras;
+    var dxChoisi = 0.0;
+    var dyChoisi = 0.0;
+
     final resultat = await showDialog<Map<String, Object>>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -408,6 +412,32 @@ class _AccueilState extends State<Accueil> {
                   const Text("Gras"),
                 ],
               ),
+              const SizedBox(height: 4),
+              Text(
+                "Position : ${dxChoisi >= 0 ? '+' : ''}${dxChoisi.toStringAsFixed(0)}, "
+                "${dyChoisi >= 0 ? '+' : ''}${dyChoisi.toStringAsFixed(0)}",
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_upward),
+                onPressed: () => setDialogState(() => dyChoisi -= pas),
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: () => setDialogState(() => dxChoisi -= pas),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.arrow_forward),
+                    onPressed: () => setDialogState(() => dxChoisi += pas),
+                  ),
+                ],
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_downward),
+                onPressed: () => setDialogState(() => dyChoisi += pas),
+              ),
             ],
           ),
           actions: [
@@ -416,13 +446,17 @@ class _AccueilState extends State<Accueil> {
               child: const Text("Annuler"),
             ),
             TextButton(
-              onPressed: () =>
-                  Navigator.pop(ctx, {"texte": "", "gras": grasChoisi}),
+              onPressed: () => Navigator.pop(
+                  ctx, {"texte": "", "gras": grasChoisi, "dx": 0.0, "dy": 0.0}),
               child: const Text("Supprimer"),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(
-                  ctx, {"texte": controleur.text, "gras": grasChoisi}),
+              onPressed: () => Navigator.pop(ctx, {
+                "texte": controleur.text,
+                "gras": grasChoisi,
+                "dx": dxChoisi,
+                "dy": dyChoisi,
+              }),
               child: const Text("Valider"),
             ),
           ],
@@ -433,7 +467,14 @@ class _AccueilState extends State<Accueil> {
     if (resultat == null) return;
     final texteNettoye = (resultat["texte"] as String).trim();
     final grasFinal = resultat["gras"] as bool;
-    if (texteNettoye == mot.texte && grasFinal == mot.gras) return;
+    final dx = resultat["dx"] as double;
+    final dy = resultat["dy"] as double;
+    if (texteNettoye == mot.texte &&
+        grasFinal == mot.gras &&
+        dx == 0 &&
+        dy == 0) {
+      return;
+    }
 
     final doc = document;
     if (doc == null) return;
@@ -442,11 +483,12 @@ class _AccueilState extends State<Accueil> {
     futur.clear();
 
     final page = doc.pages[0];
+    final ancienneZone = mot.zone;
     final zoneCouverture = Rect.fromLTWH(
-      mot.zone.left - 1,
-      mot.zone.top - 1,
-      mot.zone.width + 2,
-      mot.zone.height + 2,
+      ancienneZone.left - 1,
+      ancienneZone.top - 1,
+      ancienneZone.width + 2,
+      ancienneZone.height + 2,
     );
 
     page.graphics.drawRectangle(
@@ -455,12 +497,14 @@ class _AccueilState extends State<Accueil> {
     );
 
     mot.gras = grasFinal;
+    final nouvelleZone =
+        (dx != 0 || dy != 0) ? ancienneZone.translate(dx, dy) : ancienneZone;
 
     if (texteNettoye.isNotEmpty) {
       page.graphics.drawString(
         texteNettoye,
         _police(mot),
-        bounds: mot.zone,
+        bounds: nouvelleZone,
         brush: PdfSolidBrush(PdfColor(0, 0, 0)),
         format: PdfStringFormat(
           alignment: PdfTextAlignment.left,
@@ -471,6 +515,7 @@ class _AccueilState extends State<Accueil> {
 
     setState(() {
       mot.texte = texteNettoye;
+      mot.zone = nouvelleZone;
       motSelectionne = texteNettoye.isEmpty ? null : mot;
     });
 
