@@ -645,6 +645,16 @@ class _AccueilState extends State<Accueil> {
   Future<void> _ajouterZoneEffacee(double xPage, double yPage) async {
     final doc = document;
     if (doc == null || _occupe) return;
+
+    // Si l'appui long tombe sur une ligne déjà détectée, on ne crée pas de
+    // zone d'effacement par-dessus (ça effacerait de la vraie écriture) :
+    // l'appui long ne sert qu'à nettoyer les résidus hors de toute ligne.
+    const tolerance = 4.0;
+    final surLigneExistante = mots.any(
+      (m) => m.zone.inflate(tolerance).contains(Offset(xPage, yPage)),
+    );
+    if (surLigneExistante) return;
+
     setState(() => _occupe = true);
     try {
       historique.add(await _etatActuel(doc));
