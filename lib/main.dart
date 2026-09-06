@@ -377,12 +377,59 @@ class _AccueilState extends State<Accueil> {
     } catch (_) {}
   }
 
-  /// Couleur utilisée pour "effacer" une ligne. On utilise la couleur
-  /// dominante de toute la page (calculée une fois par _calculerCouleurPage)
-  /// plutôt qu'un échantillon local : un échantillon pris près d'une ligne
-  /// tombe trop souvent sur de l'encre selon l'endroit de la page et donne
-  /// un aplat gris/noir au lieu du fond réel.
-  PdfColor _couleurDeFond(MotDetecte mot) => couleurPage;
+  /// Couleur utilisée pour "effacer" une ligne. On échantillonne d'abord
+  /// juste autour de la zone (en ignorant les pixels sombres, donc l'encre)
+  /// pour coller aux petites variations locales du fond (scan pas
+  /// parfaitement uniforme), et on se rabat sur la couleur dominante de
+  /// toute la page si l'entourage est trop couvert d'encre pour être fiable.
+  PdfColor _couleurDeFond(MotDetecte mot) => _couleurLocale(mot.zone);
+
+  PdfColor _couleurLocale(Rect zonePdf) {
+    final image = imageDecodee;
+    if (image == null) return couleurPage;
+    final echelle = echelleOcr;
+
+    const marge = 12.0;
+    final gauche = ((zonePdf.left - marge) * echelle)
+        .round()
+        .clamp(0, image.width - 1);
+    final droite = ((zonePdf.right + marge) * echelle)
+        .round()
+        .clamp(0, image.width - 1);
+    final haut = ((zonePdf.top - marge) * echelle)
+        .round()
+        .clamp(0, image.height - 1);
+    final bas = ((zonePdf.bottom + marge) * echelle)
+        .round()
+        .clamp(0, image.height - 1);
+
+    final zoneGaucheIm = (zonePdf.left * echelle).round();
+    final zoneDroiteIm = (zonePdf.right * echelle).round();
+    final zoneHautIm = (zonePdf.top * echelle).round();
+    final zoneBasIm = (zonePdf.bottom * echelle).round();
+
+    var sommeR = 0, sommeG = 0, sommeB = 0, total = 0;
+    for (var y = haut; y <= bas; y += 3) {
+      for (var x = gauche; x <= droite; x += 3) {
+        final dansZone = x >= zoneGaucheIm &&
+            x <= zoneDroiteIm &&
+            y >= zoneHautIm &&
+            y <= zoneBasIm;
+        if (dansZone) continue;
+        final pixel = image.getPixel(x, y);
+        final luminance =
+            0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b;
+        if (luminance < 180) continue;
+        sommeR += pixel.r.toInt();
+        sommeG += pixel.g.toInt();
+        sommeB += pixel.b.toInt();
+        total++;
+      }
+    }
+
+    if (total < 8) return couleurPage;
+    return PdfColor(sommeR ~/ total, sommeG ~/ total, sommeB ~/ total);
+  }
 
   PdfStandardFont _police(MotDetecte mot) {
     return PdfStandardFont(
@@ -614,7 +661,7 @@ class _AccueilState extends State<Accueil> {
 
       final page = doc.pages[0];
       page.graphics.drawRectangle(
-        brush: PdfSolidBrush(couleurPage),
+        brush: PdfSolidBrush(_couleurLocale(zone)),
         bounds: Rect.fromLTWH(
           zone.left - 2,
           zone.top - 2,
