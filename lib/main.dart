@@ -12,13 +12,26 @@ import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 const _channel = MethodChannel("com.nabilainas.pdfeditor/open_pdf");
 
-void main() => runApp(const MaterialApp(home: Accueil()));
+void main() => runApp(MaterialApp(
+      home: const Accueil(),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: Colors.blueGrey,
+        scaffoldBackgroundColor: Colors.white,
+      ),
+    ));
 
 class MotDetecte {
   String texte;
   Rect zone;
   bool gras;
-  MotDetecte(this.texte, this.zone, {this.gras = false});
+
+  /// Vrai dès que l'application a elle-même dessiné ce texte : on sait alors
+  /// qu'il occupe le rectangle mesuré en Helvetica (souvent plus large que la
+  /// zone détectée), et donc quoi repeindre pour l'effacer.
+  bool redessine;
+
+  MotDetecte(this.texte, this.zone, {this.gras = false, this.redessine = false});
 }
 
 class Etat {
@@ -64,6 +77,8 @@ class _AccueilState extends State<Accueil> {
 
   bool _occupe = false;
 
+  final TransformationController _transformation = TransformationController();
+
   @override
   void initState() {
     super.initState();
@@ -72,6 +87,7 @@ class _AccueilState extends State<Accueil> {
 
   @override
   void dispose() {
+    _transformation.dispose();
     document?.dispose();
     super.dispose();
   }
@@ -437,18 +453,80 @@ class _AccueilState extends State<Accueil> {
     return PdfColor(sommeR ~/ total, sommeG ~/ total, sommeB ~/ total);
   }
 
-  PdfStandardFont _police(MotDetecte mot) {
+  PdfStandardFont _police(MotDetecte mot, [double? taille]) {
     return PdfStandardFont(
       PdfFontFamily.helvetica,
-      mot.zone.height * 0.75,
+      taille ?? mot.zone.height * 0.75,
       style: mot.gras ? PdfFontStyle.bold : PdfFontStyle.regular,
     );
   }
 
+  /// Rectangle réellement occupé par le texte une fois dessiné. La zone
+  /// détectée par l'OCR est calée sur la police d'origine : en Helvetica le
+  /// même texte est souvent plus large, et s'il déborde du rectangle passé à
+  /// drawString il part à la ligne puis se fait couper — c'est ce qui faisait
+  /// « bouger le cadre sans l'écriture ». On élargit donc le rectangle de
+  /// dessin à la largeur réellement mesurée (et on ne réduit la police que si
+  /// ça dépasserait le bord de la page).
+  ({Rect rect, PdfStandardFont police}) _dessinTexte(MotDetecte mot, Rect zone) {
+    var police = _police(mot);
+    var mesure = police.measureString(mot.texte);
+    final largeurDispo = taillePage.width - zone.left - 2;
+
+    if (mesure.width > largeurDispo && mesure.width > 0 && largeurDispo > 0) {
+      final reduite = police.size * largeurDispo / mesure.width;
+      police = _police(mot, reduite < 4 ? 4 : reduite);
+      mesure = police.measureString(mot.texte);
+    }
+
+    final largeur = mesure.width > zone.width ? mesure.width + 1 : zone.width;
+    final hauteur = mesure.height > zone.height ? mesure.height : zone.height;
+    return (
+      rect: Rect.fromLTWH(
+        zone.left,
+        zone.center.dy - hauteur / 2,
+        largeur,
+        hauteur,
+      ),
+      police: police,
+    );
+  }
+
+  /// Rectangle à repeindre pour effacer une ligne : la zone détectée (l'encre
+  /// d'origine) plus, le cas échéant, le débordement du texte qu'on a
+  /// nous-mêmes dessiné à cet endroit.
+  Rect _rectEffacement(MotDetecte mot) {
+    var rect = mot.zone;
+    // Uniquement pour le texte qu'on a redessiné : celui d'origine tient dans
+    // sa zone détectée, et élargir l'effacement effacerait ses voisins.
+    if (mot.redessine && mot.texte.isNotEmpty) {
+      rect = rect.expandToInclude(_dessinTexte(mot, mot.zone).rect);
+    }
+    return rect.inflate(3);
+  }
+
+  void _ecrire(PdfPage page, MotDetecte mot, Rect zone) {
+    if (mot.texte.isEmpty) return;
+    final dessin = _dessinTexte(mot, zone);
+    page.graphics.drawString(
+      mot.texte,
+      dessin.police,
+      bounds: dessin.rect,
+      brush: PdfSolidBrush(PdfColor(0, 0, 0)),
+      format: PdfStringFormat(
+        alignment: PdfTextAlignment.left,
+        lineAlignment: PdfVerticalAlignment.middle,
+      ),
+    );
+    mot.redessine = true;
+  }
+
   Future<Etat> _etatActuel(PdfDocument doc) async {
     final octetsDocument = Uint8List.fromList(await doc.save());
-    final motsCopie =
-        mots.map((m) => MotDetecte(m.texte, m.zone, gras: m.gras)).toList();
+    final motsCopie = mots
+        .map((m) => MotDetecte(m.texte, m.zone,
+            gras: m.gras, redessine: m.redessine))
+        .toList();
     return Etat(octetsDocument, motsCopie, imageDeFond);
   }
 
@@ -552,32 +630,16 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[0];
-      final zoneCouverture = Rect.fromLTWH(
-        mot.zone.left - 3,
-        mot.zone.top - 3,
-        mot.zone.width + 6,
-        mot.zone.height + 6,
-      );
-
       page.graphics.drawRectangle(
         brush: PdfSolidBrush(_couleurDeFond(mot)),
-        bounds: zoneCouverture,
+        bounds: _rectEffacement(mot),
       );
 
       mot.gras = grasFinal;
-
-      if (texteNettoye.isNotEmpty) {
-        page.graphics.drawString(
-          texteNettoye,
-          _police(mot),
-          bounds: mot.zone,
-          brush: PdfSolidBrush(PdfColor(0, 0, 0)),
-          format: PdfStringFormat(
-            alignment: PdfTextAlignment.left,
-            lineAlignment: PdfVerticalAlignment.middle,
-          ),
-        );
-      }
+      final ancienTexte = mot.texte;
+      mot.texte = texteNettoye;
+      _ecrire(page, mot, mot.zone);
+      mot.texte = ancienTexte;
 
       setState(() {
         mot.texte = texteNettoye;
@@ -603,16 +665,10 @@ class _AccueilState extends State<Accueil> {
 
       final page = doc.pages[0];
       final ancienneZone = mot.zone;
-      final zoneCouverture = Rect.fromLTWH(
-        ancienneZone.left - 3,
-        ancienneZone.top - 3,
-        ancienneZone.width + 6,
-        ancienneZone.height + 6,
-      );
 
       page.graphics.drawRectangle(
         brush: PdfSolidBrush(_couleurDeFond(mot)),
-        bounds: zoneCouverture,
+        bounds: _rectEffacement(mot),
       );
 
       final nouvelleZone = Rect.fromLTWH(
@@ -622,18 +678,7 @@ class _AccueilState extends State<Accueil> {
         ancienneZone.height,
       );
 
-      if (mot.texte.isNotEmpty) {
-        page.graphics.drawString(
-          mot.texte,
-          _police(mot),
-          bounds: nouvelleZone,
-          brush: PdfSolidBrush(PdfColor(0, 0, 0)),
-          format: PdfStringFormat(
-            alignment: PdfTextAlignment.left,
-            lineAlignment: PdfVerticalAlignment.middle,
-          ),
-        );
-      }
+      _ecrire(page, mot, nouvelleZone);
 
       setState(() => mot.zone = nouvelleZone);
 
@@ -740,16 +785,7 @@ class _AccueilState extends State<Accueil> {
 
       final page = doc.pages[0];
       final nouvelleLigne = MotDetecte(texte, zone, gras: grasCopie);
-      page.graphics.drawString(
-        texte,
-        _police(nouvelleLigne),
-        bounds: zone,
-        brush: PdfSolidBrush(PdfColor(0, 0, 0)),
-        format: PdfStringFormat(
-          alignment: PdfTextAlignment.left,
-          lineAlignment: PdfVerticalAlignment.middle,
-        ),
-      );
+      _ecrire(page, nouvelleLigne, zone);
 
       setState(() {
         mots = [...mots, nouvelleLigne];
@@ -923,14 +959,25 @@ class _AccueilState extends State<Accueil> {
                 : LayoutBuilder(
                     builder: (context, constraints) {
                       final echelle = constraints.maxWidth / taillePage.width;
-                      return SingleChildScrollView(
-                        child: SizedBox(
-                          width: constraints.maxWidth,
-                          height: taillePage.height * echelle,
-                          child: Stack(
-                            children: [
-                              SizedBox.expand(
-                                child: GestureDetector(
+                      return ClipRect(
+                        child: InteractiveViewer(
+                          // Navigation façon visionneuse : pincement à deux
+                          // doigts pour zoomer, doigt posé sur la page pour
+                          // la faire glisser. Le déplacement d'une ligne se
+                          // fait au doigt une fois la ligne sélectionnée,
+                          // donc les deux gestes ne se marchent pas dessus.
+                          transformationController: _transformation,
+                          constrained: false,
+                          boundaryMargin: const EdgeInsets.all(double.infinity),
+                          minScale: 0.5,
+                          maxScale: 8,
+                          child: SizedBox(
+                            width: constraints.maxWidth,
+                            height: taillePage.height * echelle,
+                            child: Stack(
+                              children: [
+                                SizedBox.expand(
+                                  child: GestureDetector(
                                   onLongPressStart: (details) {
                                     _ajouterZoneEffacee(
                                       details.localPosition.dx / echelle,
@@ -970,23 +1017,34 @@ class _AccueilState extends State<Accueil> {
                                         setState(() => motSelectionne = mot);
                                       }
                                     },
-                                    onPanStart: (_) => setState(() {
-                                      ligneEnDeplacement = mot;
-                                      deplacementEnCours = Offset.zero;
-                                      motSelectionne = mot;
-                                    }),
-                                    onPanUpdate: (details) => setState(() {
-                                      deplacementEnCours += details.delta;
-                                    }),
-                                    onPanEnd: (_) async {
-                                      final dx = deplacementEnCours.dx / echelle;
-                                      final dy = deplacementEnCours.dy / echelle;
-                                      setState(() {
-                                        ligneEnDeplacement = null;
-                                        deplacementEnCours = Offset.zero;
-                                      });
-                                      await _deplacerLigne(mot, dx, dy);
-                                    },
+                                    // Le glisser ne déplace la ligne que si
+                                    // elle est déjà sélectionnée ; sinon le
+                                    // geste passe à la page (défilement/zoom).
+                                    onPanStart: motSelectionne != mot
+                                        ? null
+                                        : (_) => setState(() {
+                                              ligneEnDeplacement = mot;
+                                              deplacementEnCours = Offset.zero;
+                                            }),
+                                    onPanUpdate: motSelectionne != mot
+                                        ? null
+                                        : (details) => setState(() {
+                                              deplacementEnCours +=
+                                                  details.delta;
+                                            }),
+                                    onPanEnd: motSelectionne != mot
+                                        ? null
+                                        : (_) async {
+                                            final dx =
+                                                deplacementEnCours.dx / echelle;
+                                            final dy =
+                                                deplacementEnCours.dy / echelle;
+                                            setState(() {
+                                              ligneEnDeplacement = null;
+                                              deplacementEnCours = Offset.zero;
+                                            });
+                                            await _deplacerLigne(mot, dx, dy);
+                                          },
                                     child: Container(
                                       decoration: BoxDecoration(
                                         border: Border.all(
@@ -1012,7 +1070,8 @@ class _AccueilState extends State<Accueil> {
                                     ),
                                   ),
                                 ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       );
@@ -1021,6 +1080,13 @@ class _AccueilState extends State<Accueil> {
           ),
         ],
       ),
+      floatingActionButton: mots.isEmpty
+          ? null
+          : FloatingActionButton.small(
+              tooltip: "Recentrer / réinitialiser le zoom",
+              onPressed: () => _transformation.value = Matrix4.identity(),
+              child: const Icon(Icons.zoom_out_map),
+            ),
     );
   }
 }
