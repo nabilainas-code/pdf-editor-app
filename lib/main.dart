@@ -46,6 +46,7 @@ class _AccueilState extends State<Accueil> {
   Uint8List? imageDeFond;
   img.Image? imageDecodee;
   double echelleOcr = 1;
+  PdfColor couleurPage = PdfColor(255, 255, 255);
 
   final List<Etat> historique = [];
   final List<Etat> futur = [];
@@ -251,6 +252,38 @@ class _AccueilState extends State<Accueil> {
     return (sombres / total) > 0.16;
   }
 
+  /// Calcule la couleur dominante de toute la page (en principe le blanc du
+  /// papier) en quantifiant les pixels d'une grille régulière et en gardant
+  /// le groupe le plus fréquent. Comme le texte ne couvre qu'une petite
+  /// partie de la page, cette couleur est beaucoup plus fiable pour
+  /// "effacer" une ligne qu'un échantillon local qui peut tomber sur de
+  /// l'encre selon l'endroit de la page.
+  PdfColor _calculerCouleurPage(img.Image image) {
+    final compteur = <int, int>{};
+    for (var y = 0; y < image.height; y += 15) {
+      for (var x = 0; x < image.width; x += 15) {
+        final pixel = image.getPixel(x, y);
+        final cle = ((pixel.r.toInt() ~/ 8) << 16) |
+            ((pixel.g.toInt() ~/ 8) << 8) |
+            (pixel.b.toInt() ~/ 8);
+        compteur[cle] = (compteur[cle] ?? 0) + 1;
+      }
+    }
+    if (compteur.isEmpty) return PdfColor(255, 255, 255);
+    var cleFrequente = compteur.keys.first;
+    var maxCompte = compteur[cleFrequente]!;
+    for (final entree in compteur.entries) {
+      if (entree.value > maxCompte) {
+        maxCompte = entree.value;
+        cleFrequente = entree.key;
+      }
+    }
+    final r = ((cleFrequente >> 16) & 0xFF) * 8;
+    final g = ((cleFrequente >> 8) & 0xFF) * 8;
+    final b = (cleFrequente & 0xFF) * 8;
+    return PdfColor(r, g, b);
+  }
+
   Future<void> _analyserParOcr(PdfDocument doc, PdfPage page) async {
     const dpi = 200.0;
     TextRecognizer? recognizer;
@@ -310,6 +343,9 @@ class _AccueilState extends State<Accueil> {
         imageDeFond = pngOctets;
         imageDecodee = imageAnalysee;
         echelleOcr = echelle;
+        couleurPage = imageAnalysee != null
+            ? _calculerCouleurPage(imageAnalysee)
+            : PdfColor(255, 255, 255);
         motSelectionne = null;
         statut = "${fusionnees.length} ligne(s) détectée(s) (OCR)";
       });
@@ -339,38 +375,12 @@ class _AccueilState extends State<Accueil> {
     } catch (_) {}
   }
 
-  /// Estime la couleur de fond autour d'une ligne en prenant la médiane de
-  /// plusieurs points échantillonnés juste au-dessus d'elle, plutôt qu'un
-  /// seul pixel : sur une ligne fusionnée (plus large), un point unique
-  /// tombe facilement en plein sur de l'encre et donne un aplat gris/noir
-  /// au lieu du fond de page.
-  PdfColor _couleurDeFond(MotDetecte mot) {
-    final image = imageDecodee;
-    if (image == null) return PdfColor(255, 255, 255);
-
-    final gauche = (mot.zone.left * echelleOcr).round().clamp(0, image.width - 1);
-    final droite = ((mot.zone.left + mot.zone.width) * echelleOcr)
-        .round()
-        .clamp(gauche + 1, image.width);
-    final y = ((mot.zone.top * echelleOcr) - 3).round().clamp(0, image.height - 1);
-
-    final rouges = <int>[];
-    final verts = <int>[];
-    final bleus = <int>[];
-    for (var x = gauche; x < droite; x += 4) {
-      final pixel = image.getPixel(x, y);
-      rouges.add(pixel.r.toInt());
-      verts.add(pixel.g.toInt());
-      bleus.add(pixel.b.toInt());
-    }
-    if (rouges.isEmpty) return PdfColor(255, 255, 255);
-
-    rouges.sort();
-    verts.sort();
-    bleus.sort();
-    final milieu = rouges.length ~/ 2;
-    return PdfColor(rouges[milieu], verts[milieu], bleus[milieu]);
-  }
+  /// Couleur utilisée pour "effacer" une ligne. On utilise la couleur
+  /// dominante de toute la page (calculée une fois par _calculerCouleurPage)
+  /// plutôt qu'un échantillon local : un échantillon pris près d'une ligne
+  /// tombe trop souvent sur de l'encre selon l'endroit de la page et donne
+  /// un aplat gris/noir au lieu du fond réel.
+  PdfColor _couleurDeFond(MotDetecte mot) => couleurPage;
 
   PdfStandardFont _police(MotDetecte mot) {
     return PdfStandardFont(
@@ -477,10 +487,10 @@ class _AccueilState extends State<Accueil> {
 
     final page = doc.pages[0];
     final zoneCouverture = Rect.fromLTWH(
-      mot.zone.left - 1,
-      mot.zone.top - 1,
-      mot.zone.width + 2,
-      mot.zone.height + 2,
+      mot.zone.left - 3,
+      mot.zone.top - 3,
+      mot.zone.width + 6,
+      mot.zone.height + 6,
     );
 
     page.graphics.drawRectangle(
@@ -524,10 +534,10 @@ class _AccueilState extends State<Accueil> {
     final page = doc.pages[0];
     final ancienneZone = mot.zone;
     final zoneCouverture = Rect.fromLTWH(
-      ancienneZone.left - 1,
-      ancienneZone.top - 1,
-      ancienneZone.width + 2,
-      ancienneZone.height + 2,
+      ancienneZone.left - 3,
+      ancienneZone.top - 3,
+      ancienneZone.width + 6,
+      ancienneZone.height + 6,
     );
 
     page.graphics.drawRectangle(
