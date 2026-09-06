@@ -81,7 +81,7 @@ class _AccueilState extends State<Accueil> {
 
   Future<void> _importerDocument() async {
     try {
-      final resultat = await FilePicker.platform.pickFiles(
+      final resultat = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf'],
       );
