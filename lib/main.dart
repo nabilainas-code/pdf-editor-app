@@ -370,10 +370,12 @@ class _AccueilState extends State<Accueil> {
                                           width: motSelectionne == mot ? 2 : 1,
                                         ),
                                       ),
-                                      child: FittedBox(
-                                        fit: BoxFit.contain,
-                                        child: Text(mot.texte),
-                                      ),
+                                      child: imageDeFond != null
+                                          ? null
+                                          : FittedBox(
+                                              fit: BoxFit.contain,
+                                              child: Text(mot.texte),
+                                            ),
                                     ),
                                   ),
                                 ),
