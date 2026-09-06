@@ -339,16 +339,37 @@ class _AccueilState extends State<Accueil> {
     } catch (_) {}
   }
 
+  /// Estime la couleur de fond autour d'une ligne en prenant la médiane de
+  /// plusieurs points échantillonnés juste au-dessus d'elle, plutôt qu'un
+  /// seul pixel : sur une ligne fusionnée (plus large), un point unique
+  /// tombe facilement en plein sur de l'encre et donne un aplat gris/noir
+  /// au lieu du fond de page.
   PdfColor _couleurDeFond(MotDetecte mot) {
     final image = imageDecodee;
     if (image == null) return PdfColor(255, 255, 255);
 
-    final x = ((mot.zone.left + mot.zone.width / 2) * echelleOcr)
+    final gauche = (mot.zone.left * echelleOcr).round().clamp(0, image.width - 1);
+    final droite = ((mot.zone.left + mot.zone.width) * echelleOcr)
         .round()
-        .clamp(0, image.width - 1);
-    final y = ((mot.zone.top * echelleOcr) - 4).round().clamp(0, image.height - 1);
-    final pixel = image.getPixel(x, y);
-    return PdfColor(pixel.r.toInt(), pixel.g.toInt(), pixel.b.toInt());
+        .clamp(gauche + 1, image.width);
+    final y = ((mot.zone.top * echelleOcr) - 3).round().clamp(0, image.height - 1);
+
+    final rouges = <int>[];
+    final verts = <int>[];
+    final bleus = <int>[];
+    for (var x = gauche; x < droite; x += 4) {
+      final pixel = image.getPixel(x, y);
+      rouges.add(pixel.r.toInt());
+      verts.add(pixel.g.toInt());
+      bleus.add(pixel.b.toInt());
+    }
+    if (rouges.isEmpty) return PdfColor(255, 255, 255);
+
+    rouges.sort();
+    verts.sort();
+    bleus.sort();
+    final milieu = rouges.length ~/ 2;
+    return PdfColor(rouges[milieu], verts[milieu], bleus[milieu]);
   }
 
   PdfStandardFont _police(MotDetecte mot) {
