@@ -54,6 +54,12 @@ class _AccueilState extends State<Accueil> {
   MotDetecte? ligneEnDeplacement;
   Offset deplacementEnCours = Offset.zero;
 
+  String? texteCopie;
+  bool grasCopie = false;
+  double largeurCopiee = 100;
+  double hauteurCopiee = 14;
+  bool enCollage = false;
+
   static const double _pasDeplacement = 3.0;
 
   bool _occupe = false;
@@ -694,6 +700,72 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  void _copierLigne() {
+    final mot = motSelectionne;
+    if (mot == null || mot.texte.isEmpty) return;
+    setState(() {
+      texteCopie = mot.texte;
+      grasCopie = mot.gras;
+      largeurCopiee = mot.zone.width;
+      hauteurCopiee = mot.zone.height;
+      statut = "Texte copié : touchez « Coller » puis un endroit de la page";
+    });
+  }
+
+  void _activerModeCollage() {
+    if (texteCopie == null) return;
+    setState(() {
+      enCollage = true;
+      statut = "Touchez l'endroit de la page où coller le texte";
+    });
+  }
+
+  /// Colle le texte copié à l'endroit touché sur la page, comme une
+  /// nouvelle ligne indépendante qu'on peut ensuite déplacer/modifier.
+  Future<void> _collerA(double xPage, double yPage) async {
+    final doc = document;
+    final texte = texteCopie;
+    if (doc == null || texte == null || _occupe) return;
+    setState(() => _occupe = true);
+    try {
+      historique.add(await _etatActuel(doc));
+      futur.clear();
+
+      final zone = Rect.fromLTWH(
+        xPage - largeurCopiee / 2,
+        yPage - hauteurCopiee / 2,
+        largeurCopiee,
+        hauteurCopiee,
+      );
+
+      final page = doc.pages[0];
+      final nouvelleLigne = MotDetecte(texte, zone, gras: grasCopie);
+      page.graphics.drawString(
+        texte,
+        _police(nouvelleLigne),
+        bounds: zone,
+        brush: PdfSolidBrush(PdfColor(0, 0, 0)),
+        format: PdfStringFormat(
+          alignment: PdfTextAlignment.left,
+          lineAlignment: PdfVerticalAlignment.middle,
+        ),
+      );
+
+      setState(() {
+        mots = [...mots, nouvelleLigne];
+        motSelectionne = nouvelleLigne;
+        enCollage = false;
+        statut = "Texte collé";
+      });
+
+      if (imageDeFond != null) {
+        await _rafraichirApercuOcr(doc);
+      }
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
   Future<void> _enregistrer() async {
     final doc = document;
     if (doc == null) return;
@@ -734,6 +806,23 @@ class _AccueilState extends State<Accueil> {
             onPressed: (futur.isEmpty || _occupe) ? null : _retablir,
           ),
           IconButton(
+            icon: Icon(
+              Icons.content_paste,
+              color: enCollage ? Theme.of(context).colorScheme.primary : null,
+            ),
+            tooltip: enCollage
+                ? "Touchez la page pour coller"
+                : "Coller le texte copié",
+            onPressed: (texteCopie == null || _occupe)
+                ? null
+                : (enCollage
+                    ? () => setState(() {
+                          enCollage = false;
+                          statut = "Collage annulé";
+                        })
+                    : _activerModeCollage),
+          ),
+          IconButton(
             icon: const Icon(Icons.folder_open),
             tooltip: "Importer un document",
             onPressed: _importerDocument,
@@ -761,6 +850,13 @@ class _AccueilState extends State<Accueil> {
                   child: Row(
                     children: [
                       const SizedBox(width: 8),
+                      IconButton(
+                        icon: const Icon(Icons.content_copy, size: 20),
+                        tooltip: "Copier cette ligne",
+                        onPressed: motSelectionne!.texte.isEmpty
+                            ? null
+                            : _copierLigne,
+                      ),
                       Expanded(
                         child: Text(
                           motSelectionne!.texte.isEmpty
@@ -840,6 +936,14 @@ class _AccueilState extends State<Accueil> {
                                       details.localPosition.dx / echelle,
                                       details.localPosition.dy / echelle,
                                     );
+                                  },
+                                  onTapUp: (details) {
+                                    if (enCollage) {
+                                      _collerA(
+                                        details.localPosition.dx / echelle,
+                                        details.localPosition.dy / echelle,
+                                      );
+                                    }
                                   },
                                   child: imageDeFond != null
                                       ? Image.memory(imageDeFond!, fit: BoxFit.fill)
