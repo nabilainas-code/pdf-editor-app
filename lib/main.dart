@@ -53,6 +53,8 @@ class _AccueilState extends State<Accueil> {
   MotDetecte? ligneEnDeplacement;
   Offset deplacementEnCours = Offset.zero;
 
+  static const double _pasDeplacement = 3.0;
+
   @override
   void initState() {
     super.initState();
@@ -170,13 +172,23 @@ class _AccueilState extends State<Accueil> {
     final rangees = <List<MotDetecte>>[];
 
     for (final ligne in triees) {
-      final centre = ligne.zone.top + ligne.zone.height / 2;
+      final ligneHaut = ligne.zone.top;
+      final ligneBas = ligne.zone.top + ligne.zone.height;
       List<MotDetecte>? cible;
       for (final rangee in rangees) {
-        final refCentre = rangee.first.zone.top + rangee.first.zone.height / 2;
-        final tolerance =
-            (rangee.first.zone.height + ligne.zone.height) / 2 * 0.6;
-        if ((centre - refCentre).abs() < tolerance) {
+        var rangeeHaut = rangee.first.zone.top;
+        var rangeeBas = rangee.first.zone.top + rangee.first.zone.height;
+        for (final l in rangee.skip(1)) {
+          if (l.zone.top < rangeeHaut) rangeeHaut = l.zone.top;
+          final b = l.zone.top + l.zone.height;
+          if (b > rangeeBas) rangeeBas = b;
+        }
+        final chevauchement = (rangeeBas < ligneBas ? rangeeBas : ligneBas) -
+            (rangeeHaut > ligneHaut ? rangeeHaut : ligneHaut);
+        final hauteurMin = (rangeeBas - rangeeHaut) < ligne.zone.height
+            ? (rangeeBas - rangeeHaut)
+            : ligne.zone.height;
+        if (hauteurMin > 0 && chevauchement > hauteurMin * 0.3) {
           cible = rangee;
           break;
         }
@@ -387,11 +399,8 @@ class _AccueilState extends State<Accueil> {
   }
 
   Future<void> _modifierMot(MotDetecte mot) async {
-    const pas = 3.0;
     final controleur = TextEditingController(text: mot.texte);
     var grasChoisi = mot.gras;
-    var dxChoisi = 0.0;
-    var dyChoisi = 0.0;
 
     final resultat = await showDialog<Map<String, Object>>(
       context: context,
@@ -412,32 +421,6 @@ class _AccueilState extends State<Accueil> {
                   const Text("Gras"),
                 ],
               ),
-              const SizedBox(height: 4),
-              Text(
-                "Position : ${dxChoisi >= 0 ? '+' : ''}${dxChoisi.toStringAsFixed(0)}, "
-                "${dyChoisi >= 0 ? '+' : ''}${dyChoisi.toStringAsFixed(0)}",
-              ),
-              IconButton(
-                icon: const Icon(Icons.arrow_upward),
-                onPressed: () => setDialogState(() => dyChoisi -= pas),
-              ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back),
-                    onPressed: () => setDialogState(() => dxChoisi -= pas),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.arrow_forward),
-                    onPressed: () => setDialogState(() => dxChoisi += pas),
-                  ),
-                ],
-              ),
-              IconButton(
-                icon: const Icon(Icons.arrow_downward),
-                onPressed: () => setDialogState(() => dyChoisi += pas),
-              ),
             ],
           ),
           actions: [
@@ -446,17 +429,13 @@ class _AccueilState extends State<Accueil> {
               child: const Text("Annuler"),
             ),
             TextButton(
-              onPressed: () => Navigator.pop(
-                  ctx, {"texte": "", "gras": grasChoisi, "dx": 0.0, "dy": 0.0}),
+              onPressed: () =>
+                  Navigator.pop(ctx, {"texte": "", "gras": grasChoisi}),
               child: const Text("Supprimer"),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(ctx, {
-                "texte": controleur.text,
-                "gras": grasChoisi,
-                "dx": dxChoisi,
-                "dy": dyChoisi,
-              }),
+              onPressed: () => Navigator.pop(
+                  ctx, {"texte": controleur.text, "gras": grasChoisi}),
               child: const Text("Valider"),
             ),
           ],
@@ -467,14 +446,7 @@ class _AccueilState extends State<Accueil> {
     if (resultat == null) return;
     final texteNettoye = (resultat["texte"] as String).trim();
     final grasFinal = resultat["gras"] as bool;
-    final dx = resultat["dx"] as double;
-    final dy = resultat["dy"] as double;
-    if (texteNettoye == mot.texte &&
-        grasFinal == mot.gras &&
-        dx == 0 &&
-        dy == 0) {
-      return;
-    }
+    if (texteNettoye == mot.texte && grasFinal == mot.gras) return;
 
     final doc = document;
     if (doc == null) return;
@@ -483,12 +455,11 @@ class _AccueilState extends State<Accueil> {
     futur.clear();
 
     final page = doc.pages[0];
-    final ancienneZone = mot.zone;
     final zoneCouverture = Rect.fromLTWH(
-      ancienneZone.left - 1,
-      ancienneZone.top - 1,
-      ancienneZone.width + 2,
-      ancienneZone.height + 2,
+      mot.zone.left - 1,
+      mot.zone.top - 1,
+      mot.zone.width + 2,
+      mot.zone.height + 2,
     );
 
     page.graphics.drawRectangle(
@@ -497,14 +468,12 @@ class _AccueilState extends State<Accueil> {
     );
 
     mot.gras = grasFinal;
-    final nouvelleZone =
-        (dx != 0 || dy != 0) ? ancienneZone.translate(dx, dy) : ancienneZone;
 
     if (texteNettoye.isNotEmpty) {
       page.graphics.drawString(
         texteNettoye,
         _police(mot),
-        bounds: nouvelleZone,
+        bounds: mot.zone,
         brush: PdfSolidBrush(PdfColor(0, 0, 0)),
         format: PdfStringFormat(
           alignment: PdfTextAlignment.left,
@@ -515,7 +484,6 @@ class _AccueilState extends State<Accueil> {
 
     setState(() {
       mot.texte = texteNettoye;
-      mot.zone = nouvelleZone;
       motSelectionne = texteNettoye.isEmpty ? null : mot;
     });
 
@@ -631,13 +599,64 @@ class _AccueilState extends State<Accueil> {
                 : _enregistrer,
           ),
         ],
+        bottom: motSelectionne == null
+            ? null
+            : PreferredSize(
+                preferredSize: const Size.fromHeight(40),
+                child: ColoredBox(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          motSelectionne!.texte.isEmpty
+                              ? "(ligne vide)"
+                              : motSelectionne!.texte,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.arrow_back, size: 20),
+                        tooltip: "Déplacer à gauche",
+                        onPressed: () => _deplacerLigne(
+                            motSelectionne!, -_pasDeplacement, 0),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.arrow_upward, size: 20),
+                        tooltip: "Déplacer vers le haut",
+                        onPressed: () => _deplacerLigne(
+                            motSelectionne!, 0, -_pasDeplacement),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.arrow_downward, size: 20),
+                        tooltip: "Déplacer vers le bas",
+                        onPressed: () => _deplacerLigne(
+                            motSelectionne!, 0, _pasDeplacement),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.arrow_forward, size: 20),
+                        tooltip: "Déplacer à droite",
+                        onPressed: () => _deplacerLigne(
+                            motSelectionne!, _pasDeplacement, 0),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 20),
+                        tooltip: "Désélectionner",
+                        onPressed: () => setState(() => motSelectionne = null),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
       ),
       body: Column(
         children: [
           Padding(
             padding: const EdgeInsets.all(8),
             child: Text(
-              motSelectionne == null ? statut : "Ligne : ${motSelectionne!.texte}",
+              statut,
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
           ),
@@ -671,10 +690,17 @@ class _AccueilState extends State<Accueil> {
                                   width: mot.zone.width * echelle,
                                   height: mot.zone.height * echelle,
                                   child: GestureDetector(
-                                    onTap: () => _modifierMot(mot),
+                                    onTap: () {
+                                      if (motSelectionne == mot) {
+                                        _modifierMot(mot);
+                                      } else {
+                                        setState(() => motSelectionne = mot);
+                                      }
+                                    },
                                     onPanStart: (_) => setState(() {
                                       ligneEnDeplacement = mot;
                                       deplacementEnCours = Offset.zero;
+                                      motSelectionne = mot;
                                     }),
                                     onPanUpdate: (details) => setState(() {
                                       deplacementEnCours += details.delta;
