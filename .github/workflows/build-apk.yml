@@ -104,9 +104,12 @@ jobs:
           PYEOF
           python3 /tmp/write_main_activity.py
 
-      - name: Ignorer les classes ML Kit optionnelles non utilisées (R8)
+      - name: Protéger les classes ML Kit du minifieur R8
         run: |
           cat >> temp_app/android/app/proguard-rules.pro << 'EOF'
+          -keep class com.google.mlkit.** { *; }
+          -keep class com.google.android.gms.internal.mlkit_vision_text_common.** { *; }
+          -keep class com.google.android.gms.internal.mlkit_vision_text_bundled_latin.** { *; }
           -dontwarn com.google.mlkit.vision.text.chinese.**
           -dontwarn com.google.mlkit.vision.text.devanagari.**
           -dontwarn com.google.mlkit.vision.text.japanese.**
