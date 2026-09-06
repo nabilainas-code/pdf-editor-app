@@ -572,6 +572,47 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Crée une petite zone effaçable à l'endroit d'un appui long, pour
+  /// nettoyer un résidu (trait, tache) que l'OCR n'a pas détecté comme
+  /// ligne de texte et qui n'est donc pas sélectionnable autrement.
+  Future<void> _ajouterZoneEffacee(double xPage, double yPage) async {
+    final doc = document;
+    if (doc == null) return;
+
+    historique.add(await _etatActuel(doc));
+    futur.clear();
+
+    const largeur = 30.0;
+    const hauteur = 14.0;
+    final zone = Rect.fromLTWH(
+      xPage - largeur / 2,
+      yPage - hauteur / 2,
+      largeur,
+      hauteur,
+    );
+
+    final page = doc.pages[0];
+    page.graphics.drawRectangle(
+      brush: PdfSolidBrush(couleurPage),
+      bounds: Rect.fromLTWH(
+        zone.left - 2,
+        zone.top - 2,
+        zone.width + 4,
+        zone.height + 4,
+      ),
+    );
+
+    final nouvelleLigne = MotDetecte("", zone);
+    setState(() {
+      mots = [...mots, nouvelleLigne];
+      motSelectionne = nouvelleLigne;
+    });
+
+    if (imageDeFond != null) {
+      await _rafraichirApercuOcr(doc);
+    }
+  }
+
   Future<void> _enregistrer() async {
     final doc = document;
     if (doc == null) return;
@@ -704,9 +745,17 @@ class _AccueilState extends State<Accueil> {
                           child: Stack(
                             children: [
                               SizedBox.expand(
-                                child: imageDeFond != null
-                                    ? Image.memory(imageDeFond!, fit: BoxFit.fill)
-                                    : Container(color: Colors.white),
+                                child: GestureDetector(
+                                  onLongPressStart: (details) {
+                                    _ajouterZoneEffacee(
+                                      details.localPosition.dx / echelle,
+                                      details.localPosition.dy / echelle,
+                                    );
+                                  },
+                                  child: imageDeFond != null
+                                      ? Image.memory(imageDeFond!, fit: BoxFit.fill)
+                                      : Container(color: Colors.white),
+                                ),
                               ),
                               for (final mot in mots)
                                 Positioned(
