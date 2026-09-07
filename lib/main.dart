@@ -780,8 +780,14 @@ class _AccueilState extends State<Accueil> {
       for (final m in groupe) m.zone.shift(Offset(dx, dy)),
     ];
 
+    // Marge de sécurité : l'effacement et la repose débordent légèrement de
+    // la zone, donc une voisine doit s'écarter avant même le contact, sinon
+    // la ligne qui passe lui ronge son encre au fil des appuis — c'est ce
+    // qui vidait des lignes que personne n'avait supprimées.
+    const marge = 3.0;
+
     while (aExaminer.isNotEmpty) {
-      final reference = aExaminer.removeLast();
+      final reference = aExaminer.removeLast().inflate(marge);
       for (final autre in mots) {
         if (concernees.contains(autre) || autre.texte.isEmpty) continue;
         if (!reference.overlaps(autre.zone)) continue;
