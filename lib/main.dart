@@ -485,25 +485,31 @@ class _AccueilState extends State<Accueil> {
     );
   }
 
-  /// Rectangle réellement occupé par le texte une fois dessiné. La zone
-  /// détectée par l'OCR est calée sur la police d'origine : en Helvetica le
-  /// même texte est souvent plus large, et s'il déborde du rectangle passé à
-  /// drawString il part à la ligne puis se fait couper — c'est ce qui faisait
-  /// « bouger le cadre sans l'écriture ». On élargit donc le rectangle de
-  /// dessin à la largeur réellement mesurée (et on ne réduit la police que si
-  /// ça dépasserait le bord de la page).
+  /// Taille de police et rectangle de dessin pour un texte replacé dans sa
+  /// zone. La hauteur du cadre détecté ne donne qu'une estimation grossière
+  /// (elle inclut accents et jambages) ; la largeur, elle, mesure exactement
+  /// l'encre d'origine. On ajuste donc la police pour que le texte occupe la
+  /// même largeur qu'avant — c'est ce qui garde la même taille apparente au
+  /// lieu de rapetisser — et on dessine dans un rectangle assez large pour
+  /// qu'il ne parte pas à la ligne et ne se fasse pas couper.
   ({Rect rect, PdfStandardFont police}) _dessinTexte(MotDetecte mot, Rect zone) {
-    var police = _police(mot);
-    var mesure = police.measureString(mot.texte);
-    final largeurDispo = taillePage.width - zone.left - 2;
+    final base = zone.height * 0.75;
+    var police = _police(mot, base);
+    final mesureBase = police.measureString(mot.texte);
 
-    if (mesure.width > largeurDispo && mesure.width > 0 && largeurDispo > 0) {
-      final reduite = police.size * largeurDispo / mesure.width;
-      police = _police(mot, reduite < 4 ? 4 : reduite);
-      mesure = police.measureString(mot.texte);
+    if (mesureBase.width > 0 && zone.width > 0) {
+      var ajustee = base * zone.width / mesureBase.width;
+      // Garde-fous : une zone fusionnée (puce + texte, gros interligne...)
+      // donnerait sinon une taille aberrante.
+      if (ajustee < base * 0.6) ajustee = base * 0.6;
+      if (ajustee > base * 1.4) ajustee = base * 1.4;
+      if (ajustee < 4) ajustee = 4;
+      police = _police(mot, ajustee);
     }
 
-    final largeur = mesure.width > zone.width ? mesure.width + 1 : zone.width;
+    final mesure = police.measureString(mot.texte);
+    final largeur =
+        (mesure.width > zone.width ? mesure.width : zone.width) + 2;
     final hauteur = mesure.height > zone.height ? mesure.height : zone.height;
     return (
       rect: Rect.fromLTWH(
@@ -778,59 +784,38 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
-  /// Crée une petite zone effaçable à l'endroit d'un appui long, pour
-  /// nettoyer un résidu (trait, tache) que l'OCR n'a pas détecté comme
-  /// ligne de texte et qui n'est donc pas sélectionnable autrement.
-  Future<void> _ajouterZoneEffacee(double xPage, double yPage) async {
-    final doc = document;
-    if (doc == null || _occupe) return;
+  /// Pose un repère à l'endroit d'un appui long, pour attraper un résidu
+  /// (trait, tache) que l'OCR n'a pas détecté comme ligne. Il n'efface rien
+  /// tout seul : on le place d'abord (flèches / glisser), et c'est le bouton
+  /// gomme qui efface, quand on le décide.
+  void _ajouterZoneEffacee(double xPage, double yPage) {
+    if (document == null || _occupe) return;
 
-    // Si l'appui long tombe sur une ligne déjà détectée, on ne crée pas de
-    // zone d'effacement par-dessus (ça effacerait de la vraie écriture) :
-    // l'appui long ne sert qu'à nettoyer les résidus hors de toute ligne.
+    // Si l'appui long tombe sur une ligne déjà détectée, inutile d'empiler un
+    // repère par-dessus : cette ligne est déjà sélectionnable telle quelle.
     const tolerance = 4.0;
     final surLigneExistante = mots.any(
       (m) => m.zone.inflate(tolerance).contains(Offset(xPage, yPage)),
     );
     if (surLigneExistante) return;
 
-    setState(() => _occupe = true);
-    try {
-      historique.add(await _etatActuel(doc));
-      futur.clear();
-
-      const largeur = 30.0;
-      const hauteur = 14.0;
-      final zone = Rect.fromLTWH(
+    const largeur = 30.0;
+    const hauteur = 14.0;
+    final nouvelleLigne = MotDetecte(
+      "",
+      Rect.fromLTWH(
         xPage - largeur / 2,
         yPage - hauteur / 2,
         largeur,
         hauteur,
-      );
+      ),
+    );
 
-      final page = doc.pages[0];
-      page.graphics.drawRectangle(
-        brush: PdfSolidBrush(_couleurLocale(zone)),
-        bounds: Rect.fromLTWH(
-          zone.left - 2,
-          zone.top - 2,
-          zone.width + 4,
-          zone.height + 4,
-        ),
-      );
-
-      final nouvelleLigne = MotDetecte("", zone);
-      setState(() {
-        mots = [...mots, nouvelleLigne];
-        motSelectionne = nouvelleLigne;
-      });
-
-      if (imageDeFond != null) {
-        await _rafraichirApercuOcr(doc);
-      }
-    } finally {
-      setState(() => _occupe = false);
-    }
+    setState(() {
+      mots = [...mots, nouvelleLigne];
+      motSelectionne = nouvelleLigne;
+      statut = "Repère posé : placez-le puis touchez la gomme pour effacer";
+    });
   }
 
   /// Repeint le fond sur la zone sélectionnée : sert de gomme, qu'on peut
