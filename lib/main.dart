@@ -602,6 +602,16 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Retire un cadre de la liste. Ce n'est qu'un repère d'affichage : rien
+  /// n'est modifié dans le PDF, seul le rectangle bleu disparaît.
+  void _retirerRepere(MotDetecte mot) {
+    setState(() {
+      mots = mots.where((m) => m != mot).toList();
+      motSelectionne = null;
+      statut = "Cadre retiré (le PDF n'a pas changé)";
+    });
+  }
+
   Future<void> _modifierMot(MotDetecte mot) async {
     final controleur = TextEditingController(text: mot.texte);
     var grasChoisi = mot.gras;
@@ -633,9 +643,9 @@ class _AccueilState extends State<Accueil> {
               child: const Text("Annuler"),
             ),
             TextButton(
-              onPressed: () =>
-                  Navigator.pop(ctx, {"texte": "", "gras": grasChoisi}),
-              child: const Text("Supprimer"),
+              onPressed: () => Navigator.pop(
+                  ctx, {"texte": "", "gras": grasChoisi, "supprimer": true}),
+              child: Text(mot.texte.isEmpty ? "Retirer le cadre" : "Supprimer"),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(
@@ -650,6 +660,14 @@ class _AccueilState extends State<Accueil> {
     if (resultat == null) return;
     final texteNettoye = (resultat["texte"] as String).trim();
     final grasFinal = resultat["gras"] as bool;
+
+    // « Supprimer » sur une ligne déjà vide : il ne reste que le cadre bleu,
+    // simple repère d'affichage absent du PDF. On le retire de la liste.
+    if (resultat["supprimer"] == true && mot.texte.isEmpty) {
+      _retirerRepere(mot);
+      return;
+    }
+
     if (texteNettoye == mot.texte && grasFinal == mot.gras) return;
 
     final doc = document;
@@ -1001,6 +1019,13 @@ class _AccueilState extends State<Accueil> {
                         onPressed: _occupe
                             ? null
                             : () => _effacerZone(motSelectionne!),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 20),
+                        tooltip: "Retirer ce cadre (n'efface rien dans le PDF)",
+                        onPressed: motSelectionne!.texte.isNotEmpty
+                            ? null
+                            : () => _retirerRepere(motSelectionne!),
                       ),
                       Expanded(
                         child: Text(
