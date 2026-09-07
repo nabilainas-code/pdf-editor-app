@@ -776,6 +776,100 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Aplatit la page en une seule image : contrairement au reste de l'app,
+  /// qui ne fait que peindre par-dessus (le contenu d'origine reste présent
+  /// dans le fichier, juste recouvert), ici la page entière est rastérisée
+  /// et le document est reconstruit avec cette seule image comme contenu.
+  /// Ce qui était sous une zone effacée ne peut alors plus être retrouvé,
+  /// même en inspectant le fichier — comme la rédaction définitive d'Adobe.
+  /// Les positions des lignes ne changent pas, l'édition peut continuer
+  /// après coup.
+  Future<void> _aplatirPage() async {
+    final doc = document;
+    if (doc == null || _occupe) return;
+
+    if (doc.pages.count > 1) {
+      setState(() => statut =
+          "Aplatissement impossible : ce document a plusieurs pages, "
+          "seule la première serait conservée pour l'instant.");
+      return;
+    }
+
+    setState(() => _occupe = true);
+    try {
+      historique.add(await _etatActuel(doc));
+      futur.clear();
+
+      const dpi = _dpiOcr;
+      final octetsDoc = Uint8List.fromList(await doc.save());
+      PdfRaster? raster;
+      await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
+        raster = r;
+        break;
+      }
+      if (raster == null) {
+        throw Exception("impossible de générer l'image de la page");
+      }
+      final pngOctets = await raster.toPng();
+
+      final nouveauDoc = PdfDocument();
+      nouveauDoc.pageSettings.margins.all = 0;
+      nouveauDoc.pageSettings.size = taillePage;
+      final nouvellePage = nouveauDoc.pages.add();
+      nouvellePage.graphics.drawImage(
+        PdfBitmap(pngOctets),
+        Rect.fromLTWH(0, 0, taillePage.width, taillePage.height),
+      );
+
+      doc.dispose();
+
+      setState(() {
+        document = nouveauDoc;
+        imageDeFond = pngOctets;
+        imageDecodee = img.decodePng(pngOctets);
+        echelleOcr = dpi / 72.0;
+        for (final m in mots) {
+          m.redessine = false;
+        }
+        statut =
+            "Page aplatie : les zones effacées sont maintenant supprimées "
+            "du fichier, pas seulement recouvertes";
+      });
+    } catch (e) {
+      historique.removeLast();
+      setState(() => statut = "Échec de l'aplatissement : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
+  Future<void> _confirmerAplatissement() async {
+    if (document == null || _occupe) return;
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Rédaction définitive"),
+        content: const Text(
+          "Ce qui a été effacé ou déplacé sera définitivement retiré du "
+          "fichier (impossible à récupérer, même en inspectant le PDF), "
+          "au lieu d'être seulement recouvert visuellement comme jusqu'ici. "
+          "À faire juste avant de partager le document.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Aplatir"),
+          ),
+        ],
+      ),
+    );
+    if (confirme == true) await _aplatirPage();
+  }
+
   /// Retire un cadre de la liste. Ce n'est qu'un repère d'affichage : rien
   /// n'est modifié dans le PDF, seul le rectangle bleu disparaît.
   void _retirerRepere(MotDetecte mot) {
@@ -1454,6 +1548,13 @@ class _AccueilState extends State<Accueil> {
                   tooltip: "Recentrer / réinitialiser le zoom",
                   onPressed: () => _transformation.value = Matrix4.identity(),
                   child: const Icon(Icons.zoom_out_map),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: "aplatir",
+                  tooltip: "Rédaction définitive (avant de partager)",
+                  onPressed: _occupe ? null : _confirmerAplatissement,
+                  child: const Icon(Icons.security),
                 ),
               ],
             ),
