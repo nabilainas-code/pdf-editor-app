@@ -31,7 +31,14 @@ class MotDetecte {
   /// zone détectée), et donc quoi repeindre pour l'effacer.
   bool redessine;
 
-  MotDetecte(this.texte, this.zone, {this.gras = false, this.redessine = false});
+  /// Taille de police choisie à la main, en points. Reste null tant que
+  /// l'utilisateur n'a pas touché au réglage : la taille est alors estimée
+  /// automatiquement — une estimation qui ne peut qu'approcher la police
+  /// d'origine (inconnue), d'où ce réglage pour compenser à l'œil.
+  double? tailleManuelle;
+
+  MotDetecte(this.texte, this.zone,
+      {this.gras = false, this.redessine = false, this.tailleManuelle});
 }
 
 class Etat {
@@ -71,6 +78,7 @@ class _AccueilState extends State<Accueil> {
   bool grasCopie = false;
   double largeurCopiee = 100;
   double hauteurCopiee = 14;
+  double? tailleCopiee;
   bool enCollage = false;
 
   static const double _pasDeplacement = 3.0;
@@ -493,23 +501,19 @@ class _AccueilState extends State<Accueil> {
   }
 
   /// Taille de police et rectangle de dessin pour un texte replacé dans sa
-  /// zone. La hauteur du cadre détecté ne donne qu'une estimation grossière
-  /// (elle inclut accents et jambages) ; la largeur, elle, mesure exactement
-  /// l'encre d'origine. On ajuste donc la police pour que le texte occupe la
-  /// même largeur qu'avant — c'est ce qui garde la même taille apparente au
-  /// lieu de rapetisser — et on dessine dans un rectangle assez large pour
-  /// qu'il ne parte pas à la ligne et ne se fasse pas couper.
+  /// zone. Si l'utilisateur a réglé une taille à la main (mot.tailleManuelle),
+  /// elle prime toujours. Sinon, la taille est estimée à partir de la
+  /// hauteur du cadre détecté par l'OCR, en corrigeant l'écart entre cette
+  /// hauteur (qui inclut marge, accents, jambages) et la hauteur réellement
+  /// mesurée du texte en Helvetica — un ratio empirique (1.15) rapproche le
+  /// résultat de la taille apparente d'origine, sans jamais la reproduire
+  /// exactement puisque la police d'origine du scan est inconnue.
   ({Rect rect, PdfStandardFont police}) _dessinTexte(MotDetecte mot, Rect zone) {
-    final base = zone.height * 0.75;
-    var police = _police(mot, base);
+    var police = _police(mot, mot.tailleManuelle ?? zone.height * 0.75);
     var mesure = police.measureString(mot.texte);
 
-    // Taille calée sur la hauteur du cadre détecté : c'est elle qui décide de
-    // la taille apparente des lettres. Caler sur la largeur, comme avant,
-    // rapetissait le texte dès qu'Helvetica était plus large que la police
-    // d'origine.
-    if (mesure.height > 0 && zone.height > 0) {
-      var taille = base * zone.height / mesure.height;
+    if (mot.tailleManuelle == null && mesure.height > 0 && zone.height > 0) {
+      var taille = police.size * zone.height / mesure.height * 1.15;
       if (taille < 4) taille = 4;
       police = _police(mot, taille);
       mesure = police.measureString(mot.texte);
@@ -728,7 +732,9 @@ class _AccueilState extends State<Accueil> {
     final octetsDocument = Uint8List.fromList(await doc.save());
     final motsCopie = mots
         .map((m) => MotDetecte(m.texte, m.zone,
-            gras: m.gras, redessine: m.redessine))
+            gras: m.gras,
+            redessine: m.redessine,
+            tailleManuelle: m.tailleManuelle))
         .toList();
     return Etat(octetsDocument, motsCopie, imageDeFond);
   }
@@ -740,7 +746,9 @@ class _AccueilState extends State<Accueil> {
       document = doc;
       mots = etat.mots
           .map((m) => MotDetecte(m.texte, m.zone,
-              gras: m.gras, redessine: m.redessine))
+              gras: m.gras,
+              redessine: m.redessine,
+              tailleManuelle: m.tailleManuelle))
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
@@ -883,8 +891,12 @@ class _AccueilState extends State<Accueil> {
   Future<void> _modifierMot(MotDetecte mot) async {
     final controleur = TextEditingController(text: mot.texte);
     var grasChoisi = mot.gras;
+    // null = taille automatique. Le point de départ quand on touche au
+    // réglage est la taille actuellement utilisée (manuelle ou estimée), pour
+    // ajuster à partir de ce qui est affiché plutôt que de repartir de zéro.
+    double? tailleChoisie = mot.tailleManuelle;
 
-    final resultat = await showDialog<Map<String, Object>>(
+    final resultat = await showDialog<Map<String, Object?>>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
@@ -903,6 +915,44 @@ class _AccueilState extends State<Accueil> {
                   const Text("Gras"),
                 ],
               ),
+              Row(
+                children: [
+                  const Text("Taille"),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.remove),
+                    tooltip: "Réduire",
+                    onPressed: () => setDialogState(() {
+                      final actuelle = tailleChoisie ??
+                          _dessinTexte(mot, mot.zone).police.size;
+                      tailleChoisie = (actuelle - 1).clamp(4, 200);
+                    }),
+                  ),
+                  SizedBox(
+                    width: 56,
+                    child: Text(
+                      tailleChoisie?.round().toString() ?? "Auto",
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    tooltip: "Agrandir",
+                    onPressed: () => setDialogState(() {
+                      final actuelle = tailleChoisie ??
+                          _dessinTexte(mot, mot.zone).police.size;
+                      tailleChoisie = (actuelle + 1).clamp(4, 200);
+                    }),
+                  ),
+                  if (tailleChoisie != null)
+                    IconButton(
+                      icon: const Icon(Icons.restart_alt),
+                      tooltip: "Revenir à l'automatique",
+                      onPressed: () =>
+                          setDialogState(() => tailleChoisie = null),
+                    ),
+                ],
+              ),
             ],
           ),
           actions: [
@@ -911,13 +961,20 @@ class _AccueilState extends State<Accueil> {
               child: const Text("Annuler"),
             ),
             TextButton(
-              onPressed: () => Navigator.pop(
-                  ctx, {"texte": "", "gras": grasChoisi, "supprimer": true}),
+              onPressed: () => Navigator.pop(ctx, {
+                "texte": "",
+                "gras": grasChoisi,
+                "taille": tailleChoisie,
+                "supprimer": true,
+              }),
               child: Text(mot.texte.isEmpty ? "Retirer le cadre" : "Supprimer"),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(
-                  ctx, {"texte": controleur.text, "gras": grasChoisi}),
+              onPressed: () => Navigator.pop(ctx, {
+                "texte": controleur.text,
+                "gras": grasChoisi,
+                "taille": tailleChoisie,
+              }),
               child: const Text("Valider"),
             ),
           ],
@@ -928,6 +985,7 @@ class _AccueilState extends State<Accueil> {
     if (resultat == null) return;
     final texteNettoye = (resultat["texte"] as String).trim();
     final grasFinal = resultat["gras"] as bool;
+    final tailleFinale = resultat["taille"] as double?;
 
     // « Supprimer » sur une ligne déjà vide : il ne reste que le cadre bleu,
     // simple repère d'affichage absent du PDF. On le retire de la liste.
@@ -936,7 +994,11 @@ class _AccueilState extends State<Accueil> {
       return;
     }
 
-    if (texteNettoye == mot.texte && grasFinal == mot.gras) return;
+    if (texteNettoye == mot.texte &&
+        grasFinal == mot.gras &&
+        tailleFinale == mot.tailleManuelle) {
+      return;
+    }
 
     final doc = document;
     if (doc == null || _occupe) return;
@@ -949,13 +1011,11 @@ class _AccueilState extends State<Accueil> {
       _effacerRect(page, _rectEffacement(mot), mot);
 
       mot.gras = grasFinal;
-      final ancienTexte = mot.texte;
       mot.texte = texteNettoye;
+      mot.tailleManuelle = tailleFinale;
       _ecrire(page, mot, mot.zone);
-      mot.texte = ancienTexte;
 
       setState(() {
-        mot.texte = texteNettoye;
         motSelectionne = texteNettoye.isEmpty ? null : mot;
       });
 
@@ -1163,6 +1223,7 @@ class _AccueilState extends State<Accueil> {
       grasCopie = mot.gras;
       largeurCopiee = mot.zone.width;
       hauteurCopiee = mot.zone.height;
+      tailleCopiee = mot.tailleManuelle;
       statut = "Texte copié : touchez « Coller » puis un endroit de la page";
     });
   }
@@ -1194,7 +1255,8 @@ class _AccueilState extends State<Accueil> {
       );
 
       final page = doc.pages[0];
-      final nouvelleLigne = MotDetecte(texte, zone, gras: grasCopie);
+      final nouvelleLigne = MotDetecte(texte, zone,
+          gras: grasCopie, tailleManuelle: tailleCopiee);
       _ecrire(page, nouvelleLigne, zone);
 
       setState(() {
