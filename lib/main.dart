@@ -71,7 +71,11 @@ class _AccueilState extends State<Accueil> {
   List<MotDetecte> mots = [];
   Size taillePage = const Size(595, 842);
   String statut = "Chargement...";
-  MotDetecte? motSelectionne;
+  /// Sélection courante : un tap ajoute/retire une ligne du groupe (rouge),
+  /// les flèches ou le glisser déplacent tout le groupe ensemble. Un seul
+  /// élément sélectionné reste le cas normal ; en avoir plusieurs permet de
+  /// déplacer plusieurs lignes à la fois sans les reprendre une par une.
+  final Set<MotDetecte> selection = {};
   bool enregistrementEnCours = false;
 
   Uint8List? imageDeFond;
@@ -81,9 +85,6 @@ class _AccueilState extends State<Accueil> {
 
   final List<Etat> historique = [];
   final List<Etat> futur = [];
-
-  MotDetecte? ligneEnDeplacement;
-  Offset deplacementEnCours = Offset.zero;
 
   String? texteCopie;
   bool grasCopie = false;
@@ -103,6 +104,9 @@ class _AccueilState extends State<Accueil> {
   /// cet endroit et ouvrir directement sa modification, plutôt que le geste
   /// à deux temps (appui long puis toucher) qui n'était pas évident.
   bool enAjoutTexte = false;
+
+  Offset deplacementGroupeEnCours = Offset.zero;
+  bool groupeEnDeplacement = false;
 
   static const double _pasDeplacement = 3.0;
 
@@ -174,7 +178,7 @@ class _AccueilState extends State<Accueil> {
       final chemin = resultat?.files.single.path;
       if (chemin == null) return;
       setState(() {
-        motSelectionne = null;
+        selection.clear();
         statut = "Chargement...";
       });
       await _analyser(File(chemin).readAsBytesSync());
@@ -221,7 +225,7 @@ class _AccueilState extends State<Accueil> {
           taillePage = Size(page.size.width, page.size.height);
           imageDeFond = null;
           imageDecodee = null;
-          motSelectionne = null;
+          selection.clear();
           statut = "${trouvesTexte.length} ligne(s) détectée(s)";
         });
         return;
@@ -415,7 +419,7 @@ class _AccueilState extends State<Accueil> {
         couleurPage = imageAnalysee != null
             ? _calculerCouleurPage(imageAnalysee)
             : PdfColor(255, 255, 255);
-        motSelectionne = null;
+        selection.clear();
         statut = "${fusionnees.length} ligne(s) détectée(s) (OCR)";
       });
     } catch (e) {
@@ -801,7 +805,7 @@ class _AccueilState extends State<Accueil> {
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
-      motSelectionne = null;
+      selection.clear();
     });
   }
 
@@ -932,7 +936,7 @@ class _AccueilState extends State<Accueil> {
   void _retirerRepere(MotDetecte mot) {
     setState(() {
       mots = mots.where((m) => m != mot).toList();
-      motSelectionne = null;
+      selection.clear();
       statut = "Cadre retiré (le PDF n'a pas changé)";
     });
   }
@@ -944,7 +948,7 @@ class _AccueilState extends State<Accueil> {
     final avant = mots.length;
     setState(() {
       mots = mots.where((m) => m.texte.isNotEmpty).toList();
-      motSelectionne = null;
+      selection.clear();
       final retires = avant - mots.length;
       statut = retires > 0
           ? "$retires cadre(s) vide(s) retiré(s) (le PDF n'a pas changé)"
@@ -971,7 +975,12 @@ class _AccueilState extends State<Accueil> {
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(controller: controleur, autofocus: true),
+              TextField(
+                controller: controleur,
+                autofocus: true,
+                // Redessine l'aperçu ci-dessous à chaque frappe.
+                onChanged: (_) => setDialogState(() {}),
+              ),
               const SizedBox(height: 4),
               Row(
                 children: [
@@ -1030,6 +1039,36 @@ class _AccueilState extends State<Accueil> {
                           setDialogState(() => tailleChoisie = null),
                     ),
                 ],
+              ),
+              // Aperçu mis à jour instantanément à chaque réglage (taille,
+              // gras, texte tapé) — sans attendre « Valider », puisque la
+              // page reste cachée derrière cette boîte tant qu'elle est
+              // ouverte.
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(top: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    controleur.text.isEmpty ? "Aperçu" : controleur.text,
+                    style: TextStyle(
+                      fontSize: (tailleChoisie ??
+                              _dessinTexte(mot, mot.zone).police.size)
+                          .clamp(4, 40),
+                      fontWeight:
+                          grasChoisi ? FontWeight.bold : FontWeight.normal,
+                      color: controleur.text.isEmpty
+                          ? Theme.of(ctx).colorScheme.outline
+                          : null,
+                    ),
+                  ),
+                ),
               ),
               if (mot.boiteLibre)
                 Row(
@@ -1131,7 +1170,7 @@ class _AccueilState extends State<Accueil> {
       _ecrire(page, mot, mot.zone);
 
       setState(() {
-        motSelectionne = texteNettoye.isEmpty ? null : mot;
+        if (texteNettoye.isEmpty) selection.remove(mot);
       });
 
       if (imageDeFond != null) {
@@ -1184,16 +1223,26 @@ class _AccueilState extends State<Accueil> {
     return concernees.where((m) => !groupe.contains(m)).toList();
   }
 
-  Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) async {
-    if (dx == 0 && dy == 0) return;
+  Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) =>
+      _deplacerGroupe([mot], dx, dy);
+
+  /// Déplace ensemble une ou plusieurs lignes choisies (sélection multiple),
+  /// avec exactement la même logique que le déplacement d'une seule ligne :
+  /// chacune emmène ce qui est sur sa rangée, pousse les voisines gênantes,
+  /// et tout est annulé si quoi que ce soit échoue.
+  Future<void> _deplacerGroupe(
+      List<MotDetecte> lignesPrincipales, double dx, double dy) async {
+    if (dx == 0 && dy == 0 || lignesPrincipales.isEmpty) return;
     final doc = document;
     if (doc == null || _occupe) return;
-    // La ligne emmène avec elle ce qui est sur sa rangée : un tiret ou une
-    // puce détectés à part restaient sinon en arrière.
-    final groupe = <MotDetecte>[
-      mot,
-      ...mots.where((m) => m != mot && _memeRangee(m.zone, mot.zone)),
-    ];
+    // Chaque ligne emmène avec elle ce qui est sur sa rangée : un tiret ou
+    // une puce détectés à part restaient sinon en arrière.
+    final groupe = <MotDetecte>{
+      ...lignesPrincipales,
+      for (final principal in lignesPrincipales)
+        ...mots.where(
+            (m) => m != principal && _memeRangee(m.zone, principal.zone)),
+    }.toList();
 
     final deplacements = <MotDetecte, Offset>{
       for (final m in groupe) m: Offset(dx, dy),
@@ -1299,7 +1348,9 @@ class _AccueilState extends State<Accueil> {
 
     setState(() {
       mots = [...mots, nouvelleLigne];
-      motSelectionne = nouvelleLigne;
+      selection
+            ..clear()
+            ..add(nouvelleLigne);
       enAjoutTexte = false;
     });
 
@@ -1341,7 +1392,9 @@ class _AccueilState extends State<Accueil> {
 
     setState(() {
       mots = [...mots, nouvelleLigne];
-      motSelectionne = nouvelleLigne;
+      selection
+            ..clear()
+            ..add(nouvelleLigne);
       statut = "Repère posé : placez-le puis touchez la gomme pour effacer";
     });
   }
@@ -1373,8 +1426,9 @@ class _AccueilState extends State<Accueil> {
   }
 
   void _copierLigne() {
-    final mot = motSelectionne;
-    if (mot == null || mot.texte.isEmpty) return;
+    if (selection.length != 1) return;
+    final mot = selection.first;
+    if (mot.texte.isEmpty) return;
     // Même rectangle que pour un déplacement (marge + tiret/puce embarqués),
     // pour que l'image capturée corresponde exactement à ce qui est copié.
     final rectCapture = _etendreVersPuce(_rectDeplacement(mot));
@@ -1454,7 +1508,9 @@ class _AccueilState extends State<Accueil> {
 
       setState(() {
         mots = [...mots, nouvelleLigne];
-        motSelectionne = nouvelleLigne;
+        selection
+            ..clear()
+            ..add(nouvelleLigne);
         enCollage = false;
         statut = "Texte collé";
       });
@@ -1546,7 +1602,7 @@ class _AccueilState extends State<Accueil> {
                 : _enregistrer,
           ),
         ],
-        bottom: motSelectionne == null
+        bottom: selection.isEmpty
             ? null
             : PreferredSize(
                 preferredSize: const Size.fromHeight(40),
@@ -1556,31 +1612,42 @@ class _AccueilState extends State<Accueil> {
                     children: [
                       const SizedBox(width: 8),
                       IconButton(
+                        icon: const Icon(Icons.edit, size: 20),
+                        tooltip: "Modifier le texte",
+                        onPressed: selection.length == 1
+                            ? () => _modifierMot(selection.first)
+                            : null,
+                      ),
+                      IconButton(
                         icon: const Icon(Icons.content_copy, size: 20),
                         tooltip: "Copier cette ligne",
-                        onPressed: motSelectionne!.texte.isEmpty
-                            ? null
-                            : _copierLigne,
+                        onPressed: selection.length == 1 &&
+                                selection.first.texte.isNotEmpty
+                            ? _copierLigne
+                            : null,
                       ),
                       IconButton(
                         icon: const Icon(Icons.cleaning_services, size: 20),
                         tooltip: "Effacer ici (gomme)",
-                        onPressed: _occupe
+                        onPressed: _occupe || selection.length != 1
                             ? null
-                            : () => _effacerZone(motSelectionne!),
+                            : () => _effacerZone(selection.first),
                       ),
                       IconButton(
                         icon: const Icon(Icons.delete_outline, size: 20),
                         tooltip: "Retirer ce cadre (n'efface rien dans le PDF)",
-                        onPressed: motSelectionne!.texte.isNotEmpty
-                            ? null
-                            : () => _retirerRepere(motSelectionne!),
+                        onPressed: selection.length == 1 &&
+                                selection.first.texte.isEmpty
+                            ? () => _retirerRepere(selection.first)
+                            : null,
                       ),
                       Expanded(
                         child: Text(
-                          motSelectionne!.texte.isEmpty
-                              ? "(ligne vide)"
-                              : motSelectionne!.texte,
+                          selection.length > 1
+                              ? "${selection.length} éléments sélectionnés"
+                              : (selection.first.texte.isEmpty
+                                  ? "(ligne vide)"
+                                  : selection.first.texte),
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(fontSize: 12),
                         ),
@@ -1590,37 +1657,37 @@ class _AccueilState extends State<Accueil> {
                         tooltip: "Déplacer à gauche",
                         onPressed: _occupe
                             ? null
-                            : () => _deplacerLigne(
-                                motSelectionne!, -_pasDeplacement, 0),
+                            : () => _deplacerGroupe(
+                                selection.toList(), -_pasDeplacement, 0),
                       ),
                       IconButton(
                         icon: const Icon(Icons.arrow_upward, size: 20),
                         tooltip: "Déplacer vers le haut",
                         onPressed: _occupe
                             ? null
-                            : () => _deplacerLigne(
-                                motSelectionne!, 0, -_pasDeplacement),
+                            : () => _deplacerGroupe(
+                                selection.toList(), 0, -_pasDeplacement),
                       ),
                       IconButton(
                         icon: const Icon(Icons.arrow_downward, size: 20),
                         tooltip: "Déplacer vers le bas",
                         onPressed: _occupe
                             ? null
-                            : () => _deplacerLigne(
-                                motSelectionne!, 0, _pasDeplacement),
+                            : () => _deplacerGroupe(
+                                selection.toList(), 0, _pasDeplacement),
                       ),
                       IconButton(
                         icon: const Icon(Icons.arrow_forward, size: 20),
                         tooltip: "Déplacer à droite",
                         onPressed: _occupe
                             ? null
-                            : () => _deplacerLigne(
-                                motSelectionne!, _pasDeplacement, 0),
+                            : () => _deplacerGroupe(
+                                selection.toList(), _pasDeplacement, 0),
                       ),
                       IconButton(
                         icon: const Icon(Icons.close, size: 20),
                         tooltip: "Désélectionner",
-                        onPressed: () => setState(() => motSelectionne = null),
+                        onPressed: () => setState(() => selection.clear()),
                       ),
                     ],
                   ),
@@ -1703,58 +1770,71 @@ class _AccueilState extends State<Accueil> {
                                 for (final mot in mots)
                                 Positioned(
                                   left: mot.zone.left * echelle +
-                                      (mot == ligneEnDeplacement
-                                          ? deplacementEnCours.dx
+                                      (groupeEnDeplacement &&
+                                              selection.contains(mot)
+                                          ? deplacementGroupeEnCours.dx
                                           : 0),
                                   top: mot.zone.top * echelle +
-                                      (mot == ligneEnDeplacement
-                                          ? deplacementEnCours.dy
+                                      (groupeEnDeplacement &&
+                                              selection.contains(mot)
+                                          ? deplacementGroupeEnCours.dy
                                           : 0),
                                   width: mot.zone.width * echelle,
                                   height: mot.zone.height * echelle,
                                   child: GestureDetector(
-                                    onTap: () {
-                                      if (motSelectionne == mot) {
-                                        _modifierMot(mot);
-                                      } else {
-                                        setState(() => motSelectionne = mot);
+                                    // Un tap ajoute ou retire la ligne du
+                                    // groupe sélectionné (rouge) ; pour
+                                    // modifier le texte, on passe par le
+                                    // bouton crayon de la barre du bas.
+                                    onTap: () => setState(() {
+                                      if (!selection.remove(mot)) {
+                                        selection.add(mot);
                                       }
-                                    },
-                                    // Le glisser ne déplace la ligne que si
-                                    // elle est déjà sélectionnée ; sinon le
+                                    }),
+                                    // Le glisser ne déplace que si la ligne
+                                    // fait partie de la sélection ; sinon le
                                     // geste passe à la page (défilement/zoom).
-                                    onPanStart: motSelectionne != mot
+                                    onPanStart: !selection.contains(mot)
                                         ? null
                                         : (_) => setState(() {
-                                              ligneEnDeplacement = mot;
-                                              deplacementEnCours = Offset.zero;
+                                              groupeEnDeplacement = true;
+                                              deplacementGroupeEnCours =
+                                                  Offset.zero;
                                             }),
-                                    onPanUpdate: motSelectionne != mot
+                                    onPanUpdate: !selection.contains(mot)
                                         ? null
                                         : (details) => setState(() {
-                                              deplacementEnCours +=
+                                              deplacementGroupeEnCours +=
                                                   details.delta;
                                             }),
-                                    onPanEnd: motSelectionne != mot
+                                    onPanEnd: !selection.contains(mot)
                                         ? null
                                         : (_) async {
                                             final dx =
-                                                deplacementEnCours.dx / echelle;
+                                                deplacementGroupeEnCours.dx /
+                                                    echelle;
                                             final dy =
-                                                deplacementEnCours.dy / echelle;
+                                                deplacementGroupeEnCours.dy /
+                                                    echelle;
                                             setState(() {
-                                              ligneEnDeplacement = null;
-                                              deplacementEnCours = Offset.zero;
+                                              groupeEnDeplacement = false;
+                                              deplacementGroupeEnCours =
+                                                  Offset.zero;
                                             });
-                                            await _deplacerLigne(mot, dx, dy);
+                                            await _deplacerGroupe(
+                                                selection.toList(), dx, dy);
                                           },
                                     child: Container(
                                       decoration: BoxDecoration(
+                                        color: selection.contains(mot)
+                                            ? Colors.red.withOpacity(0.12)
+                                            : null,
                                         border: Border.all(
-                                          color: motSelectionne == mot
+                                          color: selection.contains(mot)
                                               ? Colors.red
                                               : Colors.blue.withOpacity(0.3),
-                                          width: motSelectionne == mot ? 2 : 1,
+                                          width:
+                                              selection.contains(mot) ? 2 : 1,
                                         ),
                                       ),
                                       child: imageDeFond != null
