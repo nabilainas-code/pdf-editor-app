@@ -79,6 +79,13 @@ class _AccueilState extends State<Accueil> {
 
   final TransformationController _transformation = TransformationController();
 
+  /// En mode navigation, le doigt fait glisser la page et les lignes ne
+  /// réagissent plus ; en mode édition, le doigt sélectionne / modifie et le
+  /// déplacement de la page se fait à deux doigts. Sans cette séparation, le
+  /// glissement de page et les appuis sur les lignes se disputaient le geste
+  /// et les appuis (dont « Supprimer ») passaient à la trappe.
+  bool modeNavigation = false;
+
   @override
   void initState() {
     super.initState();
@@ -671,6 +678,44 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Lignes à pousser pour que [nouvelleZone] ne recouvre rien, avec le
+  /// décalage vertical à leur appliquer. Le sens du déplacement décide du
+  /// côté où elles sont repoussées, et la poussée se propage de proche en
+  /// proche (une ligne poussée peut à son tour en pousser une autre).
+  List<({MotDetecte mot, double dy})> _decalagesNecessaires(
+    MotDetecte deplace,
+    Rect nouvelleZone,
+    double sens,
+  ) {
+    if (sens == 0) return const [];
+    const marge = 2.0;
+
+    final autres = mots
+        .where((m) => m != deplace && m.texte.isNotEmpty)
+        .toList()
+      ..sort((a, b) => sens > 0
+          ? a.zone.top.compareTo(b.zone.top)
+          : b.zone.top.compareTo(a.zone.top));
+
+    final decalages = <({MotDetecte mot, double dy})>[];
+    var reference = nouvelleZone;
+    for (final autre in autres) {
+      final zone = autre.zone;
+      final seChevauchent = reference.top < zone.bottom &&
+          zone.top < reference.bottom &&
+          reference.left < zone.right &&
+          zone.left < reference.right;
+      if (!seChevauchent) continue;
+
+      final dy = sens > 0
+          ? (reference.bottom + marge) - zone.top
+          : (reference.top - marge) - zone.bottom;
+      decalages.add((mot: autre, dy: dy));
+      reference = zone.translate(0, dy);
+    }
+    return decalages;
+  }
+
   Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) async {
     if (dx == 0 && dy == 0) return;
     final doc = document;
@@ -701,9 +746,29 @@ class _AccueilState extends State<Accueil> {
         ancienneZone.height,
       );
 
-      _ecrire(page, mot, nouvelleZone);
+      // Les lignes que la nouvelle position recouvrirait sont poussées dans
+      // le même sens, en cascade, pour laisser la place au lieu de se
+      // chevaucher. On efface tout avant de tout redessiner, sinon un
+      // effacement effacerait ce qu'un dessin précédent vient de poser.
+      final decalages = _decalagesNecessaires(mot, nouvelleZone, dy);
+      for (final d in decalages) {
+        page.graphics.drawRectangle(
+          brush: PdfSolidBrush(_couleurDeFond(d.mot)),
+          bounds: _rectEffacement(d.mot),
+        );
+      }
 
-      setState(() => mot.zone = nouvelleZone);
+      _ecrire(page, mot, nouvelleZone);
+      for (final d in decalages) {
+        _ecrire(page, d.mot, d.mot.zone.translate(0, d.dy));
+      }
+
+      setState(() {
+        mot.zone = nouvelleZone;
+        for (final d in decalages) {
+          d.mot.zone = d.mot.zone.translate(0, d.dy);
+        }
+      });
 
       if (imageDeFond != null) {
         await _rafraichirApercuOcr(doc);
@@ -1026,6 +1091,7 @@ class _AccueilState extends State<Accueil> {
                           // fait au doigt une fois la ligne sélectionnée,
                           // donc les deux gestes ne se marchent pas dessus.
                           transformationController: _transformation,
+                          panEnabled: modeNavigation,
                           constrained: false,
                           boundaryMargin: const EdgeInsets.all(double.infinity),
                           minScale: 0.5,
@@ -1037,26 +1103,34 @@ class _AccueilState extends State<Accueil> {
                               children: [
                                 SizedBox.expand(
                                   child: GestureDetector(
-                                  onLongPressStart: (details) {
-                                    _ajouterZoneEffacee(
-                                      details.localPosition.dx / echelle,
-                                      details.localPosition.dy / echelle,
-                                    );
-                                  },
-                                  onTapUp: (details) {
-                                    if (enCollage) {
-                                      _collerA(
-                                        details.localPosition.dx / echelle,
-                                        details.localPosition.dy / echelle,
-                                      );
-                                    }
-                                  },
-                                  child: imageDeFond != null
-                                      ? Image.memory(imageDeFond!, fit: BoxFit.fill)
-                                      : Container(color: Colors.white),
+                                    onLongPressStart: modeNavigation
+                                        ? null
+                                        : (details) {
+                                            _ajouterZoneEffacee(
+                                              details.localPosition.dx / echelle,
+                                              details.localPosition.dy / echelle,
+                                            );
+                                          },
+                                    onTapUp: modeNavigation
+                                        ? null
+                                        : (details) {
+                                            if (enCollage) {
+                                              _collerA(
+                                                details.localPosition.dx /
+                                                    echelle,
+                                                details.localPosition.dy /
+                                                    echelle,
+                                              );
+                                            }
+                                          },
+                                    child: imageDeFond != null
+                                        ? Image.memory(imageDeFond!,
+                                            fit: BoxFit.fill)
+                                        : Container(color: Colors.white),
+                                  ),
                                 ),
-                              ),
-                              for (final mot in mots)
+                              if (!modeNavigation)
+                                for (final mot in mots)
                                 Positioned(
                                   left: mot.zone.left * echelle +
                                       (mot == ligneEnDeplacement
@@ -1141,10 +1215,37 @@ class _AccueilState extends State<Accueil> {
       ),
       floatingActionButton: mots.isEmpty
           ? null
-          : FloatingActionButton.small(
-              tooltip: "Recentrer / réinitialiser le zoom",
-              onPressed: () => _transformation.value = Matrix4.identity(),
-              child: const Icon(Icons.zoom_out_map),
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: "mode",
+                  tooltip: modeNavigation
+                      ? "Mode navigation : doigt = déplacer la page"
+                      : "Mode édition : doigt = sélectionner une ligne",
+                  backgroundColor: modeNavigation
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                  foregroundColor: modeNavigation
+                      ? Theme.of(context).colorScheme.onPrimary
+                      : null,
+                  onPressed: () => setState(() {
+                    modeNavigation = !modeNavigation;
+                    statut = modeNavigation
+                        ? "Mode navigation : faites glisser la page"
+                        : "Mode édition : touchez une ligne";
+                  }),
+                  child: Icon(
+                      modeNavigation ? Icons.pan_tool : Icons.touch_app),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: "recentrer",
+                  tooltip: "Recentrer / réinitialiser le zoom",
+                  onPressed: () => _transformation.value = Matrix4.identity(),
+                  child: const Icon(Icons.zoom_out_map),
+                ),
+              ],
             ),
     );
   }
