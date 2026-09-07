@@ -37,8 +37,19 @@ class MotDetecte {
   /// d'origine (inconnue), d'où ce réglage pour compenser à l'œil.
   double? tailleManuelle;
 
+  /// Vrai pour une zone de texte libre créée avec l'outil « + » : sa largeur
+  /// reste fixe (elle ne s'ajuste pas au contenu comme une ligne OCR) et son
+  /// alignement peut être choisi. Faux pour une ligne issue de la détection,
+  /// dont le comportement reste celui d'origine.
+  bool boiteLibre;
+  PdfTextAlignment alignement;
+
   MotDetecte(this.texte, this.zone,
-      {this.gras = false, this.redessine = false, this.tailleManuelle});
+      {this.gras = false,
+      this.redessine = false,
+      this.tailleManuelle,
+      this.boiteLibre = false,
+      this.alignement = PdfTextAlignment.left});
 }
 
 class Etat {
@@ -87,6 +98,11 @@ class _AccueilState extends State<Accueil> {
   Uint8List? imageCopiee;
 
   bool enCollage = false;
+
+  /// Prochain appui sur la page = poser une nouvelle zone de texte libre à
+  /// cet endroit et ouvrir directement sa modification, plutôt que le geste
+  /// à deux temps (appui long puis toucher) qui n'était pas évident.
+  bool enAjoutTexte = false;
 
   static const double _pasDeplacement = 3.0;
 
@@ -526,8 +542,12 @@ class _AccueilState extends State<Accueil> {
       mesure = police.measureString(mot.texte);
     }
 
-    // Seul garde-fou restant : ne pas déborder du bord de la page.
-    final largeurDispo = taillePage.width - zone.left - 2;
+    // Largeur disponible pour ne pas déborder : le bord de la page pour une
+    // ligne normale ; la largeur fixe de la boîte pour une zone libre, dont
+    // le cadre ne s'agrandit jamais au contenu (c'est ce qui permet de
+    // centrer ou d'aligner à droite dedans).
+    final largeurDispo =
+        mot.boiteLibre ? zone.width - 4 : taillePage.width - zone.left - 2;
     if (largeurDispo > 0 && mesure.width > largeurDispo) {
       var taille = police.size * largeurDispo / mesure.width;
       if (taille < 4) taille = 4;
@@ -535,8 +555,9 @@ class _AccueilState extends State<Accueil> {
       mesure = police.measureString(mot.texte);
     }
 
-    final largeur =
-        (mesure.width > zone.width ? mesure.width : zone.width) + 2;
+    final largeur = mot.boiteLibre
+        ? zone.width
+        : (mesure.width > zone.width ? mesure.width : zone.width) + 2;
     final hauteur = mesure.height > zone.height ? mesure.height : zone.height;
     return (
       rect: Rect.fromLTWH(
@@ -729,7 +750,7 @@ class _AccueilState extends State<Accueil> {
       bounds: dessin.rect,
       brush: PdfSolidBrush(PdfColor(0, 0, 0)),
       format: PdfStringFormat(
-        alignment: PdfTextAlignment.left,
+        alignment: mot.boiteLibre ? mot.alignement : PdfTextAlignment.left,
         lineAlignment: PdfVerticalAlignment.middle,
       ),
     );
@@ -742,7 +763,9 @@ class _AccueilState extends State<Accueil> {
         .map((m) => MotDetecte(m.texte, m.zone,
             gras: m.gras,
             redessine: m.redessine,
-            tailleManuelle: m.tailleManuelle))
+            tailleManuelle: m.tailleManuelle,
+            boiteLibre: m.boiteLibre,
+            alignement: m.alignement))
         .toList();
     return Etat(octetsDocument, motsCopie, imageDeFond);
   }
@@ -756,7 +779,9 @@ class _AccueilState extends State<Accueil> {
           .map((m) => MotDetecte(m.texte, m.zone,
               gras: m.gras,
               redessine: m.redessine,
-              tailleManuelle: m.tailleManuelle))
+              tailleManuelle: m.tailleManuelle,
+              boiteLibre: m.boiteLibre,
+              alignement: m.alignement))
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
@@ -903,6 +928,7 @@ class _AccueilState extends State<Accueil> {
     // réglage est la taille actuellement utilisée (manuelle ou estimée), pour
     // ajuster à partir de ce qui est affiché plutôt que de repartir de zéro.
     double? tailleChoisie = mot.tailleManuelle;
+    var alignementChoisi = mot.alignement;
 
     final resultat = await showDialog<Map<String, Object?>>(
       context: context,
@@ -961,6 +987,34 @@ class _AccueilState extends State<Accueil> {
                     ),
                 ],
               ),
+              if (mot.boiteLibre)
+                Row(
+                  children: [
+                    const Text("Alignement"),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.format_align_left),
+                      isSelected: alignementChoisi == PdfTextAlignment.left,
+                      tooltip: "Aligner à gauche",
+                      onPressed: () => setDialogState(
+                          () => alignementChoisi = PdfTextAlignment.left),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.format_align_center),
+                      isSelected: alignementChoisi == PdfTextAlignment.center,
+                      tooltip: "Centrer",
+                      onPressed: () => setDialogState(
+                          () => alignementChoisi = PdfTextAlignment.center),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.format_align_right),
+                      isSelected: alignementChoisi == PdfTextAlignment.right,
+                      tooltip: "Aligner à droite",
+                      onPressed: () => setDialogState(
+                          () => alignementChoisi = PdfTextAlignment.right),
+                    ),
+                  ],
+                ),
             ],
           ),
           actions: [
@@ -982,6 +1036,7 @@ class _AccueilState extends State<Accueil> {
                 "texte": controleur.text,
                 "gras": grasChoisi,
                 "taille": tailleChoisie,
+                "alignement": alignementChoisi,
               }),
               child: const Text("Valider"),
             ),
@@ -994,6 +1049,8 @@ class _AccueilState extends State<Accueil> {
     final texteNettoye = (resultat["texte"] as String).trim();
     final grasFinal = resultat["gras"] as bool;
     final tailleFinale = resultat["taille"] as double?;
+    final alignementFinal =
+        resultat["alignement"] as PdfTextAlignment? ?? mot.alignement;
 
     // « Supprimer » sur une ligne déjà vide : il ne reste que le cadre bleu,
     // simple repère d'affichage absent du PDF. On le retire de la liste.
@@ -1004,7 +1061,8 @@ class _AccueilState extends State<Accueil> {
 
     if (texteNettoye == mot.texte &&
         grasFinal == mot.gras &&
-        tailleFinale == mot.tailleManuelle) {
+        tailleFinale == mot.tailleManuelle &&
+        alignementFinal == mot.alignement) {
       return;
     }
 
@@ -1021,6 +1079,7 @@ class _AccueilState extends State<Accueil> {
       mot.gras = grasFinal;
       mot.texte = texteNettoye;
       mot.tailleManuelle = tailleFinale;
+      mot.alignement = alignementFinal;
       _ecrire(page, mot, mot.zone);
 
       setState(() {
@@ -1164,6 +1223,38 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Pose une zone de texte libre à l'endroit touché et ouvre directement sa
+  /// modification : un seul geste pour écrire n'importe où, avec largeur
+  /// fixe et alignement au choix (gauche/centre/droite), contrairement aux
+  /// lignes détectées dont le cadre s'ajuste toujours au contenu.
+  Future<void> _ajouterTexte(double xPage, double yPage) async {
+    if (document == null || _occupe) return;
+
+    const largeur = 220.0;
+    const hauteur = 18.0;
+    final zone = Rect.fromLTWH(
+      (xPage - largeur / 2).clamp(0, taillePage.width - largeur),
+      yPage - hauteur / 2,
+      largeur,
+      hauteur,
+    );
+    final nouvelleLigne = MotDetecte("", zone, boiteLibre: true);
+
+    setState(() {
+      mots = [...mots, nouvelleLigne];
+      motSelectionne = nouvelleLigne;
+      enAjoutTexte = false;
+    });
+
+    await _modifierMot(nouvelleLigne);
+
+    // Rien écrit et rien saisi dans la boîte : on retire le cadre vide au
+    // lieu de laisser un repère fantôme après un appui accidentel.
+    if (nouvelleLigne.texte.isEmpty && mots.contains(nouvelleLigne)) {
+      _retirerRepere(nouvelleLigne);
+    }
+  }
+
   /// Pose un repère à l'endroit d'un appui long, pour attraper un résidu
   /// (trait, tache) que l'OCR n'a pas détecté comme ligne. Il n'efface rien
   /// tout seul : on le place d'abord (flèches / glisser), et c'est le bouton
@@ -1245,6 +1336,7 @@ class _AccueilState extends State<Accueil> {
     if (texteCopie == null) return;
     setState(() {
       enCollage = true;
+      enAjoutTexte = false;
       statut = "Touchez l'endroit de la page où coller le texte";
     });
   }
@@ -1271,9 +1363,17 @@ class _AccueilState extends State<Accueil> {
       (m) => m.texte.isNotEmpty && zoneVisee.inflate(3).overlaps(m.zone),
     );
     if (surLigneExistante) {
-      setState(() => statut =
+      const message =
           "Cet endroit chevauche une ligne existante : touchez un espace "
-          "libre pour coller");
+          "libre pour coller";
+      setState(() => statut = message);
+      // En plus du texte de statut, facile à manquer : un message visible
+      // pour ne pas laisser croire que le collage n'a « rien fait ».
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(const SnackBar(content: Text(message)));
+      }
       return;
     }
 
@@ -1518,6 +1618,13 @@ class _AccueilState extends State<Accueil> {
                                                 details.localPosition.dy /
                                                     echelle,
                                               );
+                                            } else if (enAjoutTexte) {
+                                              _ajouterTexte(
+                                                details.localPosition.dx /
+                                                    echelle,
+                                                details.localPosition.dy /
+                                                    echelle,
+                                              );
                                             }
                                           },
                                     child: imageDeFond != null
@@ -1526,11 +1633,11 @@ class _AccueilState extends State<Accueil> {
                                         : Container(color: Colors.white),
                                   ),
                                 ),
-                              // Pendant un collage, les cadres laissent
-                              // passer l'appui : sinon coller sur une zone
-                              // occupée par une ligne sélectionnait cette
-                              // ligne au lieu de déposer le texte.
-                              if (!modeNavigation && !enCollage)
+                              // Pendant un collage ou un ajout de texte, les
+                              // cadres laissent passer l'appui : sinon toucher
+                              // une zone occupée par une ligne la sélectionnait
+                              // au lieu de déposer le texte à cet endroit.
+                              if (!modeNavigation && !enCollage && !enAjoutTexte)
                                 for (final mot in mots)
                                 Positioned(
                                   left: mot.zone.left * echelle +
@@ -1619,6 +1726,28 @@ class _AccueilState extends State<Accueil> {
           : Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                FloatingActionButton.small(
+                  heroTag: "ajoutTexte",
+                  tooltip: enAjoutTexte
+                      ? "Touchez la page pour écrire à cet endroit"
+                      : "Ajouter du texte n'importe où",
+                  backgroundColor:
+                      enAjoutTexte ? Theme.of(context).colorScheme.primary : null,
+                  foregroundColor: enAjoutTexte
+                      ? Theme.of(context).colorScheme.onPrimary
+                      : null,
+                  onPressed: _occupe
+                      ? null
+                      : () => setState(() {
+                            enAjoutTexte = !enAjoutTexte;
+                            if (enAjoutTexte) enCollage = false;
+                            statut = enAjoutTexte
+                                ? "Touchez la page pour écrire à cet endroit"
+                                : "Ajout de texte annulé";
+                          }),
+                  child: const Icon(Icons.add),
+                ),
+                const SizedBox(height: 8),
                 FloatingActionButton.small(
                   heroTag: "mode",
                   tooltip: modeNavigation
