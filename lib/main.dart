@@ -1242,17 +1242,34 @@ class _AccueilState extends State<Accueil> {
     final doc = document;
     final texte = texteCopie;
     if (doc == null || texte == null || _occupe) return;
+
+    final zoneVisee = Rect.fromLTWH(
+      xPage - largeurCopiee / 2,
+      yPage - hauteurCopiee / 2,
+      largeurCopiee,
+      hauteurCopiee,
+    );
+
+    // Coller ne fait qu'ajouter du texte à l'endroit touché : ça ne repeint
+    // pas la destination, donc coller sur une ligne existante empile le
+    // texte collé par-dessus au lieu de le remplacer, illisible. On demande
+    // un autre endroit plutôt que de produire ce chevauchement.
+    final surLigneExistante = mots.any(
+      (m) => m.texte.isNotEmpty && zoneVisee.inflate(3).overlaps(m.zone),
+    );
+    if (surLigneExistante) {
+      setState(() => statut =
+          "Cet endroit chevauche une ligne existante : touchez un espace "
+          "libre pour coller");
+      return;
+    }
+
     setState(() => _occupe = true);
     try {
       historique.add(await _etatActuel(doc));
       futur.clear();
 
-      final zone = Rect.fromLTWH(
-        xPage - largeurCopiee / 2,
-        yPage - hauteurCopiee / 2,
-        largeurCopiee,
-        hauteurCopiee,
-      );
+      final zone = zoneVisee;
 
       final page = doc.pages[0];
       final nouvelleLigne = MotDetecte(texte, zone,
