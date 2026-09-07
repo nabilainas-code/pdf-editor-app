@@ -1139,7 +1139,11 @@ class _AccueilState extends State<Accueil> {
                                         : Container(color: Colors.white),
                                   ),
                                 ),
-                              if (!modeNavigation)
+                              // Pendant un collage, les cadres laissent
+                              // passer l'appui : sinon coller sur une zone
+                              // occupée par une ligne sélectionnait cette
+                              // ligne au lieu de déposer le texte.
+                              if (!modeNavigation && !enCollage)
                                 for (final mot in mots)
                                 Positioned(
                                   left: mot.zone.left * echelle +
