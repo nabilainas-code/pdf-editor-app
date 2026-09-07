@@ -628,7 +628,19 @@ class _AccueilState extends State<Accueil> {
       final sansAlpha = morceau.numChannels == 4
           ? morceau.convert(numChannels: 3)
           : morceau;
-      return img.encodePng(sansAlpha);
+      final octets = img.encodePng(sansAlpha);
+
+      // Vérification par aller-retour : un PNG mal formé n'échoue pas
+      // toujours au moment de l'encoder, seulement plus tard quand le
+      // moteur PDF essaie de le lire — trop tard pour être rattrapé, ça
+      // laissait une zone effacée sans rien dessiné à la place. On préfère
+      // ici basculer sur le texte redessiné (moins fidèle, mais fiable)
+      // plutôt que risquer une capture illisible.
+      final relu = img.decodePng(octets);
+      if (relu == null || relu.width != largeur || relu.height != hauteur) {
+        return null;
+      }
+      return octets;
     } catch (_) {
       return null;
     }
