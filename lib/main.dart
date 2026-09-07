@@ -537,7 +537,11 @@ class _AccueilState extends State<Accueil> {
 
     if (mot.tailleManuelle == null && mesure.height > 0 && zone.height > 0) {
       var taille = police.size * zone.height / mesure.height * 1.15;
+      // Garde-fou : un calcul aberrant (mesure dégénérée) donnerait sinon
+      // une police gigantesque, qui a déjà fait échouer le dessin en
+      // silence, laissant un cadre effacé sans texte.
       if (taille < 4) taille = 4;
+      if (taille > 96) taille = 96;
       police = _police(mot, taille);
       mesure = police.measureString(mot.texte);
     }
@@ -1069,8 +1073,9 @@ class _AccueilState extends State<Accueil> {
     final doc = document;
     if (doc == null || _occupe) return;
     setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
     try {
-      historique.add(await _etatActuel(doc));
+      historique.add(avant);
       futur.clear();
 
       final page = doc.pages[0];
@@ -1089,6 +1094,12 @@ class _AccueilState extends State<Accueil> {
       if (imageDeFond != null) {
         await _rafraichirApercuOcr(doc);
       }
+    } catch (e) {
+      // La zone a déjà été effacée à cet instant : sans ce retour en
+      // arrière, un échec du dessin laisserait un cadre vide sans texte.
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Modification annulée (rien n'a été perdu) : $e");
     } finally {
       setState(() => _occupe = false);
     }
@@ -1381,8 +1392,9 @@ class _AccueilState extends State<Accueil> {
     }
 
     setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
     try {
-      historique.add(await _etatActuel(doc));
+      historique.add(avant);
       futur.clear();
 
       final zone = zoneVisee;
@@ -1407,6 +1419,10 @@ class _AccueilState extends State<Accueil> {
       if (imageDeFond != null) {
         await _rafraichirApercuOcr(doc);
       }
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Collage annulé (rien n'a été perdu) : $e");
     } finally {
       setState(() => _occupe = false);
     }
