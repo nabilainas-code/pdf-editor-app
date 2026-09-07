@@ -937,6 +937,21 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  /// Retire d'un coup tous les cadres vides (repères posés par appui long,
+  /// ajouts de texte annulés...) : ils n'affectent jamais le PDF, mais
+  /// s'accumulent vite et deviennent pénibles à retirer un par un.
+  void _nettoyerReperesVides() {
+    final avant = mots.length;
+    setState(() {
+      mots = mots.where((m) => m.texte.isNotEmpty).toList();
+      motSelectionne = null;
+      final retires = avant - mots.length;
+      statut = retires > 0
+          ? "$retires cadre(s) vide(s) retiré(s) (le PDF n'a pas changé)"
+          : "Aucun cadre vide à retirer";
+    });
+  }
+
   Future<void> _modifierMot(MotDetecte mot) async {
     final controleur = TextEditingController(text: mot.texte);
     var grasChoisi = mot.gras;
@@ -1828,6 +1843,13 @@ class _AccueilState extends State<Accueil> {
                   tooltip: "Rédaction définitive (avant de partager)",
                   onPressed: _occupe ? null : _confirmerAplatissement,
                   child: const Icon(Icons.security),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: "nettoyer",
+                  tooltip: "Retirer tous les cadres vides",
+                  onPressed: _occupe ? null : _nettoyerReperesVides,
+                  child: const Icon(Icons.clear_all),
                 ),
               ],
             ),
