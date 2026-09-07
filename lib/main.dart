@@ -75,6 +75,13 @@ class _AccueilState extends State<Accueil> {
 
   static const double _pasDeplacement = 3.0;
 
+  /// Résolution de rastérisation de la page scannée. Les zones déplacées ou
+  /// collées sont des images découpées dans cette rastérisation : à 200dpi
+  /// elles étaient nettement moins nettes que le reste du scan (souvent
+  /// numérisé à 300dpi ou plus), ce qui rendait la zone modifiée visible au
+  /// zoom — flou, traits plus épais qu'autour.
+  static const double _dpiOcr = 300.0;
+
   bool _occupe = false;
 
   final TransformationController _transformation = TransformationController();
@@ -316,7 +323,7 @@ class _AccueilState extends State<Accueil> {
   }
 
   Future<void> _analyserParOcr(PdfDocument doc, PdfPage page) async {
-    const dpi = 200.0;
+    const dpi = _dpiOcr;
     TextRecognizer? recognizer;
     try {
       final octetsDoc = Uint8List.fromList(await doc.save());
@@ -388,7 +395,7 @@ class _AccueilState extends State<Accueil> {
   }
 
   Future<void> _rafraichirApercuOcr(PdfDocument doc) async {
-    const dpi = 200.0;
+    const dpi = _dpiOcr;
     try {
       final octetsDoc = Uint8List.fromList(await doc.save());
       PdfRaster? raster;
