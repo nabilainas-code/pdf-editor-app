@@ -495,19 +495,28 @@ class _AccueilState extends State<Accueil> {
   ({Rect rect, PdfStandardFont police}) _dessinTexte(MotDetecte mot, Rect zone) {
     final base = zone.height * 0.75;
     var police = _police(mot, base);
-    final mesureBase = police.measureString(mot.texte);
+    var mesure = police.measureString(mot.texte);
 
-    if (mesureBase.width > 0 && zone.width > 0) {
-      var ajustee = base * zone.width / mesureBase.width;
-      // Garde-fous : une zone fusionnée (puce + texte, gros interligne...)
-      // donnerait sinon une taille aberrante.
-      if (ajustee < base * 0.6) ajustee = base * 0.6;
-      if (ajustee > base * 1.4) ajustee = base * 1.4;
-      if (ajustee < 4) ajustee = 4;
-      police = _police(mot, ajustee);
+    // Taille calée sur la hauteur du cadre détecté : c'est elle qui décide de
+    // la taille apparente des lettres. Caler sur la largeur, comme avant,
+    // rapetissait le texte dès qu'Helvetica était plus large que la police
+    // d'origine.
+    if (mesure.height > 0 && zone.height > 0) {
+      var taille = base * zone.height / mesure.height;
+      if (taille < 4) taille = 4;
+      police = _police(mot, taille);
+      mesure = police.measureString(mot.texte);
     }
 
-    final mesure = police.measureString(mot.texte);
+    // Seul garde-fou restant : ne pas déborder du bord de la page.
+    final largeurDispo = taillePage.width - zone.left - 2;
+    if (largeurDispo > 0 && mesure.width > largeurDispo) {
+      var taille = police.size * largeurDispo / mesure.width;
+      if (taille < 4) taille = 4;
+      police = _police(mot, taille);
+      mesure = police.measureString(mot.texte);
+    }
+
     final largeur =
         (mesure.width > zone.width ? mesure.width : zone.width) + 2;
     final hauteur = mesure.height > zone.height ? mesure.height : zone.height;
@@ -522,17 +531,54 @@ class _AccueilState extends State<Accueil> {
     );
   }
 
-  /// Rectangle à repeindre pour effacer une ligne : la zone détectée (l'encre
+  /// Rectangle occupé par le contenu d'une ligne : la zone détectée (l'encre
   /// d'origine) plus, le cas échéant, le débordement du texte qu'on a
   /// nous-mêmes dessiné à cet endroit.
-  Rect _rectEffacement(MotDetecte mot) {
+  Rect _rectContenu(MotDetecte mot) {
     var rect = mot.zone;
     // Uniquement pour le texte qu'on a redessiné : celui d'origine tient dans
-    // sa zone détectée, et élargir l'effacement effacerait ses voisins.
+    // sa zone détectée, et élargir la zone empièterait sur ses voisins.
     if (mot.redessine && mot.texte.isNotEmpty) {
       rect = rect.expandToInclude(_dessinTexte(mot, mot.zone).rect);
     }
-    return rect.inflate(3);
+    return rect;
+  }
+
+  Rect _rectEffacement(MotDetecte mot) => _rectContenu(mot).inflate(3);
+
+  /// Découpe l'aperçu de la page pour récupérer le contenu d'une zone tel
+  /// qu'il est réellement imprimé. Déplacer cette image plutôt que de
+  /// réécrire le texte conserve exactement la police, la graisse et la taille
+  /// d'origine — impossible à reproduire en Helvetica.
+  PdfBitmap? _capturerZone(Rect zone) {
+    final image = imageDecodee;
+    if (image == null) return null;
+    final e = echelleOcr;
+
+    final x = (zone.left * e).round().clamp(0, image.width - 1);
+    final y = (zone.top * e).round().clamp(0, image.height - 1);
+    final largeur = (zone.width * e).round().clamp(1, image.width - x);
+    final hauteur = (zone.height * e).round().clamp(1, image.height - y);
+
+    try {
+      final morceau = img.copyCrop(image,
+          x: x, y: y, width: largeur, height: hauteur);
+      return PdfBitmap(img.encodePng(morceau));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Deux zones sont sur la même rangée si elles se recouvrent nettement en
+  /// hauteur : c'est ce qui permet à un tiret ou une puce détecté à part de
+  /// suivre la ligne à laquelle il appartient.
+  bool _memeRangee(Rect a, Rect b) {
+    final haut = a.top > b.top ? a.top : b.top;
+    final bas = a.bottom < b.bottom ? a.bottom : b.bottom;
+    final chevauchement = bas - haut;
+    if (chevauchement <= 0) return false;
+    final hauteurMin = a.height < b.height ? a.height : b.height;
+    return hauteurMin > 0 && chevauchement > hauteurMin * 0.5;
   }
 
   void _ecrire(PdfPage page, MotDetecte mot, Rect zone) {
@@ -707,7 +753,7 @@ class _AccueilState extends State<Accueil> {
   /// côté où elles sont repoussées, et la poussée se propage de proche en
   /// proche (une ligne poussée peut à son tour en pousser une autre).
   List<({MotDetecte mot, double dy})> _decalagesNecessaires(
-    MotDetecte deplace,
+    List<MotDetecte> deplaces,
     Rect nouvelleZone,
     double sens,
   ) {
@@ -715,7 +761,7 @@ class _AccueilState extends State<Accueil> {
     const marge = 2.0;
 
     final autres = mots
-        .where((m) => m != deplace && m.texte.isNotEmpty)
+        .where((m) => !deplaces.contains(m) && m.texte.isNotEmpty)
         .toList()
       ..sort((a, b) => sens > 0
           ? a.zone.top.compareTo(b.zone.top)
@@ -750,47 +796,59 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[0];
-      final ancienneZone = mot.zone;
+      final nouvelleZone = mot.zone.translate(dx, dy);
 
-      // Une ligne vide (gomme posée à l'appui long, ou ligne supprimée) n'a
-      // rien d'écrit à son ancienne place : la repeindre reviendrait à
-      // effacer le contenu qu'elle survole à chaque pas, ce qui barrait le
-      // texte. On ne repeint donc que si on déplace du texte.
-      if (mot.texte.isNotEmpty) {
-        page.graphics.drawRectangle(
-          brush: PdfSolidBrush(_couleurDeFond(mot)),
-          bounds: _rectEffacement(mot),
-        );
-      }
+      // La ligne emmène avec elle ce qui est sur sa rangée : un tiret ou une
+      // puce détectés à part restaient sinon en arrière.
+      final groupe = <MotDetecte>[
+        mot,
+        ...mots.where((m) => m != mot && _memeRangee(m.zone, mot.zone)),
+      ];
 
-      final nouvelleZone = Rect.fromLTWH(
-        ancienneZone.left + dx,
-        ancienneZone.top + dy,
-        ancienneZone.width,
-        ancienneZone.height,
-      );
-
+      final deplacements = <MotDetecte, Offset>{
+        for (final m in groupe) m: Offset(dx, dy),
+      };
       // Les lignes que la nouvelle position recouvrirait sont poussées dans
-      // le même sens, en cascade, pour laisser la place au lieu de se
-      // chevaucher. On efface tout avant de tout redessiner, sinon un
-      // effacement effacerait ce qu'un dessin précédent vient de poser.
-      final decalages = _decalagesNecessaires(mot, nouvelleZone, dy);
-      for (final d in decalages) {
+      // le même sens, en cascade, pour laisser la place.
+      for (final d in _decalagesNecessaires(groupe, nouvelleZone, dy)) {
+        deplacements[d.mot] = Offset(0, d.dy);
+      }
+
+      // On photographie chaque contenu avant de toucher à la page : déplacer
+      // l'image imprimée conserve la police et la graisse d'origine, qu'on ne
+      // saurait pas reproduire en Helvetica. Une zone vide (gomme, ligne
+      // supprimée) n'a rien à déplacer ni à effacer.
+      final captures = <MotDetecte, PdfBitmap?>{};
+      for (final m in deplacements.keys) {
+        captures[m] =
+            m.texte.isEmpty ? null : _capturerZone(_rectContenu(m).inflate(1));
+      }
+
+      for (final m in deplacements.keys) {
+        if (m.texte.isEmpty) continue;
         page.graphics.drawRectangle(
-          brush: PdfSolidBrush(_couleurDeFond(d.mot)),
-          bounds: _rectEffacement(d.mot),
+          brush: PdfSolidBrush(_couleurDeFond(m)),
+          bounds: _rectEffacement(m),
         );
       }
 
-      _ecrire(page, mot, nouvelleZone);
-      for (final d in decalages) {
-        _ecrire(page, d.mot, d.mot.zone.translate(0, d.dy));
+      for (final entree in deplacements.entries) {
+        final m = entree.key;
+        if (m.texte.isEmpty) continue;
+        final capture = captures[m];
+        if (capture != null) {
+          page.graphics.drawImage(
+            capture,
+            _rectContenu(m).inflate(1).shift(entree.value),
+          );
+        } else {
+          _ecrire(page, m, m.zone.shift(entree.value));
+        }
       }
 
       setState(() {
-        mot.zone = nouvelleZone;
-        for (final d in decalages) {
-          d.mot.zone = d.mot.zone.translate(0, d.dy);
+        for (final entree in deplacements.entries) {
+          entree.key.zone = entree.key.zone.shift(entree.value);
         }
       });
 
