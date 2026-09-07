@@ -544,7 +544,22 @@ class _AccueilState extends State<Accueil> {
     return rect;
   }
 
-  Rect _rectEffacement(MotDetecte mot) => _rectContenu(mot).inflate(3);
+  Rect _rectEffacement(MotDetecte mot) => _rectContenu(mot).inflate(2);
+
+  /// Rectangle utilisé pour déplacer une ligne : il sert à la fois à la
+  /// photographier et à effacer sa place, si bien que rien ne se perd en
+  /// route. La marge est large horizontalement, car le cadre détecté rogne
+  /// souvent la première et la dernière lettre, mais fine verticalement pour
+  /// ne pas mordre sur les lignes du dessus et du dessous.
+  Rect _rectDeplacement(MotDetecte mot) {
+    final rect = _rectContenu(mot);
+    return Rect.fromLTRB(
+      rect.left - 4,
+      rect.top - 1.5,
+      rect.right + 4,
+      rect.bottom + 1.5,
+    );
+  }
 
   /// Découpe l'aperçu de la page pour récupérer le contenu d'une zone tel
   /// qu'il est réellement imprimé. Déplacer cette image plutôt que de
@@ -748,87 +763,90 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
-  /// Lignes à pousser pour que [nouvelleZone] ne recouvre rien, avec le
-  /// décalage vertical à leur appliquer. Le sens du déplacement décide du
-  /// côté où elles sont repoussées, et la poussée se propage de proche en
-  /// proche (une ligne poussée peut à son tour en pousser une autre).
-  List<({MotDetecte mot, double dy})> _decalagesNecessaires(
-    List<MotDetecte> deplaces,
-    Rect nouvelleZone,
-    double sens,
+  /// Lignes que le déplacement bouscule : celles que la nouvelle position
+  /// viendrait recouvrir, puis de proche en proche celles que celles-ci
+  /// recouvriraient à leur tour. Elles suivent du même pas [dy] que la ligne
+  /// déplacée : le bloc glisse en gardant ses interlignes, au lieu de faire
+  /// bondir chaque voisine d'une hauteur de ligne entière à chaque appui.
+  List<MotDetecte> _lignesPoussees(
+    List<MotDetecte> groupe,
+    double dx,
+    double dy,
   ) {
-    if (sens == 0) return const [];
-    const marge = 2.0;
+    if (dy == 0) return const [];
 
-    final autres = mots
-        .where((m) => !deplaces.contains(m) && m.texte.isNotEmpty)
-        .toList()
-      ..sort((a, b) => sens > 0
-          ? a.zone.top.compareTo(b.zone.top)
-          : b.zone.top.compareTo(a.zone.top));
+    final concernees = <MotDetecte>{...groupe};
+    final aExaminer = <Rect>[
+      for (final m in groupe) m.zone.shift(Offset(dx, dy)),
+    ];
 
-    final decalages = <({MotDetecte mot, double dy})>[];
-    var reference = nouvelleZone;
-    for (final autre in autres) {
-      final zone = autre.zone;
-      final seChevauchent = reference.top < zone.bottom &&
-          zone.top < reference.bottom &&
-          reference.left < zone.right &&
-          zone.left < reference.right;
-      if (!seChevauchent) continue;
-
-      final dy = sens > 0
-          ? (reference.bottom + marge) - zone.top
-          : (reference.top - marge) - zone.bottom;
-      decalages.add((mot: autre, dy: dy));
-      reference = zone.translate(0, dy);
+    while (aExaminer.isNotEmpty) {
+      final reference = aExaminer.removeLast();
+      for (final autre in mots) {
+        if (concernees.contains(autre) || autre.texte.isEmpty) continue;
+        if (!reference.overlaps(autre.zone)) continue;
+        concernees.add(autre);
+        aExaminer.add(autre.zone.translate(0, dy));
+      }
     }
-    return decalages;
+
+    return concernees.where((m) => !groupe.contains(m)).toList();
   }
 
   Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) async {
     if (dx == 0 && dy == 0) return;
     final doc = document;
     if (doc == null || _occupe) return;
+    // La ligne emmène avec elle ce qui est sur sa rangée : un tiret ou une
+    // puce détectés à part restaient sinon en arrière.
+    final groupe = <MotDetecte>[
+      mot,
+      ...mots.where((m) => m != mot && _memeRangee(m.zone, mot.zone)),
+    ];
+
+    final deplacements = <MotDetecte, Offset>{
+      for (final m in groupe) m: Offset(dx, dy),
+      for (final m in _lignesPoussees(groupe, dx, dy)) m: Offset(0, dy),
+    };
+
+    // Rien ne doit finir hors de la page : c'est ce qui faisait disparaître
+    // des lignes bousculées vers le bas.
+    final sortDeLaPage = deplacements.entries.any((e) {
+      final r = _rectDeplacement(e.key).shift(e.value);
+      return r.left < 0 ||
+          r.top < 0 ||
+          r.right > taillePage.width ||
+          r.bottom > taillePage.height;
+    });
+    if (sortDeLaPage) {
+      setState(() => statut = "Déplacement refusé : ça sortirait de la page");
+      return;
+    }
+
     setState(() => _occupe = true);
     try {
       historique.add(await _etatActuel(doc));
       futur.clear();
 
       final page = doc.pages[0];
-      final nouvelleZone = mot.zone.translate(dx, dy);
-
-      // La ligne emmène avec elle ce qui est sur sa rangée : un tiret ou une
-      // puce détectés à part restaient sinon en arrière.
-      final groupe = <MotDetecte>[
-        mot,
-        ...mots.where((m) => m != mot && _memeRangee(m.zone, mot.zone)),
-      ];
-
-      final deplacements = <MotDetecte, Offset>{
-        for (final m in groupe) m: Offset(dx, dy),
-      };
-      // Les lignes que la nouvelle position recouvrirait sont poussées dans
-      // le même sens, en cascade, pour laisser la place.
-      for (final d in _decalagesNecessaires(groupe, nouvelleZone, dy)) {
-        deplacements[d.mot] = Offset(0, d.dy);
-      }
 
       // On photographie chaque contenu avant de toucher à la page : déplacer
       // l'image imprimée conserve la police et la graisse d'origine, qu'on ne
       // saurait pas reproduire en Helvetica. Une zone vide (gomme, ligne
-      // supprimée) n'a rien à déplacer ni à effacer.
+      // supprimée) n'a rien à déplacer ni à effacer. Photographie, effacement
+      // et repose portent sur le même rectangle : effacer plus large que ce
+      // qu'on emporte amputait la première et la dernière lettre.
       final captures = <MotDetecte, PdfBitmap?>{};
       for (final m in deplacements.keys) {
         captures[m] =
-            m.texte.isEmpty ? null : _capturerZone(_rectContenu(m).inflate(1));
+            m.texte.isEmpty ? null : _capturerZone(_rectDeplacement(m));
       }
 
       for (final m in deplacements.keys) {
         if (m.texte.isEmpty) continue;
         page.graphics.drawRectangle(
           brush: PdfSolidBrush(_couleurDeFond(m)),
-          bounds: _rectEffacement(m),
+          bounds: _rectDeplacement(m),
         );
       }
 
@@ -839,7 +857,7 @@ class _AccueilState extends State<Accueil> {
         if (capture != null) {
           page.graphics.drawImage(
             capture,
-            _rectContenu(m).inflate(1).shift(entree.value),
+            _rectDeplacement(m).shift(entree.value),
           );
         } else {
           _ecrire(page, m, m.zone.shift(entree.value));
