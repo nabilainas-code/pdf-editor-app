@@ -574,14 +574,59 @@ class _AccueilState extends State<Accueil> {
     final y = (zone.top * e).round().clamp(0, image.height - 1);
     final largeur = (zone.width * e).round().clamp(1, image.width - x);
     final hauteur = (zone.height * e).round().clamp(1, image.height - y);
+    if (largeur < 2 || hauteur < 2) return null;
 
     try {
       final morceau = img.copyCrop(image,
           x: x, y: y, width: largeur, height: hauteur);
-      return PdfBitmap(img.encodePng(morceau));
+      // Sans canal alpha : c'est le format le plus sûrement relu par le
+      // moteur PDF, et le contenu à déplacer est de toute façon opaque.
+      final sansAlpha = morceau.numChannels == 4
+          ? morceau.convert(numChannels: 3)
+          : morceau;
+      return PdfBitmap(img.encodePng(sansAlpha));
     } catch (_) {
       return null;
     }
+  }
+
+  /// Élargit un rectangle vers la gauche pour attraper ce qui appartient
+  /// visiblement à la ligne sans avoir été détecté avec elle : un tiret, une
+  /// puce. On avance tant qu'on retrouve de l'encre sur la même rangée, et on
+  /// s'arrête au premier blanc franc, qui sépare deux contenus distincts.
+  Rect _etendreVersPuce(Rect rect) {
+    final image = imageDecodee;
+    if (image == null) return rect;
+    final e = echelleOcr;
+
+    final yHaut = (rect.top * e).round().clamp(0, image.height - 1);
+    final yBas = (rect.bottom * e).round().clamp(0, image.height - 1);
+    if (yBas <= yHaut) return rect;
+
+    const portee = 60.0; // on ne remonte pas plus loin vers la marge
+    const blancSeparateur = 12.0;
+
+    var gauche = rect.left;
+    var blanc = 0.0;
+    for (var x = rect.left - 1; x >= rect.left - portee && x >= 1; x -= 1) {
+      final xi = (x * e).round().clamp(0, image.width - 1);
+      var encre = false;
+      for (var yi = yHaut; yi <= yBas; yi += 2) {
+        final p = image.getPixel(xi, yi);
+        if (0.299 * p.r + 0.587 * p.g + 0.114 * p.b < 140) {
+          encre = true;
+          break;
+        }
+      }
+      if (encre) {
+        gauche = x - 1;
+        blanc = 0;
+      } else {
+        blanc += 1;
+        if (blanc >= blancSeparateur) break;
+      }
+    }
+    return Rect.fromLTRB(gauche, rect.top, rect.right, rect.bottom);
   }
 
   /// Deux zones sont sur la même rangée si elles se recouvrent nettement en
@@ -627,7 +672,8 @@ class _AccueilState extends State<Accueil> {
     setState(() {
       document = doc;
       mots = etat.mots
-          .map((m) => MotDetecte(m.texte, m.zone, gras: m.gras))
+          .map((m) => MotDetecte(m.texte, m.zone,
+              gras: m.gras, redessine: m.redessine))
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
@@ -815,10 +861,19 @@ class _AccueilState extends State<Accueil> {
       for (final m in _lignesPoussees(groupe, dx, dy)) m: Offset(0, dy),
     };
 
+    // Un seul rectangle par ligne, calculé une fois : photographie,
+    // effacement et repose doivent porter exactement sur le même, sinon on
+    // efface plus qu'on n'emporte. Il est élargi vers la gauche pour
+    // embarquer un tiret ou une puce que l'OCR n'a pas rattachés à la ligne.
+    final rects = <MotDetecte, Rect>{
+      for (final m in deplacements.keys)
+        m: _etendreVersPuce(_rectDeplacement(m)),
+    };
+
     // Rien ne doit finir hors de la page : c'est ce qui faisait disparaître
     // des lignes bousculées vers le bas.
     final sortDeLaPage = deplacements.entries.any((e) {
-      final r = _rectDeplacement(e.key).shift(e.value);
+      final r = rects[e.key]!.shift(e.value);
       return r.left < 0 ||
           r.top < 0 ||
           r.right > taillePage.width ||
@@ -830,8 +885,9 @@ class _AccueilState extends State<Accueil> {
     }
 
     setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
     try {
-      historique.add(await _etatActuel(doc));
+      historique.add(avant);
       futur.clear();
 
       final page = doc.pages[0];
@@ -839,20 +895,17 @@ class _AccueilState extends State<Accueil> {
       // On photographie chaque contenu avant de toucher à la page : déplacer
       // l'image imprimée conserve la police et la graisse d'origine, qu'on ne
       // saurait pas reproduire en Helvetica. Une zone vide (gomme, ligne
-      // supprimée) n'a rien à déplacer ni à effacer. Photographie, effacement
-      // et repose portent sur le même rectangle : effacer plus large que ce
-      // qu'on emporte amputait la première et la dernière lettre.
+      // supprimée) n'a rien à déplacer ni à effacer.
       final captures = <MotDetecte, PdfBitmap?>{};
       for (final m in deplacements.keys) {
-        captures[m] =
-            m.texte.isEmpty ? null : _capturerZone(_rectDeplacement(m));
+        captures[m] = m.texte.isEmpty ? null : _capturerZone(rects[m]!);
       }
 
       for (final m in deplacements.keys) {
         if (m.texte.isEmpty) continue;
         page.graphics.drawRectangle(
           brush: PdfSolidBrush(_couleurDeFond(m)),
-          bounds: _rectDeplacement(m),
+          bounds: rects[m]!,
         );
       }
 
@@ -861,10 +914,7 @@ class _AccueilState extends State<Accueil> {
         if (m.texte.isEmpty) continue;
         final capture = captures[m];
         if (capture != null) {
-          page.graphics.drawImage(
-            capture,
-            _rectDeplacement(m).shift(entree.value),
-          );
+          page.graphics.drawImage(capture, rects[m]!.shift(entree.value));
         } else {
           _ecrire(page, m, m.zone.shift(entree.value));
         }
@@ -879,6 +929,12 @@ class _AccueilState extends State<Accueil> {
       if (imageDeFond != null) {
         await _rafraichirApercuOcr(doc);
       }
+    } catch (e) {
+      // La page a déjà été effacée à cet instant : sans ce retour en arrière,
+      // un échec de la repose laisserait la ligne effacée pour de bon.
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Déplacement annulé (rien n'a été perdu) : $e");
     } finally {
       setState(() => _occupe = false);
     }
