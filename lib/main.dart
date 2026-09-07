@@ -1230,12 +1230,15 @@ class _AccueilState extends State<Accueil> {
   Future<void> _ajouterTexte(double xPage, double yPage) async {
     if (document == null || _occupe) return;
 
-    const largeur = 220.0;
+    // Presque toute la largeur de la page, comme une vraie règle : sans
+    // ça, « centrer » ne centrait qu'à l'intérieur d'une petite boîte
+    // posée là où l'on a touché, pas sur la page comme on l'attendrait.
+    const marge = 24.0;
     const hauteur = 18.0;
     final zone = Rect.fromLTWH(
-      (xPage - largeur / 2).clamp(0, taillePage.width - largeur),
+      marge,
       yPage - hauteur / 2,
-      largeur,
+      taillePage.width - marge * 2,
       hauteur,
     );
     final nouvelleLigne = MotDetecte("", zone, boiteLibre: true);
