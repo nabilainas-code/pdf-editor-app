@@ -325,6 +325,22 @@ class _AccueilState extends State<Accueil> {
     return (sombres / total) > 0.16;
   }
 
+  /// Fraction de pixels sombres sur un échantillonnage grossier de la page :
+  /// sert à repérer un rendu qui aurait perdu l'essentiel du contenu (voir
+  /// _aplatirPage).
+  double _densiteEncre(img.Image image) {
+    var sombres = 0, total = 0;
+    for (var y = 0; y < image.height; y += 15) {
+      for (var x = 0; x < image.width; x += 15) {
+        final p = image.getPixel(x, y);
+        final luminance = 0.299 * p.r + 0.587 * p.g + 0.114 * p.b;
+        if (luminance < 200) sombres++;
+        total++;
+      }
+    }
+    return total == 0 ? 0 : sombres / total;
+  }
+
   /// Calcule la couleur dominante de toute la page (en principe le blanc du
   /// papier) en quantifiant les pixels d'une grille régulière et en gardant
   /// le groupe le plus fréquent. Comme le texte ne couvre qu'une petite
@@ -873,6 +889,26 @@ class _AccueilState extends State<Accueil> {
       }
       final pngOctets = await raster.toPng();
 
+      // Garde-fou : de temps en temps, cette rastérisation perd le contenu
+      // scanné d'origine (seul le texte redessiné en vectoriel survit) sans
+      // lever d'erreur — la page aplatie se retrouve alors quasi blanche.
+      // On compare la densité d'encre avant/après et on refuse de continuer
+      // si l'essentiel du contenu a disparu, plutôt que de le perdre pour de
+      // bon.
+      final avantImage = imageDecodee;
+      if (avantImage != null) {
+        final apresImage = img.decodePng(pngOctets);
+        final densiteAvant = _densiteEncre(avantImage);
+        final densiteApres =
+            apresImage == null ? 0.0 : _densiteEncre(apresImage);
+        if (densiteAvant > 0.01 && densiteApres < densiteAvant * 0.3) {
+          throw Exception(
+              "le rendu a perdu la majorité du contenu (sécurité activée, "
+              "rien n'a été modifié) — réessaie, ou évite l'aplatissement "
+              "sur ce document pour l'instant");
+        }
+      }
+
       final nouveauDoc = PdfDocument();
       nouveauDoc.pageSettings.margins.all = 0;
       nouveauDoc.pageSettings.size = taillePage;
@@ -914,7 +950,11 @@ class _AccueilState extends State<Accueil> {
           "Ce qui a été effacé ou déplacé sera définitivement retiré du "
           "fichier (impossible à récupérer, même en inspectant le PDF), "
           "au lieu d'être seulement recouvert visuellement comme jusqu'ici. "
-          "À faire juste avant de partager le document.",
+          "À faire juste avant de partager le document.\n\n"
+          "Vérifie la page juste après : si elle apparaît vide ou "
+          "incomplète, touche « Annuler » immédiatement avant de "
+          "poursuivre — ce cas est normalement bloqué automatiquement, "
+          "mais mieux vaut vérifier.",
         ),
         actions: [
           TextButton(
