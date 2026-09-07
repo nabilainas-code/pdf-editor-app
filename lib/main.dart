@@ -590,6 +590,66 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Cherche une bande de papier vierge au-dessus ou en dessous de [zone],
+  /// sur la même largeur, pour s'en servir de gomme. Couvrir avec du vrai
+  /// papier se fond bien mieux qu'un aplat de couleur : le fond d'un scan
+  /// n'est jamais parfaitement uniforme, et l'aplat se voyait comme un
+  /// rectangle plus clair.
+  PdfBitmap? _papierProche(Rect zone) {
+    final image = imageDecodee;
+    if (image == null) return null;
+    final e = echelleOcr;
+
+    final x = (zone.left * e).round().clamp(0, image.width - 1);
+    final largeur = (zone.width * e).round().clamp(1, image.width - x);
+    final hauteurBande = (6 * e).round();
+    if (largeur < 2 || hauteurBande < 2) return null;
+
+    bool estVierge(int y) {
+      if (y < 0 || y + hauteurBande >= image.height) return false;
+      for (var yi = y; yi < y + hauteurBande; yi += 2) {
+        for (var xi = x; xi < x + largeur; xi += 2) {
+          final p = image.getPixel(xi, yi);
+          if (0.299 * p.r + 0.587 * p.g + 0.114 * p.b < 170) return false;
+        }
+      }
+      return true;
+    }
+
+    final haut = (zone.top * e).round();
+    final bas = (zone.bottom * e).round();
+    for (var ecart = (2 * e).round(); ecart < (50 * e).round(); ecart += 2) {
+      for (final y in [haut - ecart - hauteurBande, bas + ecart]) {
+        if (!estVierge(y)) continue;
+        try {
+          final bande = img.copyCrop(image,
+              x: x, y: y, width: largeur, height: hauteurBande);
+          final sansAlpha = bande.numChannels == 4
+              ? bande.convert(numChannels: 3)
+              : bande;
+          return PdfBitmap(img.encodePng(sansAlpha));
+        } catch (_) {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Efface une zone : avec du papier prélevé à côté si on en trouve, sinon
+  /// avec la couleur de fond estimée.
+  void _effacerRect(PdfPage page, Rect rect, MotDetecte mot) {
+    final papier = _papierProche(rect);
+    if (papier != null) {
+      page.graphics.drawImage(papier, rect);
+    } else {
+      page.graphics.drawRectangle(
+        brush: PdfSolidBrush(_couleurDeFond(mot)),
+        bounds: rect,
+      );
+    }
+  }
+
   /// Élargit un rectangle vers la gauche pour attraper ce qui appartient
   /// visiblement à la ligne sans avoir été détecté avec elle : un tiret, une
   /// puce. On avance tant qu'on retrouve de l'encre sur la même rangée, et on
@@ -785,10 +845,7 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[0];
-      page.graphics.drawRectangle(
-        brush: PdfSolidBrush(_couleurDeFond(mot)),
-        bounds: _rectEffacement(mot),
-      );
+      _effacerRect(page, _rectEffacement(mot), mot);
 
       mot.gras = grasFinal;
       final ancienTexte = mot.texte;
@@ -903,10 +960,7 @@ class _AccueilState extends State<Accueil> {
 
       for (final m in deplacements.keys) {
         if (m.texte.isEmpty) continue;
-        page.graphics.drawRectangle(
-          brush: PdfSolidBrush(_couleurDeFond(m)),
-          bounds: rects[m]!,
-        );
+        _effacerRect(page, rects[m]!, m);
       }
 
       for (final entree in deplacements.entries) {
@@ -985,10 +1039,7 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[0];
-      page.graphics.drawRectangle(
-        brush: PdfSolidBrush(_couleurDeFond(mot)),
-        bounds: _rectEffacement(mot),
-      );
+      _effacerRect(page, _rectEffacement(mot), mot);
 
       setState(() {
         mot.texte = "";
