@@ -939,26 +939,32 @@ class _AccueilState extends State<Accueil> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
           title: const Text("Modifier la ligne"),
+          contentPadding:
+              const EdgeInsets.fromLTRB(24, 16, 24, 8),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(controller: controleur, autofocus: true),
+              const SizedBox(height: 4),
               Row(
                 children: [
-                  Checkbox(
-                    value: grasChoisi,
-                    onChanged: (v) =>
-                        setDialogState(() => grasChoisi = v ?? false),
+                  SizedBox(
+                    height: 32,
+                    width: 32,
+                    child: Checkbox(
+                      value: grasChoisi,
+                      onChanged: (v) =>
+                          setDialogState(() => grasChoisi = v ?? false),
+                    ),
                   ),
-                  const Text("Gras"),
-                ],
-              ),
-              Row(
-                children: [
-                  const Text("Taille"),
+                  const Text("Gras", style: TextStyle(fontSize: 13)),
                   const Spacer(),
+                  const Text("Taille", style: TextStyle(fontSize: 13)),
                   IconButton(
-                    icon: const Icon(Icons.remove),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    icon: const Icon(Icons.remove, size: 20),
                     tooltip: "Réduire",
                     onPressed: () => setDialogState(() {
                       final actuelle = tailleChoisie ??
@@ -967,14 +973,18 @@ class _AccueilState extends State<Accueil> {
                     }),
                   ),
                   SizedBox(
-                    width: 56,
+                    width: 40,
                     child: Text(
                       tailleChoisie?.round().toString() ?? "Auto",
                       textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 13),
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.add),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    icon: const Icon(Icons.add, size: 20),
                     tooltip: "Agrandir",
                     onPressed: () => setDialogState(() {
                       final actuelle = tailleChoisie ??
@@ -984,7 +994,10 @@ class _AccueilState extends State<Accueil> {
                   ),
                   if (tailleChoisie != null)
                     IconButton(
-                      icon: const Icon(Icons.restart_alt),
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      icon: const Icon(Icons.restart_alt, size: 20),
                       tooltip: "Revenir à l'automatique",
                       onPressed: () =>
                           setDialogState(() => tailleChoisie = null),
@@ -994,24 +1007,27 @@ class _AccueilState extends State<Accueil> {
               if (mot.boiteLibre)
                 Row(
                   children: [
-                    const Text("Alignement"),
+                    const Text("Alignement", style: TextStyle(fontSize: 13)),
                     const Spacer(),
                     IconButton(
-                      icon: const Icon(Icons.format_align_left),
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.format_align_left, size: 20),
                       isSelected: alignementChoisi == PdfTextAlignment.left,
                       tooltip: "Aligner à gauche",
                       onPressed: () => setDialogState(
                           () => alignementChoisi = PdfTextAlignment.left),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.format_align_center),
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.format_align_center, size: 20),
                       isSelected: alignementChoisi == PdfTextAlignment.center,
                       tooltip: "Centrer",
                       onPressed: () => setDialogState(
                           () => alignementChoisi = PdfTextAlignment.center),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.format_align_right),
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.format_align_right, size: 20),
                       isSelected: alignementChoisi == PdfTextAlignment.right,
                       tooltip: "Aligner à droite",
                       onPressed: () => setDialogState(
