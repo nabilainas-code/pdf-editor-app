@@ -79,6 +79,13 @@ class _AccueilState extends State<Accueil> {
   double largeurCopiee = 100;
   double hauteurCopiee = 14;
   double? tailleCopiee;
+
+  /// Pixels réels de la ligne copiée (page scannée uniquement) : coller pose
+  /// cette image telle quelle plutôt que de réécrire le texte en Helvetica,
+  /// pour garder exactement la même police que « Monsieur » a partout
+  /// ailleurs sur la page.
+  Uint8List? imageCopiee;
+
   bool enCollage = false;
 
   static const double _pasDeplacement = 3.0;
@@ -573,10 +580,11 @@ class _AccueilState extends State<Accueil> {
   }
 
   /// Découpe l'aperçu de la page pour récupérer le contenu d'une zone tel
-  /// qu'il est réellement imprimé. Déplacer cette image plutôt que de
-  /// réécrire le texte conserve exactement la police, la graisse et la taille
-  /// d'origine — impossible à reproduire en Helvetica.
-  PdfBitmap? _capturerZone(Rect zone) {
+  /// qu'il est réellement imprimé (octets PNG, à envelopper dans un
+  /// PdfBitmap au moment de le dessiner). Déplacer ou coller cette image
+  /// plutôt que de réécrire le texte conserve exactement la police, la
+  /// graisse et la taille d'origine — impossible à reproduire en Helvetica.
+  Uint8List? _capturerZone(Rect zone) {
     final image = imageDecodee;
     if (image == null) return null;
     final e = echelleOcr;
@@ -595,7 +603,7 @@ class _AccueilState extends State<Accueil> {
       final sansAlpha = morceau.numChannels == 4
           ? morceau.convert(numChannels: 3)
           : morceau;
-      return PdfBitmap(img.encodePng(sansAlpha));
+      return img.encodePng(sansAlpha);
     } catch (_) {
       return null;
     }
@@ -1114,7 +1122,7 @@ class _AccueilState extends State<Accueil> {
       // l'image imprimée conserve la police et la graisse d'origine, qu'on ne
       // saurait pas reproduire en Helvetica. Une zone vide (gomme, ligne
       // supprimée) n'a rien à déplacer ni à effacer.
-      final captures = <MotDetecte, PdfBitmap?>{};
+      final captures = <MotDetecte, Uint8List?>{};
       for (final m in deplacements.keys) {
         captures[m] = m.texte.isEmpty ? null : _capturerZone(rects[m]!);
       }
@@ -1129,7 +1137,8 @@ class _AccueilState extends State<Accueil> {
         if (m.texte.isEmpty) continue;
         final capture = captures[m];
         if (capture != null) {
-          page.graphics.drawImage(capture, rects[m]!.shift(entree.value));
+          page.graphics
+              .drawImage(PdfBitmap(capture), rects[m]!.shift(entree.value));
         } else {
           _ecrire(page, m, m.zone.shift(entree.value));
         }
@@ -1218,12 +1227,16 @@ class _AccueilState extends State<Accueil> {
   void _copierLigne() {
     final mot = motSelectionne;
     if (mot == null || mot.texte.isEmpty) return;
+    // Même rectangle que pour un déplacement (marge + tiret/puce embarqués),
+    // pour que l'image capturée corresponde exactement à ce qui est copié.
+    final rectCapture = _etendreVersPuce(_rectDeplacement(mot));
     setState(() {
       texteCopie = mot.texte;
       grasCopie = mot.gras;
-      largeurCopiee = mot.zone.width;
-      hauteurCopiee = mot.zone.height;
+      largeurCopiee = rectCapture.width;
+      hauteurCopiee = rectCapture.height;
       tailleCopiee = mot.tailleManuelle;
+      imageCopiee = _capturerZone(rectCapture);
       statut = "Texte copié : touchez « Coller » puis un endroit de la page";
     });
   }
@@ -1274,7 +1287,12 @@ class _AccueilState extends State<Accueil> {
       final page = doc.pages[0];
       final nouvelleLigne = MotDetecte(texte, zone,
           gras: grasCopie, tailleManuelle: tailleCopiee);
-      _ecrire(page, nouvelleLigne, zone);
+      final image = imageCopiee;
+      if (image != null) {
+        page.graphics.drawImage(PdfBitmap(image), zone);
+      } else {
+        _ecrire(page, nouvelleLigne, zone);
+      }
 
       setState(() {
         mots = [...mots, nouvelleLigne];
