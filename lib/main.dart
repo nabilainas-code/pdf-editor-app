@@ -430,7 +430,11 @@ class _AccueilState extends State<Accueil> {
     final zoneHautIm = (zonePdf.top * echelle).round();
     final zoneBasIm = (zonePdf.bottom * echelle).round();
 
-    var sommeR = 0, sommeG = 0, sommeB = 0, total = 0;
+    // On retient la teinte la plus fréquente parmi les pixels clairs, et non
+    // leur moyenne : autour d'une ligne dense, la moyenne est tirée vers le
+    // gris par les pixels de bord de lettres et donne un aplat grisâtre.
+    final compteur = <int, int>{};
+    var total = 0;
     for (var y = haut; y <= bas; y += 3) {
       for (var x = gauche; x <= droite; x += 3) {
         final dansZone = x >= zoneGaucheIm &&
@@ -441,16 +445,29 @@ class _AccueilState extends State<Accueil> {
         final pixel = image.getPixel(x, y);
         final luminance =
             0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b;
-        if (luminance < 180) continue;
-        sommeR += pixel.r.toInt();
-        sommeG += pixel.g.toInt();
-        sommeB += pixel.b.toInt();
+        if (luminance < 200) continue;
+        final cle = ((pixel.r.toInt() ~/ 4) << 16) |
+            ((pixel.g.toInt() ~/ 4) << 8) |
+            (pixel.b.toInt() ~/ 4);
+        compteur[cle] = (compteur[cle] ?? 0) + 1;
         total++;
       }
     }
 
     if (total < 8) return couleurPage;
-    return PdfColor(sommeR ~/ total, sommeG ~/ total, sommeB ~/ total);
+    var cleFrequente = compteur.keys.first;
+    var maxCompte = compteur[cleFrequente]!;
+    for (final entree in compteur.entries) {
+      if (entree.value > maxCompte) {
+        maxCompte = entree.value;
+        cleFrequente = entree.key;
+      }
+    }
+    return PdfColor(
+      ((cleFrequente >> 16) & 0xFF) * 4,
+      ((cleFrequente >> 8) & 0xFF) * 4,
+      (cleFrequente & 0xFF) * 4,
+    );
   }
 
   PdfStandardFont _police(MotDetecte mot, [double? taille]) {
@@ -666,10 +683,16 @@ class _AccueilState extends State<Accueil> {
       final page = doc.pages[0];
       final ancienneZone = mot.zone;
 
-      page.graphics.drawRectangle(
-        brush: PdfSolidBrush(_couleurDeFond(mot)),
-        bounds: _rectEffacement(mot),
-      );
+      // Une ligne vide (gomme posée à l'appui long, ou ligne supprimée) n'a
+      // rien d'écrit à son ancienne place : la repeindre reviendrait à
+      // effacer le contenu qu'elle survole à chaque pas, ce qui barrait le
+      // texte. On ne repeint donc que si on déplace du texte.
+      if (mot.texte.isNotEmpty) {
+        page.graphics.drawRectangle(
+          brush: PdfSolidBrush(_couleurDeFond(mot)),
+          bounds: _rectEffacement(mot),
+        );
+      }
 
       final nouvelleZone = Rect.fromLTWH(
         ancienneZone.left + dx,
@@ -735,6 +758,35 @@ class _AccueilState extends State<Accueil> {
       setState(() {
         mots = [...mots, nouvelleLigne];
         motSelectionne = nouvelleLigne;
+      });
+
+      if (imageDeFond != null) {
+        await _rafraichirApercuOcr(doc);
+      }
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
+  /// Repeint le fond sur la zone sélectionnée : sert de gomme, qu'on peut
+  /// donc positionner d'abord (flèches / glisser) puis appliquer.
+  Future<void> _effacerZone(MotDetecte mot) async {
+    final doc = document;
+    if (doc == null || _occupe) return;
+    setState(() => _occupe = true);
+    try {
+      historique.add(await _etatActuel(doc));
+      futur.clear();
+
+      final page = doc.pages[0];
+      page.graphics.drawRectangle(
+        brush: PdfSolidBrush(_couleurDeFond(mot)),
+        bounds: _rectEffacement(mot),
+      );
+
+      setState(() {
+        mot.texte = "";
+        mot.redessine = false;
       });
 
       if (imageDeFond != null) {
@@ -892,6 +944,13 @@ class _AccueilState extends State<Accueil> {
                         onPressed: motSelectionne!.texte.isEmpty
                             ? null
                             : _copierLigne,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.cleaning_services, size: 20),
+                        tooltip: "Effacer ici (gomme)",
+                        onPressed: _occupe
+                            ? null
+                            : () => _effacerZone(motSelectionne!),
                       ),
                       Expanded(
                         child: Text(
