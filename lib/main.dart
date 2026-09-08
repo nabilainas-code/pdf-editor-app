@@ -2909,6 +2909,110 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Bouton de la barre compacte : une icône, pas de libellé, pour tenir
+  /// côte à côte au-dessus de la sélection.
+  Widget _boutonMenu(IconData icone, String infobulle, VoidCallback? action) {
+    return IconButton(
+      icon: Icon(icone, size: 22),
+      color: Colors.white,
+      disabledColor: Colors.white38,
+      tooltip: infobulle,
+      onPressed: action,
+    );
+  }
+
+  /// Supprime pour de bon ce qui est sélectionné : l'encre est effacée de la
+  /// page et le cadre disparaît avec. Auparavant il fallait deux gestes (la
+  /// gomme, puis retirer le cadre resté à l'écran), ce qui laissait croire
+  /// que la suppression n'avait pas marché.
+  Future<void> _supprimerObjet(MotDetecte mot) async {
+    final doc = document;
+    if (doc == null || _occupe) return;
+
+    // Rien d'écrit dans la page pour un simple repère : le cadre suffit.
+    if (mot.texte.isEmpty && mot.traitsSignature == null) {
+      _retirerRepere(mot);
+      return;
+    }
+
+    setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
+    try {
+      historique.add(avant);
+      futur.clear();
+
+      final page = doc.pages[0];
+      _effacerRect(page, _rectEffacement(mot), mot);
+
+      setState(() {
+        mots = mots.where((m) => m != mot).toList();
+        selection.remove(mot);
+        statut = "Supprimé";
+      });
+
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Suppression annulée (rien n'a été perdu) : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
+  /// Actions moins courantes, rangées derrière « … » pour garder la barre
+  /// principale courte.
+  Future<void> _plusDActions(MotDetecte mot) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (mot.texte.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.content_copy),
+                title: const Text("Copier le texte"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _copierLigne();
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.cleaning_services),
+              title: const Text("Effacer le fond (gomme)"),
+              subtitle: const Text("Efface l'encre, garde le cadre en place"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _effacerZone(mot);
+              },
+            ),
+            if (mot.traitsSignature == null)
+              ListTile(
+                leading: const Icon(Icons.tune),
+                title: const Text("Mettre en forme"),
+                subtitle: const Text("Gras, taille, alignement"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _modifierMot(mot);
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.crop_free),
+              title: const Text("Retirer le cadre seulement"),
+              subtitle: const Text("Ne touche pas à la page"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _retirerRepere(mot);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return modeLecture ? _buildLecture(context) : _buildEdition(context);
