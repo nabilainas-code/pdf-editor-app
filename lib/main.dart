@@ -61,6 +61,14 @@ class MotDetecte {
   /// bandeau sombre changeait donc de couleur dès qu'on y touchait.
   PdfColor? couleurTexte;
 
+  /// Couleur de fond à peindre derrière le texte affiché à l'écran quand la
+  /// ligne a été redessinée (voir [redessine]) : rafraîchir tout l'aperçu de
+  /// la page à chaque modification (un rendu complet de la page scannée,
+  /// coûteux) n'est alors plus nécessaire — la ligne s'affiche directement en
+  /// texte natif, sur ce fond, par-dessus les pixels d'origine désormais
+  /// obsolètes.
+  Color? fondEcran;
+
   MotDetecte(this.texte, this.zone,
       {this.gras = false,
       this.redessine = false,
@@ -69,7 +77,8 @@ class MotDetecte {
       this.alignement = PdfTextAlignment.left,
       this.italique = false,
       this.famille = PdfFontFamily.helvetica,
-      this.couleurTexte});
+      this.couleurTexte,
+      this.fondEcran});
 }
 
 class Etat {
@@ -1781,7 +1790,8 @@ class _AccueilState extends State<Accueil> {
             alignement: m.alignement,
             italique: m.italique,
             famille: m.famille,
-            couleurTexte: m.couleurTexte))
+            couleurTexte: m.couleurTexte,
+            fondEcran: m.fondEcran))
         .toList();
     return Etat(octetsDocument, motsCopie, imageDeFond);
   }
@@ -1800,7 +1810,8 @@ class _AccueilState extends State<Accueil> {
               alignement: m.alignement,
               italique: m.italique,
               famille: m.famille,
-              couleurTexte: m.couleurTexte))
+              couleurTexte: m.couleurTexte,
+              fondEcran: m.fondEcran))
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
@@ -2236,15 +2247,22 @@ class _AccueilState extends State<Accueil> {
       mot.texte = texteNettoye;
       mot.tailleManuelle = tailleFinale;
       mot.alignement = alignementFinal;
+      if (texteNettoye.isEmpty) mot.redessine = false;
       _ecrire(page, mot, mot.zone);
+
+      // La ligne s'affiche désormais en texte natif à l'écran, par-dessus le
+      // fond relevé ici (voir mot.fondEcran) : plus besoin de rafraîchir tout
+      // l'aperçu de la page — un rendu complet à 300dpi, assez lourd pour
+      // geler l'appli (« ne répond pas ») ou laisser voir un instant la ligne
+      // à moitié dessinée le temps qu'il se termine.
+      if (imageDeFond != null) {
+        final fond = _couleurLocale(mot.zone);
+        mot.fondEcran = Color.fromARGB(255, fond.r, fond.g, fond.b);
+      }
 
       setState(() {
         if (texteNettoye.isEmpty) selection.remove(mot);
       });
-
-      if (imageDeFond != null) {
-        await _rafraichirApercuOcr(doc);
-      }
     } catch (e) {
       // La zone a déjà été effacée à cet instant : sans ce retour en
       // arrière, un échec du dessin laisserait un cadre vide sans texte.
@@ -2355,7 +2373,14 @@ class _AccueilState extends State<Accueil> {
       // supprimée) n'a rien à déplacer ni à effacer.
       final captures = <MotDetecte, Uint8List?>{};
       for (final m in deplacements.keys) {
-        captures[m] = m.texte.isEmpty ? null : _capturerZone(rects[m]!);
+        // Une ligne redessinée (texte modifié) n'a plus ses pixels
+        // d'origine à jour dans l'image de la page (l'aperçu n'est plus
+        // rafraîchi après une modification, pour rester réactif) : on la
+        // redessine en texte plutôt que de photographier des pixels
+        // devenus obsolètes.
+        captures[m] = (m.texte.isEmpty || m.redessine)
+            ? null
+            : _capturerZone(rects[m]!);
       }
 
       for (final m in deplacements.keys) {
@@ -2510,7 +2535,9 @@ class _AccueilState extends State<Accueil> {
       largeurCopiee = rectCapture.width;
       hauteurCopiee = rectCapture.height;
       tailleCopiee = mot.tailleManuelle;
-      imageCopiee = _capturerZone(rectCapture);
+      // Idem : une ligne redessinée n'a plus ses pixels à jour dans l'image
+      // de la page, on colle donc son texte plutôt qu'une capture obsolète.
+      imageCopiee = mot.redessine ? null : _capturerZone(rectCapture);
       statut = "Texte copié : collez-le ici ou dans n'importe quelle autre "
           "application";
     });
@@ -3209,16 +3236,45 @@ class _AccueilState extends State<Accueil> {
                                         selectionne: selection.contains(mot),
                                         groupe: selection.length > 1,
                                       ),
-                                      child: imageDeFond != null
+                                      // Sur une page scannée, une ligne pas
+                                      // encore modifiée montre les pixels du
+                                      // scan tels quels (le cadre est
+                                      // transparent). Une ligne modifiée
+                                      // (mot.redessine) s'affiche en texte
+                                      // natif sur son fond relevé : c'est ce
+                                      // qui permet d'afficher la modification
+                                      // sans redessiner toute la page.
+                                      child: (imageDeFond != null &&
+                                              !mot.redessine)
                                           ? null
-                                          : FittedBox(
-                                              fit: BoxFit.contain,
-                                              child: Text(
-                                                mot.texte,
-                                                style: TextStyle(
-                                                  fontWeight: mot.gras
-                                                      ? FontWeight.bold
-                                                      : FontWeight.normal,
+                                          : Container(
+                                              color: imageDeFond != null
+                                                  ? (mot.fondEcran ??
+                                                      Colors.white)
+                                                  : null,
+                                              child: FittedBox(
+                                                fit: BoxFit.contain,
+                                                child: Text(
+                                                  mot.texte,
+                                                  style: TextStyle(
+                                                    fontWeight: mot.gras
+                                                        ? FontWeight.bold
+                                                        : FontWeight.normal,
+                                                    fontStyle: mot.italique
+                                                        ? FontStyle.italic
+                                                        : FontStyle.normal,
+                                                    color: mot.couleurTexte !=
+                                                            null
+                                                        ? Color.fromARGB(
+                                                            255,
+                                                            mot.couleurTexte!
+                                                                .r,
+                                                            mot.couleurTexte!
+                                                                .g,
+                                                            mot.couleurTexte!
+                                                                .b)
+                                                        : null,
+                                                  ),
                                                 ),
                                               ),
                                             ),
