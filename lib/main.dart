@@ -239,6 +239,12 @@ class _AccueilState extends State<Accueil> {
   /// Ouvre l'écriture directement sur la ligne, dans la page.
   void _ecrireSurLaLigne(MotDetecte mot) {
     setState(() {
+      // Écrire et poser un repère à effacer sont deux gestes contraires :
+      // se retrouver dans les deux à la fois (barre d'écriture affichée et
+      // message « repère posé ») ne pouvait qu'embrouiller.
+      enAjoutTexte = false;
+      enCollage = false;
+      enPoseSignature = false;
       motEnEditionDirecte = mot;
       controleurDirect.text = mot.texte;
       controleurDirect.selection =
@@ -279,6 +285,68 @@ class _AccueilState extends State<Accueil> {
     focusDirect.unfocus();
     setState(() => motEnEditionDirecte = null);
     await _appliquerModification(mot, texte: texte, gras: gras, taille: taille);
+    _nettoyerBoitesLibresVides();
+  }
+
+  /// Retire les zones de texte libres restées vides : une boîte ouverte puis
+  /// abandonnée ne laisse plus un cadre fantôme derrière elle. Les repères
+  /// de gomme, eux, sont vides par nature et posés exprès : on n'y touche
+  /// pas (c'est le bouton « tout nettoyer » qui s'en charge).
+  void _nettoyerBoitesLibresVides() {
+    final aRetirer =
+        mots.where((m) => m.boiteLibre && m.texte.isEmpty).toList();
+    if (aRetirer.isEmpty) return;
+    setState(() {
+      mots = mots.where((m) => !aRetirer.contains(m)).toList();
+      selection.removeAll(aRetirer);
+    });
+  }
+
+  /// Entrée : on valide la ligne et on en ouvre une nouvelle juste dessous,
+  /// comme dans un traitement de texte. Un PDF n'a pas de flux de texte —
+  /// rien ne « recoule » tout seul —, alors ce qui se trouve à la place de
+  /// la nouvelle ligne est écarté vers le bas, en gardant les interlignes.
+  Future<void> _ligneSuivante() async {
+    final mot = motEnEditionDirecte;
+    if (mot == null || _occupe) return;
+
+    await _validerEditionDirecte();
+    if (!mounted) return;
+
+    final hauteur = mot.zone.height <= 0 ? 14.0 : mot.zone.height;
+    final interligne = hauteur * 1.35;
+    final zone = Rect.fromLTWH(
+      mot.zone.left,
+      mot.zone.top + interligne,
+      mot.zone.width <= 0 ? 200.0 : mot.zone.width,
+      hauteur,
+    );
+    if (zone.bottom > taillePage.height) {
+      setState(() => statut = "Pas de place en bas de page pour une ligne de plus");
+      return;
+    }
+
+    // Ce que la nouvelle ligne viendrait recouvrir s'écarte d'abord, de
+    // proche en proche (la mécanique éprouvée du déplacement, avec son
+    // annulation complète en cas d'échec).
+    final genees = mots
+        .where((m) =>
+            m != mot && m.texte.isNotEmpty && m.zone.overlaps(zone.inflate(2)))
+        .toList();
+    if (genees.isNotEmpty) {
+      await _deplacerGroupe(genees, 0, interligne);
+      if (!mounted) return;
+    }
+
+    final nouvelleLigne = MotDetecte("", zone,
+        gras: mot.gras, tailleManuelle: mot.tailleManuelle, boiteLibre: true);
+    setState(() {
+      mots = [...mots, nouvelleLigne];
+      selection
+        ..clear()
+        ..add(nouvelleLigne);
+    });
+    _ecrireSurLaLigne(nouvelleLigne);
   }
 
   /// Taille de police actuellement utilisée pour l'écriture directe (celle
@@ -775,7 +843,20 @@ class _AccueilState extends State<Accueil> {
 
       MotDetecte? courant;
       for (final mot in rangee) {
-        if (courant != null && courant.gras == mot.gras) {
+        // Deux morceaux qui se touchent appartiennent au même mot : un vrai
+        // changement de style est toujours séparé par une espace. Sans cette
+        // règle, une estimation de gras hésitante coupait « inclus » en
+        // « in » + « clus », chacun dans son cadre.
+        final colles = courant != null &&
+            (mot.zone.left - (courant.zone.left + courant.zone.width)) <
+                mot.zone.height * 0.3;
+        // Un morceau d'un ou deux caractères n'offre pas assez de pixels
+        // pour juger du gras de façon fiable : il rejoint son voisin plutôt
+        // que de former un cadre minuscule à lui tout seul.
+        final tropCourt = mot.texte.trim().length <= 2 ||
+            (courant != null && courant.texte.trim().length <= 2);
+        if (courant != null &&
+            (courant.gras == mot.gras || colles || tropCourt)) {
           final gauche =
               courant.zone.left < mot.zone.left ? courant.zone.left : mot.zone.left;
           final haut =
@@ -2108,8 +2189,13 @@ class _AccueilState extends State<Accueil> {
       hauteurCopiee = rectCapture.height;
       tailleCopiee = mot.tailleManuelle;
       imageCopiee = _capturerZone(rectCapture);
-      statut = "Texte copié : touchez « Coller » puis un endroit de la page";
+      statut = "Texte copié : collez-le ici ou dans n'importe quelle autre "
+          "application";
     });
+    // Aussi dans le presse-papiers d'Android : le texte est alors collable
+    // partout ailleurs (SMS, mail, autre application), avec le collage
+    // habituel du téléphone, et pas seulement dans ce document.
+    Clipboard.setData(ClipboardData(text: mot.texte));
   }
 
   void _activerModeCollage() {
@@ -2429,6 +2515,11 @@ class _AccueilState extends State<Accueil> {
                       ),
                       const Spacer(),
                       IconButton(
+                        icon: const Icon(Icons.keyboard_return, size: 20),
+                        tooltip: "Ligne suivante (écarte ce qui gêne)",
+                        onPressed: _occupe ? null : _ligneSuivante,
+                      ),
+                      IconButton(
                         icon: const Icon(Icons.close, size: 20),
                         tooltip: "Annuler",
                         onPressed: _annulerEditionDirecte,
@@ -2682,8 +2773,13 @@ class _AccueilState extends State<Accueil> {
                                                 border: InputBorder.none,
                                                 contentPadding: EdgeInsets.zero,
                                               ),
+                                              // Entrée = ligne suivante, comme
+                                              // dans un traitement de texte ;
+                                              // le ✓ de la barre termine.
+                                              textInputAction:
+                                                  TextInputAction.next,
                                               onSubmitted: (_) =>
-                                                  _validerEditionDirecte(),
+                                                  _ligneSuivante(),
                                             ),
                                           ),
                                         )
