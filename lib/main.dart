@@ -2914,33 +2914,6 @@ class _AccueilState extends State<Accueil> {
     return modeLecture ? _buildLecture(context) : _buildEdition(context);
   }
 
-  /// Une entrée du menu contextuel : icône + libellé, sur fond sombre.
-  /// Le libellé évite d'avoir à deviner ce que fait une icône seule.
-  Widget _entreeMenu(IconData icone, String libelle, VoidCallback? action) {
-    final actif = action != null;
-    final couleur = actif ? Colors.white : Colors.white38;
-    return InkWell(
-      onTap: action,
-      child: SizedBox(
-        height: 46,
-        child: Row(
-          children: [
-            const SizedBox(width: 14),
-            Icon(icone, size: 20, color: couleur),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                libelle,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: couleur, fontSize: 14),
-              ),
-            ),
-            const SizedBox(width: 10),
-          ],
-        ),
-      ),
-    );
-  }
 
   Widget _buildLecture(BuildContext context) {
     return Scaffold(
@@ -3439,10 +3412,21 @@ class _AccueilState extends State<Accueil> {
                                     // Un tap simple écrit directement sur la
                                     // ligne, sans étape intermédiaire : c'est
                                     // le geste le plus courant, il doit être
-                                    // le plus court.
+                                    // le plus court. Sur une signature, où
+                                    // écrire n'aurait aucun sens, il la
+                                    // sélectionne pour la déplacer ou la
+                                    // redimensionner tout de suite.
                                     onTap: _occupe
                                         ? null
-                                        : () => _ecrireSurLaLigne(mot),
+                                        : () {
+                                            if (mot.traitsSignature != null) {
+                                              setState(() => selection
+                                                ..clear()
+                                                ..add(mot));
+                                              return;
+                                            }
+                                            _ecrireSurLaLigne(mot);
+                                          },
                                     // Le double-tap sert à sélectionner
                                     // (ajoute/retire du groupe rouge, pour
                                     // copier, effacer, ou déplacer plusieurs
@@ -3761,13 +3745,15 @@ class _AccueilState extends State<Accueil> {
                                   mot.zone.bottom * echelle * zoom +
                                       decalage.y,
                                 );
-                                const largeurMenu = 252.0;
-                                // Le menu s'allonge selon ce que la
-                                // sélection permet de faire.
-                                final estVide =
-                                    mot.texte.isEmpty && mot.traitsSignature == null;
-                                final nbEntrees = estVide ? 7 : 6;
-                                final hauteurMenu = 46.0 * nbEntrees;
+                                // Barre compacte d'icônes, comme dans les
+                                // applications de référence : les gestes
+                                // courants d'un seul coup d'œil, le reste
+                                // derrière « … ».
+                                final estSignature =
+                                    mot.traitsSignature != null;
+                                final nbBoutons = estSignature ? 4 : 5;
+                                final largeurMenu = 48.0 * nbBoutons + 8;
+                                const hauteurMenu = 52.0;
                                 var gauche = coin.dx;
                                 if (gauche + largeurMenu >
                                     constraints.maxWidth) {
@@ -3797,40 +3783,21 @@ class _AccueilState extends State<Accueil> {
                                             BorderRadius.circular(10),
                                         elevation: 8,
                                         clipBehavior: Clip.antiAlias,
-                                        child: Column(
-                                          mainAxisSize: MainAxisSize.min,
+                                        child: Row(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.spaceEvenly,
                                           children: [
-                                            _entreeMenu(
-                                              Icons.edit,
-                                              "Écrire sur la ligne",
-                                              _occupe
-                                                  ? null
-                                                  : () =>
-                                                      _ecrireSurLaLigne(mot),
-                                            ),
-                                            _entreeMenu(
-                                              Icons.content_copy,
-                                              "Copier le texte",
-                                              _occupe || mot.texte.isEmpty
-                                                  ? null
-                                                  : _copierLigne,
-                                            ),
-                                            _entreeMenu(
-                                              Icons.cleaning_services,
-                                              "Effacer (gomme)",
-                                              _occupe
-                                                  ? null
-                                                  : () => _effacerZone(mot),
-                                            ),
-                                            _entreeMenu(
-                                              Icons.tune,
-                                              "Mettre en forme",
-                                              _occupe
-                                                  ? null
-                                                  : () => _modifierMot(mot),
-                                            ),
-                                            _entreeMenu(
-                                              Icons.close_fullscreen,
+                                            if (!estSignature)
+                                              _boutonMenu(
+                                                Icons.edit,
+                                                "Écrire",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _ecrireSurLaLigne(mot),
+                                              ),
+                                            _boutonMenu(
+                                              Icons.text_decrease,
                                               "Réduire",
                                               _occupe
                                                   ? null
@@ -3838,8 +3805,8 @@ class _AccueilState extends State<Accueil> {
                                                       _redimensionnerDUnCran(
                                                           mot, 0.8),
                                             ),
-                                            _entreeMenu(
-                                              Icons.open_in_full,
+                                            _boutonMenu(
+                                              Icons.text_increase,
                                               "Agrandir",
                                               _occupe
                                                   ? null
@@ -3847,15 +3814,22 @@ class _AccueilState extends State<Accueil> {
                                                       _redimensionnerDUnCran(
                                                           mot, 1.25),
                                             ),
-                                            if (estVide)
-                                              _entreeMenu(
-                                                Icons.delete_outline,
-                                                "Retirer ce cadre",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _retirerRepere(mot),
-                                              ),
+                                            _boutonMenu(
+                                              Icons.delete_outline,
+                                              "Supprimer",
+                                              _occupe
+                                                  ? null
+                                                  : () =>
+                                                      _supprimerObjet(mot),
+                                            ),
+                                            _boutonMenu(
+                                              Icons.more_horiz,
+                                              "Plus d'actions",
+                                              _occupe
+                                                  ? null
+                                                  : () =>
+                                                      _plusDActions(mot),
+                                            ),
                                           ],
                                         ),
                                       ),
