@@ -61,6 +61,14 @@ class MotDetecte {
   /// bandeau sombre changeait donc de couleur dès qu'on y touchait.
   PdfColor? couleurTexte;
 
+  /// Taille de police calibrée une fois pour toutes à la détection, de façon
+  /// que le texte redessiné occupe la même largeur que le texte d'origine.
+  /// La hauteur d'un cadre OCR est un mauvais repère (elle inclut marge,
+  /// accents et jambages, d'où un texte redessiné nettement plus gros que
+  /// l'original) ; sa largeur, elle, correspond exactement à l'étendue du
+  /// texte.
+  double? tailleAuto;
+
   /// Couleur de fond à peindre derrière le texte affiché à l'écran quand la
   /// ligne a été redessinée (voir [redessine]) : rafraîchir tout l'aperçu de
   /// la page à chaque modification (un rendu complet de la page scannée,
@@ -78,6 +86,7 @@ class MotDetecte {
       this.italique = false,
       this.famille = PdfFontFamily.helvetica,
       this.couleurTexte,
+      this.tailleAuto,
       this.fondEcran});
 }
 
@@ -279,6 +288,7 @@ class _AccueilState extends State<Accueil> {
   String? texteCopie;
   bool grasCopie = false;
   bool italiqueCopie = false;
+  double? tailleAutoCopiee;
   PdfFontFamily familleCopiee = PdfFontFamily.helvetica;
   PdfColor? couleurCopiee;
   double largeurCopiee = 100;
@@ -484,7 +494,8 @@ class _AccueilState extends State<Accueil> {
         boiteLibre: true,
         italique: mot.italique,
         famille: mot.famille,
-        couleurTexte: mot.couleurTexte);
+        couleurTexte: mot.couleurTexte,
+        tailleAuto: mot.tailleAuto);
     setState(() {
       mots = [...mots, nouvelleLigne];
       selection
@@ -1251,6 +1262,12 @@ class _AccueilState extends State<Accueil> {
         }
       }
       final fusionnees = _fusionnerParRangee(brutes);
+      // Calibre chaque ligne sur la largeur de son cadre, tant que son texte
+      // est encore celui d'origine : c'est le seul moment où la
+      // correspondance texte ↔ cadre est garantie.
+      for (final ligne in fusionnees) {
+        ligne.tailleAuto = _tailleParLargeur(ligne);
+      }
 
       setState(() {
         document = doc;
@@ -1521,11 +1538,28 @@ class _AccueilState extends State<Accueil> {
   /// mesurée du texte en Helvetica — un ratio empirique (1.15) rapproche le
   /// résultat de la taille apparente d'origine, sans jamais la reproduire
   /// exactement puisque la police d'origine du scan est inconnue.
+  /// Taille de police pour laquelle le texte d'une ligne occuperait
+  /// exactement la largeur de son cadre détecté. C'est la calibration la
+  /// plus fiable dont on dispose : le cadre OCR épouse l'étendue horizontale
+  /// du texte, alors que sa hauteur inclut marge, accents et jambages.
+  double? _tailleParLargeur(MotDetecte mot) {
+    if (mot.texte.trim().isEmpty || mot.zone.width <= 0) return null;
+    const reference = 20.0;
+    final largeur = _police(mot, reference).measureString(mot.texte).width;
+    if (largeur <= 0) return null;
+    final taille = reference * mot.zone.width / largeur;
+    if (taille < 4 || taille > 96) return null;
+    return taille;
+  }
+
   ({Rect rect, PdfStandardFont police}) _dessinTexte(MotDetecte mot, Rect zone) {
-    var police = _police(mot, mot.tailleManuelle ?? zone.height * 0.75);
+    // La taille calibrée sur la largeur du cadre (voir mot.tailleAuto) prime
+    // sur l'estimation par la hauteur, qui donnait un texte trop gros.
+    final tailleDepart = mot.tailleManuelle ?? mot.tailleAuto;
+    var police = _police(mot, tailleDepart ?? zone.height * 0.75);
     var mesure = police.measureString(mot.texte);
 
-    if (mot.tailleManuelle == null && mesure.height > 0 && zone.height > 0) {
+    if (tailleDepart == null && mesure.height > 0 && zone.height > 0) {
       var taille = police.size * zone.height / mesure.height * 1.15;
       // Garde-fou : un calcul aberrant (mesure dégénérée) donnerait sinon
       // une police gigantesque, qui a déjà fait échouer le dessin en
@@ -1586,20 +1620,54 @@ class _AccueilState extends State<Accueil> {
   /// PROVINOIS depuis » devenait « FRANCILITE GRAND P » — alors que le PDF,
   /// lui, contenait bien tout le texte. Le cadre suit donc le texte
   /// réellement dessiné, sans dépasser le bord de la page.
-  Rect _rectAffichage(MotDetecte mot) {
-    if (motEnEditionDirecte != mot) return _rectContenu(mot);
+  Rect _rectAffichage(MotDetecte mot, double echelle) {
+    final enEcriture = motEnEditionDirecte == mot;
+    if (!enEcriture && !mot.redessine) return mot.zone;
 
-    // Pendant la frappe, le cadre suit ce qui est tapé, au fil des touches.
-    final texte = controleurDirect.text;
-    if (texte.isEmpty) return mot.zone;
-    final police = _police(mot, _tailleEditionDirecte(mot));
-    final mesuree = police.measureString(texte).width + 6;
+    final texte = enEcriture ? controleurDirect.text : mot.texte;
+    if (texte.isEmpty || echelle <= 0) return mot.zone;
+
+    // Mesure avec la police d'écran (celle du téléphone), et non celle du
+    // PDF : les deux n'ont pas les mêmes largeurs de caractères, et se fier
+    // à celle du PDF laissait la fin de la ligne dépasser du cadre, donc
+    // coupée à l'affichage.
+    final taille = enEcriture
+        ? _tailleEditionDirecte(mot)
+        : _dessinTexte(mot, mot.zone).police.size;
+    final gras = enEcriture ? grasDirect : mot.gras;
+    final peintre = TextPainter(
+      text: TextSpan(
+        text: texte,
+        style: TextStyle(
+          fontSize: taille * echelle,
+          height: 1.0,
+          fontWeight: gras ? FontWeight.bold : FontWeight.normal,
+          fontStyle: mot.italique ? FontStyle.italic : FontStyle.normal,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+
+    // Un peu d'air à droite pour le curseur.
+    var largeur = peintre.width / echelle + 4;
+    if (largeur < mot.zone.width) largeur = mot.zone.width;
     final maxi = taillePage.width - mot.zone.left - 2;
-    var largeur = mesuree < mot.zone.width ? mot.zone.width : mesuree;
-    if (largeur > maxi) largeur = maxi;
+    if (maxi > 0 && largeur > maxi) largeur = maxi;
     if (largeur < 1) largeur = mot.zone.width;
+
+    // Le cadre reste centré sur la ligne d'origine s'il doit grandir en
+    // hauteur : sinon le texte semblerait descendre d'un cran.
+    var hauteur = mot.zone.height;
+    final hauteurTexte = peintre.height / echelle;
+    if (hauteurTexte > hauteur) hauteur = hauteurTexte;
+
     return Rect.fromLTWH(
-        mot.zone.left, mot.zone.top, largeur, mot.zone.height);
+      mot.zone.left,
+      mot.zone.center.dy - hauteur / 2,
+      largeur,
+      hauteur,
+    );
   }
 
   /// Rectangle utilisé pour déplacer une ligne : il sert à la fois à la
@@ -1814,6 +1882,7 @@ class _AccueilState extends State<Accueil> {
             italique: m.italique,
             famille: m.famille,
             couleurTexte: m.couleurTexte,
+            tailleAuto: m.tailleAuto,
             fondEcran: m.fondEcran))
         .toList();
     return Etat(octetsDocument, motsCopie, imageDeFond);
@@ -1834,6 +1903,7 @@ class _AccueilState extends State<Accueil> {
               italique: m.italique,
               famille: m.famille,
               couleurTexte: m.couleurTexte,
+              tailleAuto: m.tailleAuto,
               fondEcran: m.fondEcran))
           .toList();
       imageDeFond = etat.image;
@@ -2553,6 +2623,7 @@ class _AccueilState extends State<Accueil> {
       texteCopie = mot.texte;
       grasCopie = mot.gras;
       italiqueCopie = mot.italique;
+      tailleAutoCopiee = mot.tailleAuto;
       familleCopiee = mot.famille;
       couleurCopiee = mot.couleurTexte;
       largeurCopiee = rectCapture.width;
@@ -2629,7 +2700,8 @@ class _AccueilState extends State<Accueil> {
           tailleManuelle: tailleCopiee,
           italique: italiqueCopie,
           famille: familleCopiee,
-          couleurTexte: couleurCopiee);
+          couleurTexte: couleurCopiee,
+          tailleAuto: tailleAutoCopiee);
       final image = imageCopiee;
       if (image != null) {
         page.graphics.drawImage(PdfBitmap(image), zone);
@@ -3132,18 +3204,24 @@ class _AccueilState extends State<Accueil> {
                                   !modeRemplissage)
                                 for (final mot in mots)
                                 Positioned(
-                                  left: _rectAffichage(mot).left * echelle +
+                                  left: _rectAffichage(mot, echelle).left *
+                                          echelle +
                                       (groupeEnDeplacement &&
                                               selection.contains(mot)
                                           ? deplacementGroupeEnCours.dx
                                           : 0),
-                                  top: _rectAffichage(mot).top * echelle +
+                                  top: _rectAffichage(mot, echelle).top *
+                                          echelle +
                                       (groupeEnDeplacement &&
                                               selection.contains(mot)
                                           ? deplacementGroupeEnCours.dy
                                           : 0),
-                                  width: _rectAffichage(mot).width * echelle,
-                                  height: _rectAffichage(mot).height * echelle,
+                                  width:
+                                      _rectAffichage(mot, echelle).width *
+                                          echelle,
+                                  height:
+                                      _rectAffichage(mot, echelle).height *
+                                          echelle,
                                   child: motEnEditionDirecte == mot
                                       // Écriture directement sur la page : le
                                       // champ occupe la place de la ligne, à
