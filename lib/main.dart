@@ -44,12 +44,31 @@ class MotDetecte {
   bool boiteLibre;
   PdfTextAlignment alignement;
 
+  /// Italique. Comme le gras, il vient des informations du PDF quand le
+  /// document a du vrai texte ; sur un scan il reste faux, faute de pouvoir
+  /// le deviner de façon fiable sur des pixels.
+  bool italique;
+
+  /// Famille de police approchée, déduite du nom de police du PDF : sans
+  /// elle, une ligne d'un document en Times revenait en Helvetica dès la
+  /// première modification, et la ligne modifiée se voyait au premier coup
+  /// d'œil.
+  PdfFontFamily famille;
+
+  /// Couleur de l'encre relevée sur la page. Le texte était jusqu'ici
+  /// toujours redessiné en noir : un titre orange ou un texte blanc sur
+  /// bandeau sombre changeait donc de couleur dès qu'on y touchait.
+  PdfColor? couleurTexte;
+
   MotDetecte(this.texte, this.zone,
       {this.gras = false,
       this.redessine = false,
       this.tailleManuelle,
       this.boiteLibre = false,
-      this.alignement = PdfTextAlignment.left});
+      this.alignement = PdfTextAlignment.left,
+      this.italique = false,
+      this.famille = PdfFontFamily.helvetica,
+      this.couleurTexte});
 }
 
 class Etat {
@@ -205,6 +224,9 @@ class _AccueilState extends State<Accueil> {
 
   String? texteCopie;
   bool grasCopie = false;
+  bool italiqueCopie = false;
+  PdfFontFamily familleCopiee = PdfFontFamily.helvetica;
+  PdfColor? couleurCopiee;
   double largeurCopiee = 100;
   double hauteurCopiee = 14;
   double? tailleCopiee;
@@ -390,7 +412,12 @@ class _AccueilState extends State<Accueil> {
     }
 
     final nouvelleLigne = MotDetecte("", zone,
-        gras: mot.gras, tailleManuelle: mot.tailleManuelle, boiteLibre: true);
+        gras: mot.gras,
+        tailleManuelle: mot.tailleManuelle,
+        boiteLibre: true,
+        italique: mot.italique,
+        famille: mot.famille,
+        couleurTexte: mot.couleurTexte);
     setState(() {
       mots = [...mots, nouvelleLigne];
       selection
@@ -806,6 +833,12 @@ class _AccueilState extends State<Accueil> {
             ligne.bounds.height,
           ),
           gras: ligne.fontStyle.contains(PdfFontStyle.bold),
+          italique: ligne.fontStyle.contains(PdfFontStyle.italic),
+          famille: _familleDepuisNom(ligne.fontName),
+          // Taille réelle indiquée par le document : bien plus fidèle que
+          // celle qu'on déduisait de la hauteur du cadre, qui faisait
+          // changer de taille une ligne au premier passage.
+          tailleManuelle: ligne.fontSize > 0 ? ligne.fontSize : null,
         ));
       }
 
@@ -923,7 +956,8 @@ class _AccueilState extends State<Accueil> {
           courant.texte = '${courant.texte} ${mot.texte}';
           courant.zone = Rect.fromLTWH(gauche, haut, droite - gauche, bas - haut);
         } else {
-          courant = MotDetecte(mot.texte, mot.zone, gras: mot.gras);
+          courant = MotDetecte(mot.texte, mot.zone,
+              gras: mot.gras, couleurTexte: mot.couleurTexte);
           resultat.add(courant);
         }
       }
@@ -1057,8 +1091,13 @@ class _AccueilState extends State<Accueil> {
 
       final imageAnalysee = img.decodePng(pngOctets);
       if (imageAnalysee != null) {
+        // La couleur d'encre a besoin de l'image et de son échelle : on les
+        // pose avant de parcourir les mots.
+        imageDecodee = imageAnalysee;
+        echelleOcr = echelle;
         for (final mot in brutes) {
           mot.gras = _detecterGras(imageAnalysee, mot.zone, echelle);
+          mot.couleurTexte = _couleurEncre(mot.zone);
         }
       }
       final fusionnees = _fusionnerParRangee(brutes);
@@ -1235,11 +1274,93 @@ class _AccueilState extends State<Accueil> {
   }
 
   PdfStandardFont _police(MotDetecte mot, [double? taille]) {
+    // Un seul style à la fois : le gras l'emporte sur l'italique quand les
+    // deux sont détectés, ce qui reste plus proche de l'original que de
+    // perdre les deux.
+    final style = mot.gras
+        ? PdfFontStyle.bold
+        : (mot.italique ? PdfFontStyle.italic : PdfFontStyle.regular);
     return PdfStandardFont(
-      PdfFontFamily.helvetica,
+      mot.famille,
       taille ?? mot.zone.height * 0.75,
-      style: mot.gras ? PdfFontStyle.bold : PdfFontStyle.regular,
+      style: style,
     );
+  }
+
+  /// Famille de police approchée à partir du nom trouvé dans le PDF. Les
+  /// polices d'un document sont innombrables, les familles dessinables ici
+  /// sont trois : on choisit la plus proche par sa nature (à empattements,
+  /// sans empattements, chasse fixe) plutôt que de tout ramener à Helvetica.
+  PdfFontFamily _familleDepuisNom(String? nom) {
+    final n = (nom ?? '').toLowerCase();
+    if (n.contains('times') ||
+        n.contains('serif') && !n.contains('sans') ||
+        n.contains('georgia') ||
+        n.contains('garamond') ||
+        n.contains('book') ||
+        n.contains('roman') ||
+        n.contains('cambria') ||
+        n.contains('minion')) {
+      return PdfFontFamily.timesRoman;
+    }
+    if (n.contains('courier') || n.contains('mono') || n.contains('consol')) {
+      return PdfFontFamily.courier;
+    }
+    return PdfFontFamily.helvetica;
+  }
+
+  /// Couleur de l'encre d'une ligne, relevée sur l'image de la page : la
+  /// teinte dominante parmi les pixels qui tranchent nettement sur le fond
+  /// local. Marche donc aussi bien pour du noir sur blanc que pour du blanc
+  /// sur un bandeau sombre ou un titre en couleur.
+  PdfColor? _couleurEncre(Rect zonePdf) {
+    final image = imageDecodee;
+    if (image == null) return null;
+    final fond = _fondAutour(zonePdf);
+    if (fond == null) return null;
+    final echelle = echelleOcr;
+
+    final gauche = (zonePdf.left * echelle).round().clamp(0, image.width - 1);
+    final droite = (zonePdf.right * echelle).round().clamp(0, image.width - 1);
+    final haut = (zonePdf.top * echelle).round().clamp(0, image.height - 1);
+    final bas = (zonePdf.bottom * echelle).round().clamp(0, image.height - 1);
+
+    final compteur = <int, int>{};
+    var total = 0;
+    for (var y = haut; y <= bas; y += 2) {
+      for (var x = gauche; x <= droite; x += 2) {
+        final pixel = image.getPixel(x, y);
+        if (pixel.a == 0) continue;
+        final dr = pixel.r.toDouble() - fond[0];
+        final dg = pixel.g.toDouble() - fond[1];
+        final db = pixel.b.toDouble() - fond[2];
+        // Assez loin du fond pour être de l'encre, et pas un pixel de bord
+        // de lettre à mi-chemin entre les deux.
+        if (dr * dr + dg * dg + db * db < 80 * 80) continue;
+        final cle = ((pixel.r.toInt() ~/ 8) << 16) |
+            ((pixel.g.toInt() ~/ 8) << 8) |
+            (pixel.b.toInt() ~/ 8);
+        compteur[cle] = (compteur[cle] ?? 0) + 1;
+        total++;
+      }
+    }
+    if (total < 12) return null;
+
+    var cleFrequente = compteur.keys.first;
+    var maxCompte = compteur[cleFrequente]!;
+    for (final entree in compteur.entries) {
+      if (entree.value > maxCompte) {
+        maxCompte = entree.value;
+        cleFrequente = entree.key;
+      }
+    }
+    final r = ((cleFrequente >> 16) & 0xFF) * 8;
+    final g = ((cleFrequente >> 8) & 0xFF) * 8;
+    final b = (cleFrequente & 0xFF) * 8;
+    // Une encre quasi noire est ramenée au noir franc : 248 au lieu de 0
+    // donnerait un gris très légèrement délavé à côté du texte d'origine.
+    if (r <= 24 && g <= 24 && b <= 24) return PdfColor(0, 0, 0);
+    return PdfColor(r, g, b);
   }
 
   /// Taille de police et rectangle de dessin pour un texte replacé dans sa
@@ -1499,7 +1620,7 @@ class _AccueilState extends State<Accueil> {
       mot.texte,
       dessin.police,
       bounds: dessin.rect,
-      brush: PdfSolidBrush(PdfColor(0, 0, 0)),
+      brush: PdfSolidBrush(mot.couleurTexte ?? PdfColor(0, 0, 0)),
       format: PdfStringFormat(
         alignment: mot.boiteLibre ? mot.alignement : PdfTextAlignment.left,
         lineAlignment: PdfVerticalAlignment.middle,
@@ -1516,7 +1637,10 @@ class _AccueilState extends State<Accueil> {
             redessine: m.redessine,
             tailleManuelle: m.tailleManuelle,
             boiteLibre: m.boiteLibre,
-            alignement: m.alignement))
+            alignement: m.alignement,
+            italique: m.italique,
+            famille: m.famille,
+            couleurTexte: m.couleurTexte))
         .toList();
     return Etat(octetsDocument, motsCopie, imageDeFond);
   }
@@ -1532,7 +1656,10 @@ class _AccueilState extends State<Accueil> {
               redessine: m.redessine,
               tailleManuelle: m.tailleManuelle,
               boiteLibre: m.boiteLibre,
-              alignement: m.alignement))
+              alignement: m.alignement,
+              italique: m.italique,
+              famille: m.famille,
+              couleurTexte: m.couleurTexte))
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
@@ -2236,6 +2363,9 @@ class _AccueilState extends State<Accueil> {
     setState(() {
       texteCopie = mot.texte;
       grasCopie = mot.gras;
+      italiqueCopie = mot.italique;
+      familleCopiee = mot.famille;
+      couleurCopiee = mot.couleurTexte;
       largeurCopiee = rectCapture.width;
       hauteurCopiee = rectCapture.height;
       tailleCopiee = mot.tailleManuelle;
@@ -2304,7 +2434,11 @@ class _AccueilState extends State<Accueil> {
 
       final page = doc.pages[0];
       final nouvelleLigne = MotDetecte(texte, zone,
-          gras: grasCopie, tailleManuelle: tailleCopiee);
+          gras: grasCopie,
+          tailleManuelle: tailleCopiee,
+          italique: italiqueCopie,
+          famille: familleCopiee,
+          couleurTexte: couleurCopiee);
       final image = imageCopiee;
       if (image != null) {
         page.graphics.drawImage(PdfBitmap(image), zone);
