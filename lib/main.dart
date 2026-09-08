@@ -309,16 +309,24 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
-  /// Regroupe les fragments de ligne détectés par l'OCR qui appartiennent à
-  /// la même rangée horizontale (ex : une puce "-" séparée du texte qui suit).
+  /// Regroupe les mots détectés par l'OCR qui appartiennent à la même
+  /// rangée horizontale (ex : une puce "-" séparée du texte qui suit), puis,
+  /// à l'intérieur d'une rangée, ne fusionne que les mots consécutifs ayant
+  /// le même gras. Sans cette seconde étape, une rangée mêlant du texte
+  /// gras et normal (ex : une étiquette en gras suivie d'une date en
+  /// normal) n'aurait qu'un seul bloc avec un seul gras estimé pour toute
+  /// la ligne — correct tant que la ligne garde ses pixels d'origine, mais
+  /// dès qu'on la modifie et qu'elle est redessinée, tout le texte devient
+  /// uniformément gras ou non, en plus de s'élargir (le gras est plus
+  /// large) et de déborder de son cadre.
   List<MotDetecte> _fusionnerParRangee(List<MotDetecte> brutes) {
     if (brutes.isEmpty) return brutes;
     final triees = [...brutes]..sort((a, b) => a.zone.top.compareTo(b.zone.top));
     final rangees = <List<MotDetecte>>[];
 
-    for (final ligne in triees) {
-      final ligneHaut = ligne.zone.top;
-      final ligneBas = ligne.zone.top + ligne.zone.height;
+    for (final mot in triees) {
+      final motHaut = mot.zone.top;
+      final motBas = mot.zone.top + mot.zone.height;
       List<MotDetecte>? cible;
       for (final rangee in rangees) {
         var rangeeHaut = rangee.first.zone.top;
@@ -328,43 +336,64 @@ class _AccueilState extends State<Accueil> {
           final b = l.zone.top + l.zone.height;
           if (b > rangeeBas) rangeeBas = b;
         }
-        final chevauchement = (rangeeBas < ligneBas ? rangeeBas : ligneBas) -
-            (rangeeHaut > ligneHaut ? rangeeHaut : ligneHaut);
-        final hauteurMin = (rangeeBas - rangeeHaut) < ligne.zone.height
+        final chevauchement = (rangeeBas < motBas ? rangeeBas : motBas) -
+            (rangeeHaut > motHaut ? rangeeHaut : motHaut);
+        final hauteurMin = (rangeeBas - rangeeHaut) < mot.zone.height
             ? (rangeeBas - rangeeHaut)
-            : ligne.zone.height;
+            : mot.zone.height;
         if (hauteurMin > 0 && chevauchement > hauteurMin * 0.3) {
           cible = rangee;
           break;
         }
       }
       if (cible != null) {
-        cible.add(ligne);
+        cible.add(mot);
       } else {
-        rangees.add([ligne]);
+        rangees.add([mot]);
       }
     }
 
     final resultat = <MotDetecte>[];
     for (final rangee in rangees) {
       rangee.sort((a, b) => a.zone.left.compareTo(b.zone.left));
-      final texte = rangee.map((l) => l.texte).join(' ');
-      var gauche = rangee.first.zone.left;
-      var haut = rangee.first.zone.top;
-      var droite = rangee.first.zone.left + rangee.first.zone.width;
-      var bas = rangee.first.zone.top + rangee.first.zone.height;
-      for (final l in rangee.skip(1)) {
-        if (l.zone.left < gauche) gauche = l.zone.left;
-        if (l.zone.top < haut) haut = l.zone.top;
-        final d = l.zone.left + l.zone.width;
-        final b = l.zone.top + l.zone.height;
-        if (d > droite) droite = d;
-        if (b > bas) bas = b;
+
+      // La ponctuation seule (":", ";", "-"...) est trop petite pour que
+      // l'estimation de densité soit fiable : elle hérite du gras du mot
+      // voisin plutôt que de risquer de couper un run en trois pour rien.
+      for (var i = 0; i < rangee.length; i++) {
+        final t = rangee[i].texte.trim();
+        final estPonctuation =
+            t.isNotEmpty && !RegExp(r'[a-zA-Z0-9À-ÿ]').hasMatch(t);
+        if (!estPonctuation) continue;
+        if (i > 0) {
+          rangee[i].gras = rangee[i - 1].gras;
+        } else if (rangee.length > 1) {
+          rangee[i].gras = rangee[1].gras;
+        }
       }
-      resultat.add(MotDetecte(
-        texte,
-        Rect.fromLTWH(gauche, haut, droite - gauche, bas - haut),
-      ));
+
+      MotDetecte? courant;
+      for (final mot in rangee) {
+        if (courant != null && courant.gras == mot.gras) {
+          final gauche =
+              courant.zone.left < mot.zone.left ? courant.zone.left : mot.zone.left;
+          final haut =
+              courant.zone.top < mot.zone.top ? courant.zone.top : mot.zone.top;
+          final droite = (courant.zone.left + courant.zone.width) >
+                  (mot.zone.left + mot.zone.width)
+              ? courant.zone.left + courant.zone.width
+              : mot.zone.left + mot.zone.width;
+          final bas = (courant.zone.top + courant.zone.height) >
+                  (mot.zone.top + mot.zone.height)
+              ? courant.zone.top + courant.zone.height
+              : mot.zone.top + mot.zone.height;
+          courant.texte = '${courant.texte} ${mot.texte}';
+          courant.zone = Rect.fromLTWH(gauche, haut, droite - gauche, bas - haut);
+        } else {
+          courant = MotDetecte(mot.texte, mot.zone, gras: mot.gras);
+          resultat.add(courant);
+        }
+      }
     }
     return resultat;
   }
@@ -471,30 +500,35 @@ class _AccueilState extends State<Accueil> {
       );
 
       final echelle = dpi / 72.0;
+      // Un mot par entrée (et non une ligne ML Kit entière) : c'est ce qui
+      // permet d'estimer le gras finement et de ne pas l'appliquer en bloc à
+      // toute une rangée qui mélangerait du gras et du normal.
       final brutes = <MotDetecte>[];
       for (final bloc in texteReconnu.blocks) {
         for (final ligne in bloc.lines) {
-          if (ligne.text.trim().isEmpty) continue;
-          final b = ligne.boundingBox;
-          brutes.add(MotDetecte(
-            ligne.text,
-            Rect.fromLTWH(
-              b.left / echelle,
-              b.top / echelle,
-              b.width / echelle,
-              b.height / echelle,
-            ),
-          ));
+          for (final element in ligne.elements) {
+            if (element.text.trim().isEmpty) continue;
+            final b = element.boundingBox;
+            brutes.add(MotDetecte(
+              element.text,
+              Rect.fromLTWH(
+                b.left / echelle,
+                b.top / echelle,
+                b.width / echelle,
+                b.height / echelle,
+              ),
+            ));
+          }
         }
       }
 
       final imageAnalysee = img.decodePng(pngOctets);
-      final fusionnees = _fusionnerParRangee(brutes);
       if (imageAnalysee != null) {
-        for (final ligne in fusionnees) {
-          ligne.gras = _detecterGras(imageAnalysee, ligne.zone, echelle);
+        for (final mot in brutes) {
+          mot.gras = _detecterGras(imageAnalysee, mot.zone, echelle);
         }
       }
+      final fusionnees = _fusionnerParRangee(brutes);
 
       setState(() {
         document = doc;
