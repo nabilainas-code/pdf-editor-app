@@ -152,6 +152,36 @@ class _CadreLigne extends CustomPainter {
 }
 
 /// Dessine la signature en cours de tracé dans la boîte de signature.
+/// Masque les poignées et la bulle « Copier/Coller » natives d'Android sur
+/// le champ d'écriture directe. Ces poignées se dessinent dans la couche
+/// d'overlay globale de l'application, indépendamment du zoom/déplacement de
+/// la page : positionnées pour une page à l'échelle 1, elles atterrissaient
+/// n'importe où sur l'écran dès que la page était zoomée ou déplacée — vues
+/// comme une goutte flottante sur une autre ligne. Le bouton « tout
+/// sélectionner » de la barre du haut reste le moyen fiable de sélectionner.
+class _AucunePoignee extends TextSelectionControls {
+  @override
+  Widget buildHandle(BuildContext context, TextSelectionHandleType type,
+          double textLineHeight,
+          [VoidCallback? onTap]) =>
+      const SizedBox.shrink();
+
+  @override
+  Widget buildToolbar(
+          BuildContext context,
+          Rect globalEditableRegion,
+          double textLineHeight,
+          Offset selectionMidpoint,
+          List<TextSelectionPoint> endpoints,
+          TextSelectionDelegate delegate,
+          ValueListenable<ClipboardStatus>? clipboardStatus,
+          Offset? lastSecondaryTapDownPosition) =>
+      const SizedBox.shrink();
+
+  @override
+  Size getHandleSize(double textLineHeight) => Size.zero;
+}
+
 class _PeintreSignature extends CustomPainter {
   final List<List<Offset>> traits;
   _PeintreSignature(this.traits);
@@ -358,6 +388,26 @@ class _AccueilState extends State<Accueil> {
     focusDirect.unfocus();
     setState(() => motEnEditionDirecte = null);
     await _appliquerModification(mot, texte: texte, gras: gras, taille: taille);
+    _nettoyerBoitesLibresVides();
+  }
+
+  /// Supprime la ligne en cours d'écriture, au clavier : plus besoin de
+  /// rectangle ni de passer par une boîte de réglages séparée. Un cadre déjà
+  /// vide (simple repère) disparaît entièrement ; une ligne avec du texte
+  /// voit son encre effacée du PDF, en gardant son cadre (pour pouvoir y
+  /// réécrire ensuite), exactement comme le bouton « Supprimer » de la
+  /// boîte de réglages.
+  Future<void> _supprimerEditionDirecte() async {
+    final mot = motEnEditionDirecte;
+    if (mot == null || _occupe) return;
+    focusDirect.unfocus();
+    setState(() => motEnEditionDirecte = null);
+    if (mot.texte.isEmpty) {
+      _retirerRepere(mot);
+      return;
+    }
+    await _appliquerModification(mot,
+        texte: '', gras: mot.gras, taille: mot.tailleManuelle);
     _nettoyerBoitesLibresVides();
   }
 
@@ -2727,6 +2777,14 @@ class _AccueilState extends State<Accueil> {
                         }),
                       ),
                       const Spacer(),
+                      // Supprimer juste ici, là où l'on tape déjà : plus
+                      // besoin de rectangle ni de passer par les réglages
+                      // pour retirer une ligne.
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 20),
+                        tooltip: "Supprimer cette ligne",
+                        onPressed: _occupe ? null : _supprimerEditionDirecte,
+                      ),
                       IconButton(
                         icon: const Icon(Icons.keyboard_return, size: 20),
                         tooltip: "Ligne suivante (écarte ce qui gêne)",
@@ -2969,6 +3027,8 @@ class _AccueilState extends State<Accueil> {
                                               maxLines: 1,
                                               cursorWidth: 2,
                                               cursorColor: Colors.blue,
+                                              selectionControls:
+                                                  _AucunePoignee(),
                                               textAlignVertical:
                                                   TextAlignVertical.center,
                                               style: TextStyle(
