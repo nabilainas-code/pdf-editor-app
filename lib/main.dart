@@ -2559,7 +2559,8 @@ class _AccueilState extends State<Accueil> {
                       final echelle = constraints.maxWidth / taillePage.width;
                       _echelleAffichage = echelle;
                       return ClipRect(
-                        child: InteractiveViewer(
+                        child: Stack(children: [
+                        InteractiveViewer(
                           // Navigation façon visionneuse : pincement à deux
                           // doigts pour zoomer, doigt posé sur la page pour
                           // la faire glisser. Le déplacement d'une ligne se
@@ -2696,6 +2697,22 @@ class _AccueilState extends State<Accueil> {
                                         selection.add(mot);
                                       }
                                     }),
+                                    // Appui long : on écrit directement sur
+                                    // cette ligne, sans passer par la
+                                    // sélection puis le crayon. Ça empêche
+                                    // aussi l'appui long de la page (qui pose
+                                    // un repère à effacer) de se déclencher
+                                    // par-dessus une ligne.
+                                    onLongPress: _occupe
+                                        ? null
+                                        : () {
+                                            setState(() {
+                                              selection
+                                                ..clear()
+                                                ..add(mot);
+                                            });
+                                            _ecrireSurLaLigne(mot);
+                                          },
                                     // Le glisser ne déplace que si la ligne
                                     // fait partie de la sélection ; sinon le
                                     // geste passe à la page (défilement/zoom).
@@ -2846,6 +2863,125 @@ class _AccueilState extends State<Accueil> {
                             ),
                           ),
                         ),
+                        // Menu posé à côté de la ligne sélectionnée, plutôt
+                        // qu'en haut de l'écran : les actions sont là où est
+                        // le doigt, comme dans les visionneuses PDF
+                        // courantes. Il est hors du zoom (sinon il grossirait
+                        // avec la page) et suit la ligne à chaque
+                        // déplacement de la vue.
+                        if (selection.length == 1 &&
+                            motEnEditionDirecte == null &&
+                            champEnEdition == null &&
+                            !modeRemplissage &&
+                            !modeNavigation &&
+                            !enCollage &&
+                            !enAjoutTexte &&
+                            !enPoseSignature)
+                          Positioned.fill(
+                            child: AnimatedBuilder(
+                              animation: _transformation,
+                              builder: (context, _) {
+                                final mot = selection.first;
+                                final matrice = _transformation.value;
+                                // La vue ne fait que zoomer et translater
+                                // (pas de rotation) : la position à l'écran
+                                // se calcule directement.
+                                final zoom = matrice.getMaxScaleOnAxis();
+                                final decalage = matrice.getTranslation();
+                                final coin = Offset(
+                                  mot.zone.left * echelle * zoom + decalage.x,
+                                  mot.zone.top * echelle * zoom + decalage.y,
+                                );
+                                final bas = Offset(
+                                  mot.zone.right * echelle * zoom + decalage.x,
+                                  mot.zone.bottom * echelle * zoom +
+                                      decalage.y,
+                                );
+                                const largeurMenu = 244.0;
+                                const hauteurMenu = 46.0;
+                                var gauche = coin.dx;
+                                if (gauche + largeurMenu >
+                                    constraints.maxWidth) {
+                                  gauche = constraints.maxWidth - largeurMenu;
+                                }
+                                if (gauche < 4) gauche = 4;
+                                // Au-dessus de la ligne, sauf si elle est
+                                // trop haut : le menu passe alors dessous.
+                                var haut = coin.dy - hauteurMenu - 6;
+                                if (haut < 4) haut = bas.dy + 6;
+                                if (haut >
+                                    constraints.maxHeight - hauteurMenu - 4) {
+                                  haut =
+                                      constraints.maxHeight - hauteurMenu - 4;
+                                }
+                                if (haut < 4) haut = 4;
+                                return Stack(
+                                  children: [
+                                    Positioned(
+                                      left: gauche,
+                                      top: haut,
+                                      width: largeurMenu,
+                                      height: hauteurMenu,
+                                      child: Card(
+                                        margin: EdgeInsets.zero,
+                                        elevation: 4,
+                                        child: Row(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.spaceEvenly,
+                                          children: [
+                                            IconButton(
+                                              icon: const Icon(Icons.edit,
+                                                  size: 20),
+                                              tooltip: "Écrire sur la ligne",
+                                              onPressed: _occupe
+                                                  ? null
+                                                  : () =>
+                                                      _ecrireSurLaLigne(mot),
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(
+                                                  Icons.content_copy,
+                                                  size: 20),
+                                              tooltip: "Copier",
+                                              onPressed: _occupe ||
+                                                      mot.texte.isEmpty
+                                                  ? null
+                                                  : _copierLigne,
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(
+                                                  Icons.cleaning_services,
+                                                  size: 20),
+                                              tooltip: "Effacer",
+                                              onPressed: _occupe
+                                                  ? null
+                                                  : () => _effacerZone(mot),
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(Icons.tune,
+                                                  size: 20),
+                                              tooltip: "Réglages",
+                                              onPressed: _occupe
+                                                  ? null
+                                                  : () => _modifierMot(mot),
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(Icons.close,
+                                                  size: 20),
+                                              tooltip: "Désélectionner",
+                                              onPressed: () => setState(
+                                                  () => selection.clear()),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
+                          ),
+                        ]),
                       );
                     },
                   ),
