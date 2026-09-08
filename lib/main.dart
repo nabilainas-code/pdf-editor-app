@@ -962,10 +962,31 @@ class _AccueilState extends State<Accueil> {
       }
       if (raster == null) return;
       final pngOctets = await raster.toPng();
+      final nouvelle = img.decodePng(pngOctets);
+      if (nouvelle == null) return;
+
+      // Même garde-fou que l'aplatissement : la rastérisation perd parfois
+      // l'essentiel du contenu sans lever d'erreur. On gardait alors cette
+      // page presque blanche comme nouvel aperçu, d'où le document qui
+      // devenait gris/vide d'un coup. On préfère garder l'aperçu précédent.
+      final ancienne = imageDecodee;
+      if (ancienne != null) {
+        final avant = _densiteEncre(ancienne);
+        final apres = _densiteEncre(nouvelle);
+        if (avant > 0.01 && apres < avant * 0.3) {
+          if (mounted) {
+            setState(() => statut =
+                "Aperçu non rafraîchi (rendu incomplet) — la page est intacte, "
+                "annulez si le résultat vous surprend");
+          }
+          return;
+        }
+      }
+
       if (!mounted) return;
       setState(() {
         imageDeFond = pngOctets;
-        imageDecodee = img.decodePng(pngOctets);
+        imageDecodee = nouvelle;
       });
     } catch (_) {}
   }
@@ -977,9 +998,18 @@ class _AccueilState extends State<Accueil> {
   /// toute la page si l'entourage est trop couvert d'encre pour être fiable.
   PdfColor _couleurDeFond(MotDetecte mot) => _couleurLocale(mot.zone);
 
-  PdfColor _couleurLocale(Rect zonePdf) {
+  /// Fond réel autour d'une zone, lu dans l'image de la page, en [r, g, b].
+  ///
+  /// Deux passes : d'abord la teinte claire la plus fréquente (le papier),
+  /// puis, si l'entourage n'a rien de clair — une ligne posée sur un bandeau
+  /// sombre, comme la colonne d'un CV —, la teinte la plus fréquente tout
+  /// court, qui est alors le vrai fond. On ne se rabat plus sur la couleur
+  /// dominante de la page entière : sur un document à large bandeau sombre
+  /// elle pouvait être sombre, et peignait une barre noire en travers de la
+  /// ligne.
+  List<int>? _fondAutour(Rect zonePdf) {
     final image = imageDecodee;
-    if (image == null) return couleurPage;
+    if (image == null) return null;
     final echelle = echelleOcr;
 
     const marge = 12.0;
@@ -1001,11 +1031,13 @@ class _AccueilState extends State<Accueil> {
     final zoneHautIm = (zonePdf.top * echelle).round();
     final zoneBasIm = (zonePdf.bottom * echelle).round();
 
-    // On retient la teinte la plus fréquente parmi les pixels clairs, et non
-    // leur moyenne : autour d'une ligne dense, la moyenne est tirée vers le
-    // gris par les pixels de bord de lettres et donne un aplat grisâtre.
-    final compteur = <int, int>{};
-    var total = 0;
+    // On retient la teinte la plus fréquente, et non la moyenne : autour
+    // d'une ligne dense, la moyenne est tirée vers le gris par les pixels de
+    // bord de lettres et donne un aplat grisâtre.
+    final clairs = <int, int>{};
+    final tous = <int, int>{};
+    var totalClairs = 0;
+    var totalTous = 0;
     for (var y = haut; y <= bas; y += 3) {
       for (var x = gauche; x <= droite; x += 3) {
         final dansZone = x >= zoneGaucheIm &&
@@ -1014,18 +1046,30 @@ class _AccueilState extends State<Accueil> {
             y <= zoneBasIm;
         if (dansZone) continue;
         final pixel = image.getPixel(x, y);
-        final luminance =
-            0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b;
-        if (luminance < 200) continue;
+        if (pixel.a == 0) {
+          // Fond transparent du rendu : c'est du papier blanc à l'écran.
+          const cleBlanc = (63 << 16) | (63 << 8) | 63;
+          tous[cleBlanc] = (tous[cleBlanc] ?? 0) + 1;
+          clairs[cleBlanc] = (clairs[cleBlanc] ?? 0) + 1;
+          totalTous++;
+          totalClairs++;
+          continue;
+        }
         final cle = ((pixel.r.toInt() ~/ 4) << 16) |
             ((pixel.g.toInt() ~/ 4) << 8) |
             (pixel.b.toInt() ~/ 4);
-        compteur[cle] = (compteur[cle] ?? 0) + 1;
-        total++;
+        tous[cle] = (tous[cle] ?? 0) + 1;
+        totalTous++;
+        final luminance =
+            0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b;
+        if (luminance < 200) continue;
+        clairs[cle] = (clairs[cle] ?? 0) + 1;
+        totalClairs++;
       }
     }
 
-    if (total < 8) return couleurPage;
+    final compteur = totalClairs >= 8 ? clairs : tous;
+    if (compteur.isEmpty || totalTous < 4) return null;
     var cleFrequente = compteur.keys.first;
     var maxCompte = compteur[cleFrequente]!;
     for (final entree in compteur.entries) {
@@ -1034,11 +1078,28 @@ class _AccueilState extends State<Accueil> {
         cleFrequente = entree.key;
       }
     }
-    return PdfColor(
-      ((cleFrequente >> 16) & 0xFF) * 4,
-      ((cleFrequente >> 8) & 0xFF) * 4,
-      (cleFrequente & 0xFF) * 4,
-    );
+    final r = ((cleFrequente >> 16) & 0xFF) * 4;
+    final g = ((cleFrequente >> 8) & 0xFF) * 4;
+    final b = (cleFrequente & 0xFF) * 4;
+    // Un papier blanc ressort à 252 après quantification : on le ramène au
+    // blanc franc, sinon le rectangle posé par-dessus se voit légèrement.
+    if (r >= 248 && g >= 248 && b >= 248) return const [255, 255, 255];
+    return [r, g, b];
+  }
+
+  PdfColor _couleurLocale(Rect zonePdf) {
+    final fond = _fondAutour(zonePdf);
+    if (fond == null) return couleurPage;
+    return PdfColor(fond[0], fond[1], fond[2]);
+  }
+
+  /// Couleur à peindre derrière le champ d'écriture directe : celle du papier
+  /// autour de la ligne, donc invisible sur fond blanc. L'aspect du document
+  /// ne change pas quand on passe en modification.
+  Color _couleurPapierEcran(Rect zonePdf) {
+    final fond = _fondAutour(zonePdf);
+    if (fond == null) return Colors.white;
+    return Color.fromARGB(255, fond[0], fond[1], fond[2]);
   }
 
   PdfStandardFont _police(MotDetecte mot, [double? taille]) {
@@ -1135,6 +1196,23 @@ class _AccueilState extends State<Accueil> {
   /// PdfBitmap au moment de le dessiner). Déplacer ou coller cette image
   /// plutôt que de réécrire le texte conserve exactement la police, la
   /// graisse et la taille d'origine — impossible à reproduire en Helvetica.
+  /// Aplatit une image sur du blanc au lieu de simplement jeter son canal
+  /// alpha. Le rendu de page peut avoir un fond transparent : à l'écran il
+  /// paraît blanc (le blanc de l'application est dessous), mais une fois le
+  /// canal alpha retiré, ces pixels valent 0,0,0 — du noir franc. C'est ce
+  /// qui posait un rectangle noir à la place du contenu déplacé ou collé.
+  img.Image _surFondBlanc(img.Image source) {
+    if (source.numChannels < 4) return source;
+    final fond = img.Image(
+      width: source.width,
+      height: source.height,
+      numChannels: 3,
+    );
+    img.fill(fond, color: img.ColorRgb8(255, 255, 255));
+    img.compositeImage(fond, source);
+    return fond;
+  }
+
   Uint8List? _capturerZone(Rect zone) {
     final image = imageDecodee;
     if (image == null) return null;
@@ -1149,12 +1227,10 @@ class _AccueilState extends State<Accueil> {
     try {
       final morceau = img.copyCrop(image,
           x: x, y: y, width: largeur, height: hauteur);
-      // Sans canal alpha : c'est le format le plus sûrement relu par le
-      // moteur PDF, et le contenu à déplacer est de toute façon opaque.
-      final sansAlpha = morceau.numChannels == 4
-          ? morceau.convert(numChannels: 3)
-          : morceau;
-      final octets = img.encodePng(sansAlpha);
+      // Aplati sur du blanc : sans canal alpha, c'est le format le plus
+      // sûrement relu par le moteur PDF, et le fond transparent du rendu ne
+      // se transforme pas en noir.
+      final octets = img.encodePng(_surFondBlanc(morceau));
 
       // Vérification par aller-retour : un PNG mal formé n'échoue pas
       // toujours au moment de l'encoder, seulement plus tard quand le
@@ -1192,6 +1268,10 @@ class _AccueilState extends State<Accueil> {
       for (var yi = y; yi < y + hauteurBande; yi += 2) {
         for (var xi = x; xi < x + largeur; xi += 2) {
           final p = image.getPixel(xi, yi);
+          // Un pixel entièrement transparent est du fond, pas de l'encre :
+          // sans ça, un rendu à fond transparent ne trouvait jamais de
+          // papier et retombait toujours sur l'aplat de couleur.
+          if (p.a == 0) continue;
           if (0.299 * p.r + 0.587 * p.g + 0.114 * p.b < 170) return false;
         }
       }
@@ -1206,10 +1286,7 @@ class _AccueilState extends State<Accueil> {
         try {
           final bande = img.copyCrop(image,
               x: x, y: y, width: largeur, height: hauteurBande);
-          final sansAlpha = bande.numChannels == 4
-              ? bande.convert(numChannels: 3)
-              : bande;
-          return PdfBitmap(img.encodePng(sansAlpha));
+          return PdfBitmap(img.encodePng(_surFondBlanc(bande)));
         } catch (_) {
           return null;
         }
@@ -2311,6 +2388,17 @@ class _AccueilState extends State<Accueil> {
                         ),
                       ),
                       const Text("Gras", style: TextStyle(fontSize: 13)),
+                      IconButton(
+                        icon: const Icon(Icons.select_all, size: 20),
+                        tooltip: "Tout sélectionner (pour copier ou remplacer)",
+                        onPressed: () {
+                          controleurDirect.selection = TextSelection(
+                            baseOffset: 0,
+                            extentOffset: controleurDirect.text.length,
+                          );
+                          focusDirect.requestFocus();
+                        },
+                      ),
                       const Spacer(),
                       const Text("Taille", style: TextStyle(fontSize: 13)),
                       IconButton(
@@ -2560,12 +2648,8 @@ class _AccueilState extends State<Accueil> {
                                       // couleur du papier pour masquer le
                                       // texte d'origine pendant la frappe.
                                       ? Container(
-                                          color: Color.fromARGB(
-                                            255,
-                                            couleurPage.r,
-                                            couleurPage.g,
-                                            couleurPage.b,
-                                          ),
+                                          color:
+                                              _couleurPapierEcran(mot.zone),
                                           // Le cadre d'une ligne est souvent
                                           // juste à la hauteur du texte : sans
                                           // ça, le champ (un peu plus haut)
@@ -2578,7 +2662,10 @@ class _AccueilState extends State<Accueil> {
                                               focusNode: focusDirect,
                                               autofocus: true,
                                               maxLines: 1,
-                                              cursorWidth: 1.5,
+                                              cursorWidth: 2,
+                                              cursorColor: Colors.blue,
+                                              textAlignVertical:
+                                                  TextAlignVertical.center,
                                               style: TextStyle(
                                                 fontSize:
                                                     _tailleEditionDirecte(mot) *
