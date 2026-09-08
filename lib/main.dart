@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -180,6 +181,10 @@ class _AucunePoignee extends TextSelectionControls {
 
   @override
   Size getHandleSize(double textLineHeight) => Size.zero;
+
+  @override
+  Offset getHandleAnchor(TextSelectionHandleType type, double textLineHeight) =>
+      Offset.zero;
 }
 
 class _PeintreSignature extends CustomPainter {
