@@ -329,6 +329,11 @@ class _AccueilState extends State<Accueil> {
   Offset deplacementGroupeEnCours = Offset.zero;
   bool groupeEnDeplacement = false;
 
+  /// Redimensionnement en cours par une poignée de coin : le rectangle suivi
+  /// du doigt, appliqué seulement au relâchement.
+  MotDetecte? motRedimensionne;
+  Rect? rectRedimension;
+
   /// Ligne en cours d'écriture directement sur la page : le texte se tape
   /// dans un champ posé exactement sur la ligne, à sa place et à sa taille,
   /// au lieu de passer par la boîte « Modifier la ligne » qui masque la page.
@@ -845,23 +850,52 @@ class _AccueilState extends State<Accueil> {
   /// Redessine une signature posée à une autre taille : son encre est du
   /// tracé vectoriel déjà dans la page, on efface donc sa place et on la
   /// refait à partir de ses traits, gardés avec elle.
-  Future<void> _redimensionnerSignature(MotDetecte mot, double facteur) async {
-    final traits = mot.traitsSignature;
+  /// Redimensionne une zone à un rectangle donné (poignées des coins, ou
+  /// boutons du menu). Trois cas :
+  ///  - une signature : son encre est du tracé vectoriel déjà écrit dans la
+  ///    page, on efface sa place et on la refait à la nouvelle taille, en
+  ///    gardant ses proportions ;
+  ///  - une ligne de texte : on l'efface et on la redessine, la taille de
+  ///    police suivant l'agrandissement ;
+  ///  - un simple repère (vide) : rien n'est écrit dans la page, seul son
+  ///    cadre change.
+  Future<void> _redimensionnerZone(MotDetecte mot, Rect demande) async {
     final doc = document;
-    if (traits == null || doc == null || _occupe) return;
+    if (doc == null || _occupe) return;
 
-    var largeur = mot.zone.width * facteur;
-    const mini = 30.0;
-    if (largeur < mini) largeur = mini;
-    final maxi = taillePage.width - mot.zone.left - 2;
-    if (largeur > maxi) largeur = maxi;
-    final hauteur = largeur * mot.ratioSignature;
-    if (mot.zone.top + hauteur > taillePage.height) {
-      setState(() => statut = "Signature déjà au maximum pour cette place");
+    // Bornes : jamais plus petit qu'une vignette, jamais hors de la page.
+    const mini = 12.0;
+    var gauche = demande.left < 0 ? 0.0 : demande.left;
+    var haut = demande.top < 0 ? 0.0 : demande.top;
+    var largeur = demande.width < mini ? mini : demande.width;
+    var hauteur = demande.height < mini ? mini : demande.height;
+    final traits = mot.traitsSignature;
+    if (traits != null) {
+      // Une signature garde ses proportions : la largeur commande.
+      hauteur = largeur * mot.ratioSignature;
+    }
+    if (gauche + largeur > taillePage.width) {
+      largeur = taillePage.width - gauche;
+    }
+    if (haut + hauteur > taillePage.height) {
+      hauteur = taillePage.height - haut;
+    }
+    if (largeur < mini || hauteur < mini) return;
+
+    final nouvelle = Rect.fromLTWH(gauche, haut, largeur, hauteur);
+    if ((nouvelle.width - mot.zone.width).abs() < 0.5 &&
+        (nouvelle.height - mot.zone.height).abs() < 0.5 &&
+        (nouvelle.left - mot.zone.left).abs() < 0.5 &&
+        (nouvelle.top - mot.zone.top).abs() < 0.5) {
       return;
     }
-    if ((largeur - mot.zone.width).abs() < 0.5) {
-      setState(() => statut = "Signature déjà à sa taille limite");
+
+    // Un repère vide n'a rien dans la page : son cadre seul change.
+    if (traits == null && mot.texte.isEmpty) {
+      setState(() {
+        mot.zone = nouvelle;
+        statut = "Cadre redimensionné";
+      });
       return;
     }
 
@@ -872,30 +906,55 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[0];
-      // On efface la plus grande des deux tailles : en agrandissant, l'ancien
-      // tracé est couvert par le nouveau ; en réduisant, il faut nettoyer ce
-      // qui dépasse.
-      final aEffacer = mot.zone.inflate(2);
+      // On efface l'ancienne place : en agrandissant, l'ancien tracé serait
+      // recouvert, mais en réduisant il faut nettoyer ce qui dépasse.
+      final aEffacer = _rectEffacement(mot).expandToInclude(nouvelle);
       _effacerRect(page, aEffacer, mot);
 
-      final nouvelle =
-          Rect.fromLTWH(mot.zone.left, mot.zone.top, largeur, hauteur);
-      _tracerSignature(page, traits, nouvelle);
-
-      setState(() {
+      if (traits != null) {
+        _tracerSignature(page, traits, nouvelle);
+        setState(() {
+          mot.zone = nouvelle;
+          statut = "Signature redimensionnée";
+        });
+        await _rafraichirApercuOcr(doc);
+      } else {
+        final tailleActuelle = _dessinTexte(mot, mot.zone).police.size;
+        final facteur = mot.zone.width <= 0
+            ? 1.0
+            : nouvelle.width / mot.zone.width;
         mot.zone = nouvelle;
-        statut = "Signature redimensionnée";
-      });
+        mot.tailleManuelle = (tailleActuelle * facteur).clamp(4.0, 96.0);
+        _ecrire(page, mot, mot.zone);
 
-      await _rafraichirApercuOcr(doc);
+        if (imageDeFond != null) {
+          final fond = _couleurLocale(mot.zone);
+          mot.fondEcran = Color.fromARGB(255, fond.r, fond.g, fond.b);
+          mot.zoneMasque = aEffacer.expandToInclude(_rectContenu(mot));
+        }
+        setState(() => statut = "Ligne redimensionnée");
+      }
     } catch (e) {
       historique.removeLast();
       await _restaurerEtat(avant);
-      setState(() => statut = "Redimensionnement annulé (rien n'a été perdu) : $e");
+      setState(
+          () => statut = "Redimensionnement annulé (rien n'a été perdu) : $e");
     } finally {
       setState(() => _occupe = false);
     }
   }
+
+  /// Réduit ou agrandit d'un cran depuis le menu, autour du coin haut-gauche.
+  Future<void> _redimensionnerDUnCran(MotDetecte mot, double facteur) =>
+      _redimensionnerZone(
+        mot,
+        Rect.fromLTWH(
+          mot.zone.left,
+          mot.zone.top,
+          mot.zone.width * facteur,
+          mot.zone.height * facteur,
+        ),
+      );
 
   Future<void> _poserSignature(double x, double y) async {
     final traits = signatureNormalisee;
@@ -3488,6 +3547,98 @@ class _AccueilState extends State<Accueil> {
                                     ),
                                   ),
                                 ),
+                              // Poignées rondes aux quatre coins de la
+                              // sélection : pour réduire ou agrandir le cadre
+                              // au doigt, signature comprise.
+                              if (selection.length == 1 &&
+                                  motEnEditionDirecte == null &&
+                                  champEnEdition == null &&
+                                  !modeRemplissage &&
+                                  !modeNavigation &&
+                                  !enCollage &&
+                                  !enAjoutTexte &&
+                                  !enPoseSignature &&
+                                  !groupeEnDeplacement)
+                                for (final coin in const [
+                                  Alignment.topLeft,
+                                  Alignment.topRight,
+                                  Alignment.bottomLeft,
+                                  Alignment.bottomRight,
+                                ])
+                                  () {
+                                    final mot = selection.first;
+                                    final rect = (motRedimensionne == mot
+                                            ? rectRedimension
+                                            : null) ??
+                                        _rectAffichage(mot, echelle);
+                                    const rayon = 11.0;
+                                    final x =
+                                        (coin.x < 0 ? rect.left : rect.right) *
+                                            echelle;
+                                    final y =
+                                        (coin.y < 0 ? rect.top : rect.bottom) *
+                                            echelle;
+                                    return Positioned(
+                                      left: x - rayon,
+                                      top: y - rayon,
+                                      width: rayon * 2,
+                                      height: rayon * 2,
+                                      child: GestureDetector(
+                                        behavior: HitTestBehavior.opaque,
+                                        onPanStart: (_) => setState(() {
+                                          motRedimensionne = mot;
+                                          rectRedimension = rect;
+                                        }),
+                                        onPanUpdate: (details) =>
+                                            setState(() {
+                                          final base =
+                                              rectRedimension ?? mot.zone;
+                                          final dx =
+                                              details.delta.dx / echelle;
+                                          final dy =
+                                              details.delta.dy / echelle;
+                                          rectRedimension = Rect.fromLTRB(
+                                            coin.x < 0
+                                                ? base.left + dx
+                                                : base.left,
+                                            coin.y < 0
+                                                ? base.top + dy
+                                                : base.top,
+                                            coin.x < 0
+                                                ? base.right
+                                                : base.right + dx,
+                                            coin.y < 0
+                                                ? base.bottom
+                                                : base.bottom + dy,
+                                          );
+                                        }),
+                                        onPanEnd: (_) async {
+                                          final vise = rectRedimension;
+                                          setState(() {
+                                            motRedimensionne = null;
+                                            rectRedimension = null;
+                                          });
+                                          if (vise != null) {
+                                            await _redimensionnerZone(
+                                                mot, vise);
+                                          }
+                                        },
+                                        child: Center(
+                                          child: Container(
+                                            width: rayon * 1.4,
+                                            height: rayon * 1.4,
+                                            decoration: BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              color: Colors.white,
+                                              border: Border.all(
+                                                  color: Colors.blue,
+                                                  width: 2),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  }(),
                               // Champs de formulaire : cadres verts posés à
                               // l'emplacement exact des cases du PDF.
                               if (modeRemplissage)
@@ -3611,11 +3762,12 @@ class _AccueilState extends State<Accueil> {
                                       decalage.y,
                                 );
                                 const largeurMenu = 252.0;
-                                // Deux entrées de plus pour une signature
-                                // posée (la réduire / l'agrandir).
-                                final estSignature =
-                                    mot.traitsSignature != null;
-                                final hauteurMenu = estSignature ? 276.0 : 184.0;
+                                // Le menu s'allonge selon ce que la
+                                // sélection permet de faire.
+                                final estVide =
+                                    mot.texte.isEmpty && mot.traitsSignature == null;
+                                final nbEntrees = estVide ? 7 : 6;
+                                final hauteurMenu = 46.0 * nbEntrees;
                                 var gauche = coin.dx;
                                 if (gauche + largeurMenu >
                                     constraints.maxWidth) {
@@ -3677,25 +3829,32 @@ class _AccueilState extends State<Accueil> {
                                                   ? null
                                                   : () => _modifierMot(mot),
                                             ),
-                                            if (estSignature)
+                                            _entreeMenu(
+                                              Icons.close_fullscreen,
+                                              "Réduire",
+                                              _occupe
+                                                  ? null
+                                                  : () =>
+                                                      _redimensionnerDUnCran(
+                                                          mot, 0.8),
+                                            ),
+                                            _entreeMenu(
+                                              Icons.open_in_full,
+                                              "Agrandir",
+                                              _occupe
+                                                  ? null
+                                                  : () =>
+                                                      _redimensionnerDUnCran(
+                                                          mot, 1.25),
+                                            ),
+                                            if (estVide)
                                               _entreeMenu(
-                                                Icons.zoom_out_map,
-                                                "Réduire la signature",
+                                                Icons.delete_outline,
+                                                "Retirer ce cadre",
                                                 _occupe
                                                     ? null
                                                     : () =>
-                                                        _redimensionnerSignature(
-                                                            mot, 0.8),
-                                              ),
-                                            if (estSignature)
-                                              _entreeMenu(
-                                                Icons.zoom_in_map,
-                                                "Agrandir la signature",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _redimensionnerSignature(
-                                                            mot, 1.25),
+                                                        _retirerRepere(mot),
                                               ),
                                           ],
                                         ),
