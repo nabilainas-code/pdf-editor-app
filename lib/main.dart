@@ -125,6 +125,20 @@ class _AccueilState extends State<Accueil> {
   Offset deplacementGroupeEnCours = Offset.zero;
   bool groupeEnDeplacement = false;
 
+  /// Ligne en cours d'écriture directement sur la page : le texte se tape
+  /// dans un champ posé exactement sur la ligne, à sa place et à sa taille,
+  /// au lieu de passer par la boîte « Modifier la ligne » qui masque la page.
+  MotDetecte? motEnEditionDirecte;
+  final TextEditingController controleurDirect = TextEditingController();
+  final FocusNode focusDirect = FocusNode();
+  bool grasDirect = false;
+  double? tailleDirecte;
+
+  /// Dernière échelle d'affichage de la page (points PDF → pixels écran),
+  /// mémorisée pendant la construction pour pouvoir amener la ligne en cours
+  /// d'écriture au-dessus du clavier.
+  double _echelleAffichage = 1;
+
   static const double _pasDeplacement = 3.0;
 
   /// Résolution de rastérisation de la page scannée. Les zones déplacées ou
@@ -154,9 +168,61 @@ class _AccueilState extends State<Accueil> {
   @override
   void dispose() {
     _transformation.dispose();
+    controleurDirect.dispose();
+    focusDirect.dispose();
     document?.dispose();
     super.dispose();
   }
+
+  /// Ouvre l'écriture directement sur la ligne, dans la page.
+  void _ecrireSurLaLigne(MotDetecte mot) {
+    setState(() {
+      motEnEditionDirecte = mot;
+      controleurDirect.text = mot.texte;
+      controleurDirect.selection =
+          TextSelection.collapsed(offset: mot.texte.length);
+      grasDirect = mot.gras;
+      tailleDirecte = mot.tailleManuelle;
+      statut = "Écrivez directement sur la ligne, puis validez";
+    });
+
+    // Le clavier occupe la moitié basse de l'écran : on remonte la page pour
+    // que la ligne en cours d'écriture reste visible au-dessus.
+    final matrice = _transformation.value.clone();
+    final zoom = matrice.getMaxScaleOnAxis();
+    matrice.setTranslationRaw(
+      matrice.getTranslation().x,
+      -(mot.zone.top * _echelleAffichage * zoom) + 60,
+      0,
+    );
+    _transformation.value = matrice;
+
+    focusDirect.requestFocus();
+  }
+
+  void _annulerEditionDirecte() {
+    focusDirect.unfocus();
+    setState(() {
+      motEnEditionDirecte = null;
+      statut = "Modification annulée";
+    });
+  }
+
+  Future<void> _validerEditionDirecte() async {
+    final mot = motEnEditionDirecte;
+    if (mot == null) return;
+    final texte = controleurDirect.text;
+    final gras = grasDirect;
+    final taille = tailleDirecte;
+    focusDirect.unfocus();
+    setState(() => motEnEditionDirecte = null);
+    await _appliquerModification(mot, texte: texte, gras: gras, taille: taille);
+  }
+
+  /// Taille de police actuellement utilisée pour l'écriture directe (celle
+  /// choisie à la main, sinon celle estimée automatiquement).
+  double _tailleEditionDirecte(MotDetecte mot) =>
+      tailleDirecte ?? _dessinTexte(mot, mot.zone).police.size;
 
   Future<void> _init() async {
     try {
@@ -1307,6 +1373,31 @@ class _AccueilState extends State<Accueil> {
       return;
     }
 
+    await _appliquerModification(
+      mot,
+      texte: texteNettoye,
+      gras: grasFinal,
+      taille: tailleFinale,
+      alignement: alignementFinal,
+    );
+  }
+
+  /// Applique un changement de texte / gras / taille sur une ligne : efface
+  /// la zone puis la redessine, avec retour en arrière complet si quoi que ce
+  /// soit échoue. Partagé par la boîte « Modifier la ligne » et par l'écriture
+  /// directement sur la page.
+  Future<void> _appliquerModification(
+    MotDetecte mot, {
+    required String texte,
+    required bool gras,
+    double? taille,
+    PdfTextAlignment? alignement,
+  }) async {
+    final texteNettoye = texte.trim();
+    final grasFinal = gras;
+    final tailleFinale = taille;
+    final alignementFinal = alignement ?? mot.alignement;
+
     if (texteNettoye == mot.texte &&
         grasFinal == mot.gras &&
         tailleFinale == mot.tailleManuelle &&
@@ -1824,7 +1915,69 @@ class _AccueilState extends State<Accueil> {
                 : _enregistrer,
           ),
         ],
-        bottom: selection.isEmpty
+        bottom: motEnEditionDirecte != null
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(40),
+                child: ColoredBox(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        height: 32,
+                        width: 32,
+                        child: Checkbox(
+                          value: grasDirect,
+                          onChanged: (v) =>
+                              setState(() => grasDirect = v ?? false),
+                        ),
+                      ),
+                      const Text("Gras", style: TextStyle(fontSize: 13)),
+                      const Spacer(),
+                      const Text("Taille", style: TextStyle(fontSize: 13)),
+                      IconButton(
+                        icon: const Icon(Icons.remove, size: 20),
+                        tooltip: "Réduire",
+                        onPressed: () => setState(() {
+                          tailleDirecte =
+                              (_tailleEditionDirecte(motEnEditionDirecte!) - 1)
+                                  .clamp(4, 200);
+                        }),
+                      ),
+                      SizedBox(
+                        width: 34,
+                        child: Text(
+                          tailleDirecte?.round().toString() ?? "Auto",
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add, size: 20),
+                        tooltip: "Agrandir",
+                        onPressed: () => setState(() {
+                          tailleDirecte =
+                              (_tailleEditionDirecte(motEnEditionDirecte!) + 1)
+                                  .clamp(4, 200);
+                        }),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 20),
+                        tooltip: "Annuler",
+                        onPressed: _annulerEditionDirecte,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.check, size: 22),
+                        tooltip: "Valider",
+                        onPressed: _occupe ? null : _validerEditionDirecte,
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                  ),
+                ),
+              )
+            : selection.isEmpty
             ? null
             : PreferredSize(
                 preferredSize: const Size.fromHeight(40),
@@ -1835,7 +1988,14 @@ class _AccueilState extends State<Accueil> {
                       const SizedBox(width: 8),
                       IconButton(
                         icon: const Icon(Icons.edit, size: 20),
-                        tooltip: "Modifier le texte",
+                        tooltip: "Écrire directement sur la ligne",
+                        onPressed: selection.length == 1
+                            ? () => _ecrireSurLaLigne(selection.first)
+                            : null,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.tune, size: 20),
+                        tooltip: "Réglages de la ligne (boîte)",
                         onPressed: selection.length == 1
                             ? () => _modifierMot(selection.first)
                             : null,
@@ -1931,6 +2091,7 @@ class _AccueilState extends State<Accueil> {
                 : LayoutBuilder(
                     builder: (context, constraints) {
                       final echelle = constraints.maxWidth / taillePage.width;
+                      _echelleAffichage = echelle;
                       return ClipRect(
                         child: InteractiveViewer(
                           // Navigation façon visionneuse : pincement à deux
@@ -2003,7 +2164,53 @@ class _AccueilState extends State<Accueil> {
                                           : 0),
                                   width: mot.zone.width * echelle,
                                   height: mot.zone.height * echelle,
-                                  child: GestureDetector(
+                                  child: motEnEditionDirecte == mot
+                                      // Écriture directement sur la page : le
+                                      // champ occupe la place de la ligne, à
+                                      // sa taille, par-dessus un fond de la
+                                      // couleur du papier pour masquer le
+                                      // texte d'origine pendant la frappe.
+                                      ? Container(
+                                          color: Color.fromARGB(
+                                            255,
+                                            couleurPage.r,
+                                            couleurPage.g,
+                                            couleurPage.b,
+                                          ),
+                                          // Le cadre d'une ligne est souvent
+                                          // juste à la hauteur du texte : sans
+                                          // ça, le champ (un peu plus haut)
+                                          // déborderait de sa case.
+                                          child: OverflowBox(
+                                            alignment: Alignment.centerLeft,
+                                            maxHeight: double.infinity,
+                                            child: TextField(
+                                              controller: controleurDirect,
+                                              focusNode: focusDirect,
+                                              autofocus: true,
+                                              maxLines: 1,
+                                              cursorWidth: 1.5,
+                                              style: TextStyle(
+                                                fontSize:
+                                                    _tailleEditionDirecte(mot) *
+                                                        echelle,
+                                                height: 1.0,
+                                                fontWeight: grasDirect
+                                                    ? FontWeight.bold
+                                                    : FontWeight.normal,
+                                                color: Colors.black,
+                                              ),
+                                              decoration: const InputDecoration(
+                                                isDense: true,
+                                                border: InputBorder.none,
+                                                contentPadding: EdgeInsets.zero,
+                                              ),
+                                              onSubmitted: (_) =>
+                                                  _validerEditionDirecte(),
+                                            ),
+                                          ),
+                                        )
+                                      : GestureDetector(
                                     // Un tap ajoute ou retire la ligne du
                                     // groupe sélectionné (rouge) ; pour
                                     // modifier le texte, on passe par le
