@@ -69,6 +69,21 @@ class MotDetecte {
   /// texte.
   double? tailleAuto;
 
+  /// Traits d'une signature posée (coordonnées normalisées, comme dans le
+  /// répertoire) et son rapport hauteur/largeur. Les garder permet de la
+  /// redessiner à une autre taille : l'encre déjà posée dans la page est du
+  /// tracé vectoriel, impossible à agrandir ou réduire sans la refaire.
+  List<List<Offset>>? traitsSignature;
+  double ratioSignature;
+
+  /// Zone de la page que l'application a repeinte (effacée puis redessinée)
+  /// dans le PDF. L'image d'aperçu n'étant plus rafraîchie après chaque
+  /// modification, elle y montre encore les pixels d'avant : l'écran doit
+  /// donc recouvrir cette zone. C'est ce qui manquait à une ligne dont on
+  /// supprime le texte — sans texte à afficher, plus rien ne masquait
+  /// l'ancien, qui semblait « revenir ».
+  Rect? zoneMasque;
+
   /// Couleur de fond à peindre derrière le texte affiché à l'écran quand la
   /// ligne a été redessinée (voir [redessine]) : rafraîchir tout l'aperçu de
   /// la page à chaque modification (un rendu complet de la page scannée,
@@ -87,7 +102,10 @@ class MotDetecte {
       this.famille = PdfFontFamily.helvetica,
       this.couleurTexte,
       this.tailleAuto,
-      this.fondEcran});
+      this.fondEcran,
+      this.zoneMasque,
+      this.traitsSignature,
+      this.ratioSignature = 0.4});
 }
 
 class Etat {
@@ -806,6 +824,79 @@ class _AccueilState extends State<Accueil> {
     );
   }
 
+  /// Dessine les traits d'une signature dans le rectangle donné. Les
+  /// coordonnées des traits sont normalisées par leur largeur, l'épaisseur du
+  /// stylo suit donc la taille pour rester proportionnée.
+  void _tracerSignature(PdfPage page, List<List<Offset>> traits, Rect zone) {
+    final stylo = PdfPen(PdfColor(0, 0, 0), width: zone.width * 0.006);
+    for (final trait in traits) {
+      for (var i = 0; i + 1 < trait.length; i++) {
+        page.graphics.drawLine(
+          stylo,
+          Offset(zone.left + trait[i].dx * zone.width,
+              zone.top + trait[i].dy * zone.width),
+          Offset(zone.left + trait[i + 1].dx * zone.width,
+              zone.top + trait[i + 1].dy * zone.width),
+        );
+      }
+    }
+  }
+
+  /// Redessine une signature posée à une autre taille : son encre est du
+  /// tracé vectoriel déjà dans la page, on efface donc sa place et on la
+  /// refait à partir de ses traits, gardés avec elle.
+  Future<void> _redimensionnerSignature(MotDetecte mot, double facteur) async {
+    final traits = mot.traitsSignature;
+    final doc = document;
+    if (traits == null || doc == null || _occupe) return;
+
+    var largeur = mot.zone.width * facteur;
+    const mini = 30.0;
+    if (largeur < mini) largeur = mini;
+    final maxi = taillePage.width - mot.zone.left - 2;
+    if (largeur > maxi) largeur = maxi;
+    final hauteur = largeur * mot.ratioSignature;
+    if (mot.zone.top + hauteur > taillePage.height) {
+      setState(() => statut = "Signature déjà au maximum pour cette place");
+      return;
+    }
+    if ((largeur - mot.zone.width).abs() < 0.5) {
+      setState(() => statut = "Signature déjà à sa taille limite");
+      return;
+    }
+
+    setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
+    try {
+      historique.add(avant);
+      futur.clear();
+
+      final page = doc.pages[0];
+      // On efface la plus grande des deux tailles : en agrandissant, l'ancien
+      // tracé est couvert par le nouveau ; en réduisant, il faut nettoyer ce
+      // qui dépasse.
+      final aEffacer = mot.zone.inflate(2);
+      _effacerRect(page, aEffacer, mot);
+
+      final nouvelle =
+          Rect.fromLTWH(mot.zone.left, mot.zone.top, largeur, hauteur);
+      _tracerSignature(page, traits, nouvelle);
+
+      setState(() {
+        mot.zone = nouvelle;
+        statut = "Signature redimensionnée";
+      });
+
+      await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Redimensionnement annulé (rien n'a été perdu) : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
   Future<void> _poserSignature(double x, double y) async {
     final traits = signatureNormalisee;
     final doc = document;
@@ -830,26 +921,16 @@ class _AccueilState extends State<Accueil> {
       }
 
       final page = doc.pages[0];
-      final stylo = PdfPen(PdfColor(0, 0, 0), width: largeur * 0.006);
-      for (final trait in traits) {
-        for (var i = 0; i + 1 < trait.length; i++) {
-          page.graphics.drawLine(
-            stylo,
-            Offset(gauche + trait[i].dx * largeur,
-                haut + trait[i].dy * largeur),
-            Offset(gauche + trait[i + 1].dx * largeur,
-                haut + trait[i + 1].dy * largeur),
-          );
-        }
-      }
+      _tracerSignature(page, traits, Rect.fromLTWH(gauche, haut, largeur, hauteur));
 
       // Un repère (sans texte) sur la signature : elle devient sélectionnable
       // et déplaçable comme le reste, sans traitement particulier.
       final zone = Rect.fromLTWH(gauche, haut, largeur, hauteur);
       setState(() {
-        mots.add(MotDetecte("", zone));
+        mots.add(MotDetecte("", zone,
+            traitsSignature: traits, ratioSignature: signatureRatio));
         enPoseSignature = false;
-        statut = "Signature posée — touchez-la pour la déplacer";
+        statut = "Signature posée — double-tapez dessus pour la redimensionner";
       });
 
       if (imageDeFond == null) {
@@ -1622,10 +1703,16 @@ class _AccueilState extends State<Accueil> {
   /// réellement dessiné, sans dépasser le bord de la page.
   Rect _rectAffichage(MotDetecte mot, double echelle) {
     final enEcriture = motEnEditionDirecte == mot;
-    if (!enEcriture && !mot.redessine) return mot.zone;
+    // La zone repeinte doit toujours être recouverte, même sans texte.
+    final masque = mot.zoneMasque;
+    if (!enEcriture && !mot.redessine) {
+      return masque == null ? mot.zone : mot.zone.expandToInclude(masque);
+    }
 
     final texte = enEcriture ? controleurDirect.text : mot.texte;
-    if (texte.isEmpty || echelle <= 0) return mot.zone;
+    if (texte.isEmpty || echelle <= 0) {
+      return masque == null ? mot.zone : mot.zone.expandToInclude(masque);
+    }
 
     // Mesure avec la police d'écran (celle du téléphone), et non celle du
     // PDF : les deux n'ont pas les mêmes largeurs de caractères, et se fier
@@ -1662,12 +1749,13 @@ class _AccueilState extends State<Accueil> {
     final hauteurTexte = peintre.height / echelle;
     if (hauteurTexte > hauteur) hauteur = hauteurTexte;
 
-    return Rect.fromLTWH(
+    final rect = Rect.fromLTWH(
       mot.zone.left,
       mot.zone.center.dy - hauteur / 2,
       largeur,
       hauteur,
     );
+    return masque == null ? rect : rect.expandToInclude(masque);
   }
 
   /// Rectangle utilisé pour déplacer une ligne : il sert à la fois à la
@@ -1883,7 +1971,10 @@ class _AccueilState extends State<Accueil> {
             famille: m.famille,
             couleurTexte: m.couleurTexte,
             tailleAuto: m.tailleAuto,
-            fondEcran: m.fondEcran))
+            fondEcran: m.fondEcran,
+            zoneMasque: m.zoneMasque,
+            traitsSignature: m.traitsSignature,
+            ratioSignature: m.ratioSignature))
         .toList();
     return Etat(octetsDocument, motsCopie, imageDeFond);
   }
@@ -1904,7 +1995,10 @@ class _AccueilState extends State<Accueil> {
               famille: m.famille,
               couleurTexte: m.couleurTexte,
               tailleAuto: m.tailleAuto,
-              fondEcran: m.fondEcran))
+              fondEcran: m.fondEcran,
+              zoneMasque: m.zoneMasque,
+              traitsSignature: m.traitsSignature,
+              ratioSignature: m.ratioSignature))
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
@@ -2334,7 +2428,8 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[0];
-      _effacerRect(page, _rectEffacement(mot), mot);
+      final rectEfface = _rectEffacement(mot);
+      _effacerRect(page, rectEfface, mot);
 
       mot.gras = grasFinal;
       mot.texte = texteNettoye;
@@ -2344,13 +2439,15 @@ class _AccueilState extends State<Accueil> {
       _ecrire(page, mot, mot.zone);
 
       // La ligne s'affiche désormais en texte natif à l'écran, par-dessus le
-      // fond relevé ici (voir mot.fondEcran) : plus besoin de rafraîchir tout
-      // l'aperçu de la page — un rendu complet à 300dpi, assez lourd pour
-      // geler l'appli (« ne répond pas ») ou laisser voir un instant la ligne
-      // à moitié dessinée le temps qu'il se termine.
+      // fond relevé ici : plus besoin de rafraîchir tout l'aperçu de la page
+      // — un rendu complet à 300dpi, assez lourd pour geler l'appli (« ne
+      // répond pas ») ou laisser voir un instant la ligne à moitié dessinée.
+      // On retient la zone repeinte pour la recouvrir à l'écran, y compris
+      // quand il n'y a plus de texte du tout à afficher par-dessus.
       if (imageDeFond != null) {
         final fond = _couleurLocale(mot.zone);
         mot.fondEcran = Color.fromARGB(255, fond.r, fond.g, fond.b);
+        mot.zoneMasque = rectEfface.expandToInclude(_rectContenu(mot));
       }
 
       setState(() {
@@ -3351,15 +3448,19 @@ class _AccueilState extends State<Accueil> {
                                       // qui permet d'afficher la modification
                                       // sans redessiner toute la page.
                                       child: (imageDeFond != null &&
-                                              !mot.redessine)
+                                              mot.zoneMasque == null)
                                           ? null
                                           : Container(
                                               color: imageDeFond != null
                                                   ? (mot.fondEcran ??
                                                       Colors.white)
                                                   : null,
-                                              child: FittedBox(
+                                              child: mot.texte.isEmpty
+                                                  ? null
+                                                  : FittedBox(
                                                 fit: BoxFit.contain,
+                                                alignment:
+                                                    Alignment.centerLeft,
                                                 child: Text(
                                                   mot.texte,
                                                   style: TextStyle(
@@ -3510,7 +3611,11 @@ class _AccueilState extends State<Accueil> {
                                       decalage.y,
                                 );
                                 const largeurMenu = 252.0;
-                                const hauteurMenu = 184.0;
+                                // Deux entrées de plus pour une signature
+                                // posée (la réduire / l'agrandir).
+                                final estSignature =
+                                    mot.traitsSignature != null;
+                                final hauteurMenu = estSignature ? 276.0 : 184.0;
                                 var gauche = coin.dx;
                                 if (gauche + largeurMenu >
                                     constraints.maxWidth) {
@@ -3572,6 +3677,26 @@ class _AccueilState extends State<Accueil> {
                                                   ? null
                                                   : () => _modifierMot(mot),
                                             ),
+                                            if (estSignature)
+                                              _entreeMenu(
+                                                Icons.zoom_out_map,
+                                                "Réduire la signature",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _redimensionnerSignature(
+                                                            mot, 0.8),
+                                              ),
+                                            if (estSignature)
+                                              _entreeMenu(
+                                                Icons.zoom_in_map,
+                                                "Agrandir la signature",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _redimensionnerSignature(
+                                                            mot, 1.25),
+                                              ),
                                           ],
                                         ),
                                       ),
