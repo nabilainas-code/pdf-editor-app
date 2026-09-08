@@ -1004,12 +1004,28 @@ class _AccueilState extends State<Accueil> {
     // ajuster à partir de ce qui est affiché plutôt que de repartir de zéro.
     double? tailleChoisie = mot.tailleManuelle;
     var alignementChoisi = mot.alignement;
+    // Position de la boîte à l'écran : elle cache souvent la page pile là où
+    // on aurait besoin de regarder, d'où la poignée pour la glisser ailleurs.
+    var positionBoite = Offset.zero;
 
     final resultat = await showDialog<Map<String, Object?>>(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text("Modifier la ligne"),
+        builder: (ctx, setDialogState) => Transform.translate(
+          offset: positionBoite,
+          child: AlertDialog(
+          title: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onPanUpdate: (details) =>
+                setDialogState(() => positionBoite += details.delta),
+            child: const Row(
+              children: [
+                Icon(Icons.drag_indicator, size: 20),
+                SizedBox(width: 6),
+                Text("Modifier la ligne"),
+              ],
+            ),
+          ),
           contentPadding:
               const EdgeInsets.fromLTRB(24, 16, 24, 8),
           content: Column(
@@ -1167,6 +1183,7 @@ class _AccueilState extends State<Accueil> {
               child: const Text("Valider"),
             ),
           ],
+          ),
         ),
       ),
     );
