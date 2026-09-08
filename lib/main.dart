@@ -152,6 +152,16 @@ class _CadreLigne extends CustomPainter {
       ancien.selectionne != selectionne || ancien.groupe != groupe;
 }
 
+/// Une signature enregistrée dans le répertoire : ses traits normalisés
+/// (mêmes coordonnées 0..1 que [signatureNormalisee]) et son nom, pour
+/// pouvoir la reposer plusieurs fois sans la retracer à chaque fois.
+class _SignatureEnregistree {
+  String nom;
+  final List<List<Offset>> traits;
+  final double ratio;
+  _SignatureEnregistree(this.nom, this.traits, this.ratio);
+}
+
 /// Dessine la signature en cours de tracé dans la boîte de signature.
 /// Masque les poignées et la bulle « Copier/Coller » natives d'Android sur
 /// le champ d'écriture directe. Ces poignées se dessinent dans la couche
@@ -291,11 +301,6 @@ class _AccueilState extends State<Accueil> {
   bool grasDirect = false;
   double? tailleDirecte;
 
-  /// Dernière échelle d'affichage de la page (points PDF → pixels écran),
-  /// mémorisée pendant la construction pour pouvoir amener la ligne en cours
-  /// d'écriture au-dessus du clavier.
-  double _echelleAffichage = 1;
-
   /// Champs de formulaire du PDF (AcroForm) et champ en cours de saisie.
   List<ChampFormulaire> champsFormulaire = [];
   ChampFormulaire? champEnEdition;
@@ -308,6 +313,11 @@ class _AccueilState extends State<Accueil> {
   List<List<Offset>>? signatureNormalisee;
   double signatureRatio = 0.4;
   bool enPoseSignature = false;
+
+  /// Répertoire des signatures tracées, pour les reposer sans les retracer.
+  /// Gardé pour la session en cours ; retracer après avoir fermé et rouvert
+  /// l'application reste nécessaire pour l'instant.
+  final List<_SignatureEnregistree> signaturesEnregistrees = [];
 
   static const double _pasDeplacement = 3.0;
 
@@ -361,18 +371,11 @@ class _AccueilState extends State<Accueil> {
       tailleDirecte = mot.tailleManuelle;
       statut = "Écrivez directement sur la ligne, puis validez";
     });
-
-    // Le clavier occupe la moitié basse de l'écran : on remonte la page pour
-    // que la ligne en cours d'écriture reste visible au-dessus.
-    final matrice = _transformation.value.clone();
-    final zoom = matrice.getMaxScaleOnAxis();
-    matrice.setTranslationRaw(
-      matrice.getTranslation().x,
-      -(mot.zone.top * _echelleAffichage * zoom) + 60,
-      0,
-    );
-    _transformation.value = matrice;
-
+    // La vue reste exactement où vous l'avez laissée : la faire sauter
+    // automatiquement déplaçait la ligne hors de son cadre à l'écran,
+    // obligeant à la retrouver en glissant la page. Si le clavier couvre la
+    // ligne, un geste de pincement/glisser (comme pour naviguer la page)
+    // la ramène en vue.
     focusDirect.requestFocus();
   }
 
@@ -684,20 +687,103 @@ class _AccueilState extends State<Accueil> {
     if (largeurTrace < 1 && hauteurTrace < 1) return;
     final base = largeurTrace < 1 ? 1.0 : largeurTrace;
 
+    final normalises = [
+      for (final trait in traits)
+        [for (final p in trait) Offset((p.dx - minX) / base, (p.dy - minY) / base)]
+    ];
+    final ratio = hauteurTrace <= 0 ? 0.1 : hauteurTrace / base;
+
     setState(() {
-      signatureNormalisee = [
-        for (final trait in traits)
-          [
-            for (final p in trait)
-              Offset((p.dx - minX) / base, (p.dy - minY) / base)
-          ]
-      ];
-      signatureRatio = hauteurTrace <= 0 ? 0.1 : hauteurTrace / base;
-      enPoseSignature = true;
-      enCollage = false;
-      enAjoutTexte = false;
-      statut = "Touchez la page à l'endroit où poser la signature";
+      signaturesEnregistrees.add(_SignatureEnregistree(
+        "Signature ${signaturesEnregistrees.length + 1}",
+        normalises,
+        ratio,
+      ));
+      _preparerPoseSignature(normalises, ratio);
     });
+  }
+
+  /// Arme la pose : la prochaine touche sur la page pose ces traits-là.
+  void _preparerPoseSignature(List<List<Offset>> traits, double ratio) {
+    signatureNormalisee = traits;
+    signatureRatio = ratio;
+    enPoseSignature = true;
+    enCollage = false;
+    enAjoutTexte = false;
+    statut = "Touchez la page à l'endroit où poser la signature";
+  }
+
+  /// Répertoire des signatures : en choisir une à poser, en tracer une
+  /// nouvelle, ou en supprimer une du répertoire (celles déjà posées dans le
+  /// document ne sont pas touchées — pour les retirer, on les sélectionne
+  /// sur la page comme n'importe quel cadre, puis « Effacer »).
+  Future<void> _choisirSignature() async {
+    if (signaturesEnregistrees.isEmpty) {
+      await _dessinerSignature();
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text("Mes signatures",
+                      style: TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold)),
+                ),
+              ),
+              for (final sig in List.of(signaturesEnregistrees))
+                ListTile(
+                  leading: Container(
+                    width: 64,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(color: Colors.grey.shade300),
+                    ),
+                    child: CustomPaint(
+                      painter: _PeintreSignature([
+                        for (final trait in sig.traits)
+                          [for (final p in trait) Offset(p.dx * 64, p.dy * 64)]
+                      ]),
+                    ),
+                  ),
+                  title: Text(sig.nom),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    setState(() =>
+                        _preparerPoseSignature(sig.traits, sig.ratio));
+                  },
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline),
+                    tooltip: "Retirer du répertoire",
+                    onPressed: () {
+                      setSheetState(
+                          () => signaturesEnregistrees.remove(sig));
+                      setState(() {});
+                    },
+                  ),
+                ),
+              ListTile(
+                leading: const Icon(Icons.add),
+                title: const Text("Nouvelle signature"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _dessinerSignature();
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _poserSignature(double x, double y) async {
@@ -2924,7 +3010,6 @@ class _AccueilState extends State<Accueil> {
                 : LayoutBuilder(
                     builder: (context, constraints) {
                       final echelle = constraints.maxWidth / taillePage.width;
-                      _echelleAffichage = echelle;
                       return ClipRect(
                         child: Stack(children: [
                         InteractiveViewer(
@@ -3062,31 +3147,30 @@ class _AccueilState extends State<Accueil> {
                                           ),
                                         )
                                       : GestureDetector(
-                                    // Un tap ajoute ou retire la ligne du
-                                    // groupe sélectionné (rouge) ; pour
-                                    // modifier le texte, on passe par le
-                                    // bouton crayon de la barre du bas.
-                                    onTap: () => setState(() {
+                                    // Un tap simple écrit directement sur la
+                                    // ligne, sans étape intermédiaire : c'est
+                                    // le geste le plus courant, il doit être
+                                    // le plus court.
+                                    onTap: _occupe
+                                        ? null
+                                        : () => _ecrireSurLaLigne(mot),
+                                    // Le double-tap sert à sélectionner
+                                    // (ajoute/retire du groupe rouge, pour
+                                    // copier, effacer, ou déplacer plusieurs
+                                    // lignes ensemble) sans déclencher
+                                    // l'écriture.
+                                    onDoubleTap: () => setState(() {
                                       if (!selection.remove(mot)) {
                                         selection.add(mot);
                                       }
                                     }),
-                                    // Appui long : on écrit directement sur
-                                    // cette ligne, sans passer par la
-                                    // sélection puis le crayon. Ça empêche
-                                    // aussi l'appui long de la page (qui pose
-                                    // un repère à effacer) de se déclencher
-                                    // par-dessus une ligne.
+                                    // Appui long : identique au tap simple,
+                                    // et ça empêche l'appui long de la page
+                                    // (qui pose un repère à effacer) de se
+                                    // déclencher par-dessus une ligne.
                                     onLongPress: _occupe
                                         ? null
-                                        : () {
-                                            setState(() {
-                                              selection
-                                                ..clear()
-                                                ..add(mot);
-                                            });
-                                            _ecrireSurLaLigne(mot);
-                                          },
+                                        : () => _ecrireSurLaLigne(mot),
                                     // Le glisser ne déplace que si la ligne
                                     // fait partie de la sélection ; sinon le
                                     // geste passe à la page (défilement/zoom).
@@ -3394,7 +3478,7 @@ class _AccueilState extends State<Accueil> {
                   heroTag: "signature",
                   tooltip: enPoseSignature
                       ? "Touchez la page où poser la signature"
-                      : "Signer (tracé au doigt)",
+                      : "Signature (mes signatures / en tracer une)",
                   backgroundColor: enPoseSignature
                       ? Theme.of(context).colorScheme.primary
                       : null,
@@ -3408,7 +3492,7 @@ class _AccueilState extends State<Accueil> {
                                 enPoseSignature = false;
                                 statut = "Signature annulée";
                               })
-                          : _dessinerSignature),
+                          : _choisirSignature),
                   child: const Icon(Icons.draw),
                 ),
                 const SizedBox(height: 8),
