@@ -81,6 +81,57 @@ class ChampFormulaire {
   });
 }
 
+/// Cadre d'une ligne détectée. Tant qu'elle n'est pas choisie, de simples
+/// pointillés gris : comme dans les éditeurs PDF courants, les cadres
+/// signalent ce qui est modifiable sans concurrencer le document. Une fois
+/// choisie, trait plein et fond légèrement teinté — bleu pour une ligne
+/// seule, rouge quand plusieurs lignes forment un groupe à déplacer.
+class _CadreLigne extends CustomPainter {
+  final bool selectionne;
+  final bool groupe;
+  const _CadreLigne({required this.selectionne, required this.groupe});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    if (selectionne) {
+      final couleur = groupe ? Colors.red : Colors.blue;
+      canvas.drawRect(rect, Paint()..color = couleur.withOpacity(0.10));
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = couleur
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+      return;
+    }
+
+    final pinceau = Paint()
+      ..color = Colors.blueGrey.withOpacity(0.5)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    const tiret = 4.0;
+    const trou = 3.0;
+    for (var x = 0.0; x < size.width; x += tiret + trou) {
+      final fin = (x + tiret) > size.width ? size.width : x + tiret;
+      canvas.drawLine(Offset(x, 0), Offset(fin, 0), pinceau);
+      canvas.drawLine(
+          Offset(x, size.height), Offset(fin, size.height), pinceau);
+    }
+    for (var y = 0.0; y < size.height; y += tiret + trou) {
+      final fin = (y + tiret) > size.height ? size.height : y + tiret;
+      canvas.drawLine(Offset(0, y), Offset(0, fin), pinceau);
+      canvas.drawLine(
+          Offset(size.width, y), Offset(size.width, fin), pinceau);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CadreLigne ancien) =>
+      ancien.selectionne != selectionne || ancien.groupe != groupe;
+}
+
 /// Dessine la signature en cours de tracé dans la boîte de signature.
 class _PeintreSignature extends CustomPainter {
   final List<List<Offset>> traits;
@@ -2310,6 +2361,34 @@ class _AccueilState extends State<Accueil> {
     return modeLecture ? _buildLecture(context) : _buildEdition(context);
   }
 
+  /// Une entrée du menu contextuel : icône + libellé, sur fond sombre.
+  /// Le libellé évite d'avoir à deviner ce que fait une icône seule.
+  Widget _entreeMenu(IconData icone, String libelle, VoidCallback? action) {
+    final actif = action != null;
+    final couleur = actif ? Colors.white : Colors.white38;
+    return InkWell(
+      onTap: action,
+      child: SizedBox(
+        height: 46,
+        child: Row(
+          children: [
+            const SizedBox(width: 14),
+            Icon(icone, size: 20, color: couleur),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                libelle,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: couleur, fontSize: 14),
+              ),
+            ),
+            const SizedBox(width: 10),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildLecture(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -2842,18 +2921,10 @@ class _AccueilState extends State<Accueil> {
                                             await _deplacerGroupe(
                                                 selection.toList(), dx, dy);
                                           },
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        color: selection.contains(mot)
-                                            ? Colors.red.withOpacity(0.12)
-                                            : null,
-                                        border: Border.all(
-                                          color: selection.contains(mot)
-                                              ? Colors.red
-                                              : Colors.blue.withOpacity(0.3),
-                                          width:
-                                              selection.contains(mot) ? 2 : 1,
-                                        ),
+                                    child: CustomPaint(
+                                      painter: _CadreLigne(
+                                        selectionne: selection.contains(mot),
+                                        groupe: selection.length > 1,
                                       ),
                                       child: imageDeFond != null
                                           ? null
@@ -2993,8 +3064,8 @@ class _AccueilState extends State<Accueil> {
                                   mot.zone.bottom * echelle * zoom +
                                       decalage.y,
                                 );
-                                const largeurMenu = 244.0;
-                                const hauteurMenu = 46.0;
+                                const largeurMenu = 252.0;
+                                const hauteurMenu = 184.0;
                                 var gauche = coin.dx;
                                 if (gauche + largeurMenu >
                                     constraints.maxWidth) {
@@ -3018,55 +3089,43 @@ class _AccueilState extends State<Accueil> {
                                       top: haut,
                                       width: largeurMenu,
                                       height: hauteurMenu,
-                                      child: Card(
-                                        margin: EdgeInsets.zero,
-                                        elevation: 4,
-                                        child: Row(
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.spaceEvenly,
+                                      child: Material(
+                                        color: const Color(0xFF2C2C2E),
+                                        borderRadius:
+                                            BorderRadius.circular(10),
+                                        elevation: 8,
+                                        clipBehavior: Clip.antiAlias,
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
                                           children: [
-                                            IconButton(
-                                              icon: const Icon(Icons.edit,
-                                                  size: 20),
-                                              tooltip: "Écrire sur la ligne",
-                                              onPressed: _occupe
+                                            _entreeMenu(
+                                              Icons.edit,
+                                              "Écrire sur la ligne",
+                                              _occupe
                                                   ? null
                                                   : () =>
                                                       _ecrireSurLaLigne(mot),
                                             ),
-                                            IconButton(
-                                              icon: const Icon(
-                                                  Icons.content_copy,
-                                                  size: 20),
-                                              tooltip: "Copier",
-                                              onPressed: _occupe ||
-                                                      mot.texte.isEmpty
+                                            _entreeMenu(
+                                              Icons.content_copy,
+                                              "Copier le texte",
+                                              _occupe || mot.texte.isEmpty
                                                   ? null
                                                   : _copierLigne,
                                             ),
-                                            IconButton(
-                                              icon: const Icon(
-                                                  Icons.cleaning_services,
-                                                  size: 20),
-                                              tooltip: "Effacer",
-                                              onPressed: _occupe
+                                            _entreeMenu(
+                                              Icons.cleaning_services,
+                                              "Effacer (gomme)",
+                                              _occupe
                                                   ? null
                                                   : () => _effacerZone(mot),
                                             ),
-                                            IconButton(
-                                              icon: const Icon(Icons.tune,
-                                                  size: 20),
-                                              tooltip: "Réglages",
-                                              onPressed: _occupe
+                                            _entreeMenu(
+                                              Icons.tune,
+                                              "Mettre en forme",
+                                              _occupe
                                                   ? null
                                                   : () => _modifierMot(mot),
-                                            ),
-                                            IconButton(
-                                              icon: const Icon(Icons.close,
-                                                  size: 20),
-                                              tooltip: "Désélectionner",
-                                              onPressed: () => setState(
-                                                  () => selection.clear()),
                                             ),
                                           ],
                                         ),
