@@ -1579,6 +1579,29 @@ class _AccueilState extends State<Accueil> {
 
   Rect _rectEffacement(MotDetecte mot) => _rectContenu(mot).inflate(2);
 
+  /// Rectangle occupé à l'écran par une ligne. Le texte que l'application
+  /// redessine est souvent plus large que le texte scanné d'origine (la
+  /// police de substitution est moins condensée) : s'en tenir au cadre
+  /// détecté coupait la fin de la ligne à l'écran — « FRANCILITE GRAND
+  /// PROVINOIS depuis » devenait « FRANCILITE GRAND P » — alors que le PDF,
+  /// lui, contenait bien tout le texte. Le cadre suit donc le texte
+  /// réellement dessiné, sans dépasser le bord de la page.
+  Rect _rectAffichage(MotDetecte mot) {
+    if (motEnEditionDirecte != mot) return _rectContenu(mot);
+
+    // Pendant la frappe, le cadre suit ce qui est tapé, au fil des touches.
+    final texte = controleurDirect.text;
+    if (texte.isEmpty) return mot.zone;
+    final police = _police(mot, _tailleEditionDirecte(mot));
+    final mesuree = police.measureString(texte).width + 6;
+    final maxi = taillePage.width - mot.zone.left - 2;
+    var largeur = mesuree < mot.zone.width ? mot.zone.width : mesuree;
+    if (largeur > maxi) largeur = maxi;
+    if (largeur < 1) largeur = mot.zone.width;
+    return Rect.fromLTWH(
+        mot.zone.left, mot.zone.top, largeur, mot.zone.height);
+  }
+
   /// Rectangle utilisé pour déplacer une ligne : il sert à la fois à la
   /// photographier et à effacer sa place, si bien que rien ne se perd en
   /// route. La marge est large horizontalement, car le cadre détecté rogne
@@ -3109,18 +3132,18 @@ class _AccueilState extends State<Accueil> {
                                   !modeRemplissage)
                                 for (final mot in mots)
                                 Positioned(
-                                  left: mot.zone.left * echelle +
+                                  left: _rectAffichage(mot).left * echelle +
                                       (groupeEnDeplacement &&
                                               selection.contains(mot)
                                           ? deplacementGroupeEnCours.dx
                                           : 0),
-                                  top: mot.zone.top * echelle +
+                                  top: _rectAffichage(mot).top * echelle +
                                       (groupeEnDeplacement &&
                                               selection.contains(mot)
                                           ? deplacementGroupeEnCours.dy
                                           : 0),
-                                  width: mot.zone.width * echelle,
-                                  height: mot.zone.height * echelle,
+                                  width: _rectAffichage(mot).width * echelle,
+                                  height: _rectAffichage(mot).height * echelle,
                                   child: motEnEditionDirecte == mot
                                       // Écriture directement sur la page : le
                                       // champ occupe la place de la ligne, à
@@ -3163,6 +3186,11 @@ class _AccueilState extends State<Accueil> {
                                                 border: InputBorder.none,
                                                 contentPadding: EdgeInsets.zero,
                                               ),
+                                              // Le cadre s'élargit au fil de
+                                              // la frappe : sans ça, la fin
+                                              // du texte sortirait du cadre
+                                              // détecté et serait coupée.
+                                              onChanged: (_) => setState(() {}),
                                               // Entrée = ligne suivante, comme
                                               // dans un traitement de texte ;
                                               // le ✓ de la barre termine.
