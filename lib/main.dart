@@ -59,6 +59,55 @@ class Etat {
   Etat(this.octetsDocument, this.mots, this.image);
 }
 
+/// Un champ de formulaire du PDF (AcroForm). Il est repéré par sa position
+/// dans la liste des champs du document et non par l'objet Syncfusion
+/// lui-même : celui-ci ne survit pas à un annuler/rétablir, qui recharge le
+/// document entier, alors que l'ordre des champs, lui, ne change pas.
+class ChampFormulaire {
+  final int index;
+  final String nom;
+  final Rect zone;
+  final bool estCase;
+  String valeur;
+  bool coche;
+
+  ChampFormulaire(
+    this.index,
+    this.nom,
+    this.zone, {
+    this.estCase = false,
+    this.valeur = '',
+    this.coche = false,
+  });
+}
+
+/// Dessine la signature en cours de tracé dans la boîte de signature.
+class _PeintreSignature extends CustomPainter {
+  final List<List<Offset>> traits;
+  _PeintreSignature(this.traits);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final pinceau = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 2.5
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+    for (final trait in traits) {
+      if (trait.length == 1) {
+        canvas.drawLine(trait.first, trait.first.translate(0.1, 0), pinceau);
+        continue;
+      }
+      for (var i = 0; i + 1 < trait.length; i++) {
+        canvas.drawLine(trait[i], trait[i + 1], pinceau);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PeintreSignature ancien) => true;
+}
+
 class Accueil extends StatefulWidget {
   const Accueil({super.key});
 
@@ -138,6 +187,19 @@ class _AccueilState extends State<Accueil> {
   /// mémorisée pendant la construction pour pouvoir amener la ligne en cours
   /// d'écriture au-dessus du clavier.
   double _echelleAffichage = 1;
+
+  /// Champs de formulaire du PDF (AcroForm) et champ en cours de saisie.
+  List<ChampFormulaire> champsFormulaire = [];
+  ChampFormulaire? champEnEdition;
+  bool modeRemplissage = false;
+
+  /// Signature tracée au doigt, en coordonnées normalisées par sa largeur
+  /// (x de 0 à 1, y de 0 à [signatureRatio]) : elle est reposée à l'échelle
+  /// voulue à l'endroit touché, en traits vectoriels (donc nets à tout zoom,
+  /// et sans rectangle blanc autour comme le serait une image).
+  List<List<Offset>>? signatureNormalisee;
+  double signatureRatio = 0.4;
+  bool enPoseSignature = false;
 
   static const double _pasDeplacement = 3.0;
 
@@ -223,6 +285,279 @@ class _AccueilState extends State<Accueil> {
   /// choisie à la main, sinon celle estimée automatiquement).
   double _tailleEditionDirecte(MotDetecte mot) =>
       tailleDirecte ?? _dessinTexte(mot, mot.zone).police.size;
+
+  /// Champs remplissables du PDF. Seuls les champs texte et les cases à
+  /// cocher sont proposés : ce sont ceux d'un formulaire administratif
+  /// courant, et les seuls qu'on sache remplir sans ambiguïté.
+  List<ChampFormulaire> _lireChampsFormulaire(PdfDocument doc) {
+    final champs = <ChampFormulaire>[];
+    try {
+      final liste = doc.form.fields;
+      for (var i = 0; i < liste.count; i++) {
+        final champ = liste[i];
+        final nom = champ.name ?? "Champ ${i + 1}";
+        if (champ is PdfTextBoxField) {
+          champs.add(ChampFormulaire(i, nom, champ.bounds, valeur: champ.text));
+        } else if (champ is PdfCheckBoxField) {
+          champs.add(ChampFormulaire(i, nom, champ.bounds,
+              estCase: true, coche: champ.isChecked));
+        }
+      }
+    } catch (_) {
+      // Document sans formulaire, ou formulaire illisible : on n'en propose
+      // simplement aucun plutôt que d'empêcher l'ouverture du document.
+    }
+    return champs;
+  }
+
+  /// Rastérise la page pour l'afficher telle qu'elle sera imprimée. Un PDF
+  /// texte s'affichait jusque-là comme une page blanche avec des cadres :
+  /// ce qu'on écrit dans un champ de formulaire y serait invisible.
+  Future<void> _activerApercuImage(PdfDocument doc) async {
+    const dpi = _dpiOcr;
+    final octetsDoc = Uint8List.fromList(await doc.save());
+    PdfRaster? raster;
+    await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
+      raster = r;
+      break;
+    }
+    if (raster == null) return;
+    final png = await raster.toPng();
+    final decodee = img.decodePng(png);
+    if (!mounted) return;
+    setState(() {
+      imageDeFond = png;
+      imageDecodee = decodee;
+      echelleOcr = dpi / 72.0;
+      if (decodee != null) couleurPage = _calculerCouleurPage(decodee);
+    });
+  }
+
+  Future<void> _basculerRemplissage() async {
+    if (modeRemplissage) {
+      setState(() {
+        modeRemplissage = false;
+        champEnEdition = null;
+        statut = "Remplissage terminé";
+      });
+      return;
+    }
+    final doc = document;
+    if (doc == null || _occupe) return;
+    setState(() => _occupe = true);
+    try {
+      if (imageDeFond == null) await _activerApercuImage(doc);
+      final champs = _lireChampsFormulaire(doc);
+      setState(() {
+        champsFormulaire = champs;
+        modeRemplissage = champs.isNotEmpty;
+        selection.clear();
+        statut = champs.isEmpty
+            ? "Ce PDF n'a pas de champs de formulaire : utilisez « + » pour écrire où vous voulez"
+            : "${champs.length} champ(s) à remplir : touchez-en un";
+      });
+    } catch (e) {
+      setState(() => statut = "Lecture du formulaire impossible : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
+  /// Écrit la valeur saisie dans le champ du PDF, avec le même filet de
+  /// sécurité que les autres modifications : en cas d'échec, le document
+  /// revient exactement à son état d'avant.
+  Future<void> _appliquerChamp(ChampFormulaire champ,
+      {String? texte, bool? coche}) async {
+    final doc = document;
+    if (doc == null || _occupe) return;
+    setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
+    try {
+      historique.add(avant);
+      futur.clear();
+
+      final field = doc.form.fields[champ.index];
+      if (field is PdfTextBoxField && texte != null) {
+        field.text = texte;
+      } else if (field is PdfCheckBoxField && coche != null) {
+        field.isChecked = coche;
+      }
+      // Sans ça, la valeur saisie n'est visible que dans les lecteurs qui
+      // regénèrent eux-mêmes l'apparence des champs.
+      doc.form.setDefaultAppearance(false);
+
+      setState(() {
+        if (texte != null) champ.valeur = texte;
+        if (coche != null) champ.coche = coche;
+        champEnEdition = null;
+        statut = "Champ « ${champ.nom} » rempli";
+      });
+      await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Remplissage annulé (rien n'a été perdu) : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
+  /// Recueille une signature tracée au doigt, puis attend qu'on touche la
+  /// page pour la poser à cet endroit.
+  Future<void> _dessinerSignature() async {
+    final traits = <List<Offset>>[];
+
+    final valide = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text("Signature"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                "Signez avec le doigt dans le cadre, puis choisissez où la poser.",
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              LayoutBuilder(
+                builder: (ctx, contraintes) {
+                  final largeur = contraintes.maxWidth;
+                  return Container(
+                    width: largeur,
+                    height: 160,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(color: Colors.grey),
+                    ),
+                    child: GestureDetector(
+                      onPanStart: (d) =>
+                          setDialogState(() => traits.add([d.localPosition])),
+                      onPanUpdate: (d) => setDialogState(() {
+                        if (traits.isNotEmpty) traits.last.add(d.localPosition);
+                      }),
+                      child: CustomPaint(
+                        painter: _PeintreSignature(traits),
+                        size: Size(largeur, 160),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler"),
+            ),
+            TextButton(
+              onPressed: () => setDialogState(() => traits.clear()),
+              child: const Text("Effacer"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Placer"),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (valide != true || traits.isEmpty) return;
+
+    var minX = double.infinity;
+    var minY = double.infinity;
+    var maxX = -double.infinity;
+    var maxY = -double.infinity;
+    for (final trait in traits) {
+      for (final p in trait) {
+        if (p.dx < minX) minX = p.dx;
+        if (p.dy < minY) minY = p.dy;
+        if (p.dx > maxX) maxX = p.dx;
+        if (p.dy > maxY) maxY = p.dy;
+      }
+    }
+    final largeurTrace = maxX - minX;
+    final hauteurTrace = maxY - minY;
+    if (largeurTrace < 1 && hauteurTrace < 1) return;
+    final base = largeurTrace < 1 ? 1.0 : largeurTrace;
+
+    setState(() {
+      signatureNormalisee = [
+        for (final trait in traits)
+          [
+            for (final p in trait)
+              Offset((p.dx - minX) / base, (p.dy - minY) / base)
+          ]
+      ];
+      signatureRatio = hauteurTrace <= 0 ? 0.1 : hauteurTrace / base;
+      enPoseSignature = true;
+      enCollage = false;
+      enAjoutTexte = false;
+      statut = "Touchez la page à l'endroit où poser la signature";
+    });
+  }
+
+  Future<void> _poserSignature(double x, double y) async {
+    final traits = signatureNormalisee;
+    final doc = document;
+    if (traits == null || doc == null || _occupe) return;
+    setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
+    try {
+      historique.add(avant);
+      futur.clear();
+
+      final largeur = taillePage.width * 0.28;
+      final hauteur = largeur * signatureRatio;
+      var gauche = x - largeur / 2;
+      var haut = y - hauteur / 2;
+      if (gauche < 0) gauche = 0;
+      if (haut < 0) haut = 0;
+      if (gauche + largeur > taillePage.width) {
+        gauche = taillePage.width - largeur;
+      }
+      if (haut + hauteur > taillePage.height) {
+        haut = taillePage.height - hauteur;
+      }
+
+      final page = doc.pages[0];
+      final stylo = PdfPen(PdfColor(0, 0, 0), width: largeur * 0.006);
+      for (final trait in traits) {
+        for (var i = 0; i + 1 < trait.length; i++) {
+          page.graphics.drawLine(
+            stylo,
+            Offset(gauche + trait[i].dx * largeur,
+                haut + trait[i].dy * largeur),
+            Offset(gauche + trait[i + 1].dx * largeur,
+                haut + trait[i + 1].dy * largeur),
+          );
+        }
+      }
+
+      // Un repère (sans texte) sur la signature : elle devient sélectionnable
+      // et déplaçable comme le reste, sans traitement particulier.
+      final zone = Rect.fromLTWH(gauche, haut, largeur, hauteur);
+      setState(() {
+        mots.add(MotDetecte("", zone));
+        enPoseSignature = false;
+        statut = "Signature posée — touchez-la pour la déplacer";
+      });
+
+      if (imageDeFond == null) {
+        await _activerApercuImage(doc);
+      } else {
+        await _rafraichirApercuOcr(doc);
+      }
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Signature annulée (rien n'a été perdu) : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
 
   Future<void> _init() async {
     try {
@@ -993,6 +1328,10 @@ class _AccueilState extends State<Accueil> {
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
       selection.clear();
+      // Le document vient d'être rechargé : les champs lus dans l'ancien
+      // n'existent plus, il faut les relire dans le nouveau.
+      champEnEdition = null;
+      if (modeRemplissage) champsFormulaire = _lireChampsFormulaire(doc);
     });
   }
 
@@ -1915,7 +2254,46 @@ class _AccueilState extends State<Accueil> {
                 : _enregistrer,
           ),
         ],
-        bottom: motEnEditionDirecte != null
+        bottom: champEnEdition != null
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(40),
+                child: ColoredBox(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          champEnEdition!.nom,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 20),
+                        tooltip: "Annuler",
+                        onPressed: () {
+                          focusDirect.unfocus();
+                          setState(() => champEnEdition = null);
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.check, size: 22),
+                        tooltip: "Valider",
+                        onPressed: _occupe
+                            ? null
+                            : () {
+                                focusDirect.unfocus();
+                                _appliquerChamp(champEnEdition!,
+                                    texte: controleurDirect.text);
+                              },
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                  ),
+                ),
+              )
+            : motEnEditionDirecte != null
             ? PreferredSize(
                 preferredSize: const Size.fromHeight(40),
                 child: ColoredBox(
@@ -2137,6 +2515,13 @@ class _AccueilState extends State<Accueil> {
                                                 details.localPosition.dy /
                                                     echelle,
                                               );
+                                            } else if (enPoseSignature) {
+                                              _poserSignature(
+                                                details.localPosition.dx /
+                                                    echelle,
+                                                details.localPosition.dy /
+                                                    echelle,
+                                              );
                                             }
                                           },
                                     child: imageDeFond != null
@@ -2149,7 +2534,11 @@ class _AccueilState extends State<Accueil> {
                               // cadres laissent passer l'appui : sinon toucher
                               // une zone occupée par une ligne la sélectionnait
                               // au lieu de déposer le texte à cet endroit.
-                              if (!modeNavigation && !enCollage && !enAjoutTexte)
+                              if (!modeNavigation &&
+                                  !enCollage &&
+                                  !enAjoutTexte &&
+                                  !enPoseSignature &&
+                                  !modeRemplissage)
                                 for (final mot in mots)
                                 Positioned(
                                   left: mot.zone.left * echelle +
@@ -2282,6 +2671,90 @@ class _AccueilState extends State<Accueil> {
                                     ),
                                   ),
                                 ),
+                              // Champs de formulaire : cadres verts posés à
+                              // l'emplacement exact des cases du PDF.
+                              if (modeRemplissage)
+                                for (final champ in champsFormulaire)
+                                  Positioned(
+                                    left: champ.zone.left * echelle,
+                                    top: champ.zone.top * echelle,
+                                    width: champ.zone.width * echelle,
+                                    height: champ.zone.height * echelle,
+                                    child: champEnEdition == champ
+                                        ? Container(
+                                            color: Colors.white,
+                                            child: OverflowBox(
+                                              alignment: Alignment.centerLeft,
+                                              maxHeight: double.infinity,
+                                              child: TextField(
+                                                controller: controleurDirect,
+                                                focusNode: focusDirect,
+                                                autofocus: true,
+                                                maxLines: 1,
+                                                style: TextStyle(
+                                                  fontSize: (champ.zone.height *
+                                                          echelle *
+                                                          0.7)
+                                                      .clamp(8, 40),
+                                                  height: 1.0,
+                                                  color: Colors.black,
+                                                ),
+                                                decoration:
+                                                    const InputDecoration(
+                                                  isDense: true,
+                                                  border: InputBorder.none,
+                                                  contentPadding:
+                                                      EdgeInsets.zero,
+                                                ),
+                                                onSubmitted: (valeur) =>
+                                                    _appliquerChamp(champ,
+                                                        texte: valeur),
+                                              ),
+                                            ),
+                                          )
+                                        : GestureDetector(
+                                            onTap: _occupe
+                                                ? null
+                                                : () {
+                                                    if (champ.estCase) {
+                                                      _appliquerChamp(champ,
+                                                          coche: !champ.coche);
+                                                      return;
+                                                    }
+                                                    setState(() {
+                                                      champEnEdition = champ;
+                                                      controleurDirect.text =
+                                                          champ.valeur;
+                                                      controleurDirect
+                                                              .selection =
+                                                          TextSelection
+                                                              .collapsed(
+                                                        offset: champ
+                                                            .valeur.length,
+                                                      );
+                                                      statut =
+                                                          "Champ « ${champ.nom} »";
+                                                    });
+                                                    focusDirect.requestFocus();
+                                                  },
+                                            child: Container(
+                                              decoration: BoxDecoration(
+                                                color: Colors.green
+                                                    .withOpacity(0.12),
+                                                border: Border.all(
+                                                    color: Colors.green,
+                                                    width: 1),
+                                              ),
+                                              child: champ.estCase &&
+                                                      champ.coche
+                                                  ? const FittedBox(
+                                                      child: Icon(Icons.check,
+                                                          color: Colors.green),
+                                                    )
+                                                  : null,
+                                            ),
+                                          ),
+                                  ),
                               ],
                             ),
                           ),
@@ -2338,6 +2811,43 @@ class _AccueilState extends State<Accueil> {
                   }),
                   child: Icon(
                       modeNavigation ? Icons.pan_tool : Icons.touch_app),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: "signature",
+                  tooltip: enPoseSignature
+                      ? "Touchez la page où poser la signature"
+                      : "Signer (tracé au doigt)",
+                  backgroundColor: enPoseSignature
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                  foregroundColor: enPoseSignature
+                      ? Theme.of(context).colorScheme.onPrimary
+                      : null,
+                  onPressed: _occupe
+                      ? null
+                      : (enPoseSignature
+                          ? () => setState(() {
+                                enPoseSignature = false;
+                                statut = "Signature annulée";
+                              })
+                          : _dessinerSignature),
+                  child: const Icon(Icons.draw),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: "remplir",
+                  tooltip: modeRemplissage
+                      ? "Quitter le remplissage du formulaire"
+                      : "Remplir le formulaire du PDF",
+                  backgroundColor: modeRemplissage
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                  foregroundColor: modeRemplissage
+                      ? Theme.of(context).colorScheme.onPrimary
+                      : null,
+                  onPressed: _occupe ? null : _basculerRemplissage,
+                  child: const Icon(Icons.edit_note),
                 ),
                 const SizedBox(height: 8),
                 FloatingActionButton.small(
