@@ -26,10 +26,16 @@ jobs:
 
       - name: Autoriser l'accès à internet et l'ouverture de PDF
         run: |
-          sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />' temp_app/android/app/src/main/AndroidManifest.xml
+          sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />' temp_app/android/app/src/main/AndroidManifest.xml
           cat > /tmp/fix_manifest.py << 'PYEOF'
           path = 'temp_app/android/app/src/main/AndroidManifest.xml'
           content = open(path).read()
+          # Deux filtres : un avec mimeType seul (couvre les apps qui envoient
+          # un content:// sans préciser de schéma dans le filtre), un avec les
+          # schémas file/content explicites (couvre les gestionnaires de
+          # fichiers plus anciens qui exigent une correspondance de schéma).
+          # Sans ce doublon, l'application n'apparaissait pas dans « Ouvrir
+          # avec » pour certains gestionnaires de fichiers.
           intent_filter = '''
                   <intent-filter>
                       <action android:name="android.intent.action.VIEW" />
@@ -38,8 +44,17 @@ jobs:
                       <category android:name="android.intent.category.BROWSABLE" />
                       <data android:mimeType="application/pdf" />
                   </intent-filter>
+                  <intent-filter>
+                      <action android:name="android.intent.action.VIEW" />
+                      <category android:name="android.intent.category.DEFAULT" />
+                      <category android:name="android.intent.category.BROWSABLE" />
+                      <data android:scheme="file" android:mimeType="application/pdf" />
+                      <data android:scheme="content" android:mimeType="application/pdf" />
+                  </intent-filter>
           '''
           content = content.replace('</activity>', intent_filter + '        </activity>', 1)
+          if 'android:exported="true"' not in content.split('<activity')[1].split('>')[0]:
+              content = content.replace('<activity ', '<activity android:exported="true" ', 1)
           open(path, 'w').write(content)
           PYEOF
           python3 /tmp/fix_manifest.py

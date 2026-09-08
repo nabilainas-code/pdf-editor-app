@@ -68,6 +68,23 @@ class Accueil extends StatefulWidget {
 
 class _AccueilState extends State<Accueil> {
   PdfDocument? document;
+
+  /// Octets bruts du document ouvert, conservés même en lecture seule (où
+  /// aucune analyse n'a encore eu lieu) pour pouvoir lancer l'analyse
+  /// (extraction de texte / OCR) seulement quand l'utilisateur choisit
+  /// explicitement de modifier.
+  Uint8List? octetsDocument;
+
+  /// Image de la page affichée en lecture seule, avant toute analyse.
+  Uint8List? apercuLecture;
+
+  /// Au premier affichage (ouverture depuis un autre appli, import, ou
+  /// lancement direct), l'application montre d'abord une simple lecture du
+  /// PDF, sans détection de lignes ni OCR : l'analyse — potentiellement
+  /// longue sur une page scannée — ne démarre que si l'utilisateur choisit
+  /// explicitement de modifier le document.
+  bool modeLecture = true;
+
   List<MotDetecte> mots = [];
   Size taillePage = const Size(595, 842);
   String statut = "Chargement...";
@@ -145,7 +162,7 @@ class _AccueilState extends State<Accueil> {
     try {
       final path = await _channel.invokeMethod<String>("getInitialPdfPath");
       if (path != null) {
-        await _analyser(File(path).readAsBytesSync());
+        await _chargerPourLecture(File(path).readAsBytesSync());
         return;
       }
     } catch (_) {}
@@ -163,7 +180,7 @@ class _AccueilState extends State<Accueil> {
       await for (final chunk in response) {
         builder.add(chunk);
       }
-      await _analyser(builder.toBytes());
+      await _chargerPourLecture(builder.toBytes());
     } catch (e) {
       setState(() => statut = "Erreur : $e");
     }
@@ -177,11 +194,7 @@ class _AccueilState extends State<Accueil> {
       );
       final chemin = resultat?.files.single.path;
       if (chemin == null) return;
-      setState(() {
-        selection.clear();
-        statut = "Chargement...";
-      });
-      await _analyser(File(chemin).readAsBytesSync());
+      await _chargerPourLecture(File(chemin).readAsBytesSync());
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -189,6 +202,64 @@ class _AccueilState extends State<Accueil> {
         );
       }
     }
+  }
+
+  /// Ouvre le document en simple lecture : juste une image de la page, sans
+  /// détecter la moindre ligne ni lancer d'OCR. L'analyse complète (qui peut
+  /// prendre plusieurs secondes sur une page scannée) n'a lieu que lorsque
+  /// l'utilisateur appuie sur « Modifier ».
+  Future<void> _chargerPourLecture(Uint8List octets) async {
+    document?.dispose();
+    document = null;
+    historique.clear();
+    futur.clear();
+    setState(() {
+      mots = [];
+      selection.clear();
+      imageDeFond = null;
+      imageDecodee = null;
+      apercuLecture = null;
+      octetsDocument = null;
+      modeLecture = true;
+      statut = "Chargement...";
+    });
+    try {
+      final doc = PdfDocument(inputBytes: octets);
+      final taille = doc.pages[0].size;
+      doc.dispose();
+
+      PdfRaster? raster;
+      await for (final r in Printing.raster(octets, pages: const [0], dpi: 150)) {
+        raster = r;
+        break;
+      }
+      final png = raster == null ? null : await raster.toPng();
+
+      if (!mounted) return;
+      setState(() {
+        octetsDocument = octets;
+        taillePage = Size(taille.width, taille.height);
+        apercuLecture = png;
+        statut = "Lecture seule — appuyez sur le crayon pour modifier";
+      });
+    } catch (e) {
+      setState(() => statut = "Erreur d'ouverture : $e");
+    }
+  }
+
+  /// Quitte la lecture seule et lance l'analyse (extraction de texte, ou OCR
+  /// sur une page scannée) : c'est seulement à partir de là que les lignes
+  /// deviennent sélectionnables et modifiables.
+  Future<void> _passerEnModification() async {
+    final octets = octetsDocument;
+    if (octets == null || _occupe) return;
+    setState(() => _occupe = true);
+    await _analyser(octets);
+    if (!mounted) return;
+    setState(() {
+      modeLecture = false;
+      _occupe = false;
+    });
   }
 
   Future<void> _analyser(Uint8List octets) async {
@@ -1609,6 +1680,66 @@ class _AccueilState extends State<Accueil> {
 
   @override
   Widget build(BuildContext context) {
+    return modeLecture ? _buildLecture(context) : _buildEdition(context);
+  }
+
+  Widget _buildLecture(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Mon éditeur PDF"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.folder_open),
+            tooltip: "Importer un document",
+            onPressed: _importerDocument,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Text(
+              statut,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+          Expanded(
+            child: apercuLecture == null
+                ? const Center(child: CircularProgressIndicator())
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      final echelle = constraints.maxWidth / taillePage.width;
+                      return ClipRect(
+                        child: InteractiveViewer(
+                          constrained: false,
+                          boundaryMargin: const EdgeInsets.all(double.infinity),
+                          minScale: 0.5,
+                          maxScale: 8,
+                          child: SizedBox(
+                            width: constraints.maxWidth,
+                            height: taillePage.height * echelle,
+                            child: Image.memory(apercuLecture!, fit: BoxFit.fill),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+      floatingActionButton: apercuLecture == null || _occupe
+          ? null
+          : FloatingActionButton.extended(
+              heroTag: "modifier",
+              onPressed: _passerEnModification,
+              icon: const Icon(Icons.edit),
+              label: const Text("Modifier"),
+            ),
+    );
+  }
+
+  Widget _buildEdition(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text("Mon éditeur PDF"),
