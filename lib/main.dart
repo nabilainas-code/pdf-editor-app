@@ -325,7 +325,6 @@ class _AccueilState extends State<Accueil> {
   Uint8List? imageDeFond;
   img.Image? imageDecodee;
   double echelleOcr = 1;
-  PdfColor couleurPage = PdfColor(255, 255, 255);
 
   final List<Etat> historique = [];
   final List<Etat> futur = [];
@@ -607,7 +606,7 @@ class _AccueilState extends State<Accueil> {
   /// texte s'affichait jusque-là comme une page blanche avec des cadres :
   /// ce qu'on écrit dans un champ de formulaire y serait invisible.
   Future<void> _activerApercuImage(PdfDocument doc) async {
-    const dpi = _dpiOcr;
+    const dpi = _dpiApercu;
     final octetsDoc = Uint8List.fromList(await doc.save());
     PdfRaster? raster;
     await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
@@ -622,7 +621,6 @@ class _AccueilState extends State<Accueil> {
       imageDeFond = png;
       imageDecodee = decodee;
       echelleOcr = dpi / 72.0;
-      if (decodee != null) couleurPage = _calculerCouleurPage(decodee);
     });
   }
 
@@ -1186,7 +1184,9 @@ class _AccueilState extends State<Accueil> {
     await _analyser(octets);
     if (!mounted) return;
     setState(() {
-      modeLecture = false;
+      // On ne quitte la lecture que si l'analyse a bien trouvé des lignes :
+      // sinon il n'y aurait rien à modifier, et l'écran resterait vide.
+      modeLecture = mots.isEmpty;
       _occupe = false;
     });
   }
@@ -1234,13 +1234,26 @@ class _AccueilState extends State<Accueil> {
           selection.clear();
           statut = "${trouvesTexte.length} ligne(s) détectée(s)";
         });
+        // Même un document au vrai texte a besoin de l'image de sa page :
+        // c'est elle qui dit de quelle couleur est le papier juste à côté
+        // d'une ligne, donc avec quoi l'effacer. Sans elle, l'application
+        // devait deviner, et se trompait — d'où le rectangle noir à la
+        // place d'une ligne supprimée. Elle sert aussi à afficher la page
+        // telle qu'elle est vraiment, couleurs et photos comprises.
+        await _activerApercuImage(doc);
         return;
       }
 
       setState(() => statut = "Page scannée détectée, analyse OCR en cours...");
       await _analyserParOcr(doc, page);
     } catch (e) {
-      setState(() => statut = "Erreur d'analyse : $e");
+      // Aucune analyse ne doit laisser l'application sur un rond qui tourne
+      // sans fin : on revient à la lecture, où le document reste consultable
+      // et où le bouton « modifier » permet de réessayer.
+      setState(() {
+        modeLecture = true;
+        statut = "Analyse impossible ($e) — document ouvert en lecture seule";
+      });
     }
   }
 
@@ -1390,38 +1403,6 @@ class _AccueilState extends State<Accueil> {
     return total == 0 ? 0 : sombres / total;
   }
 
-  /// Calcule la couleur dominante de toute la page (en principe le blanc du
-  /// papier) en quantifiant les pixels d'une grille régulière et en gardant
-  /// le groupe le plus fréquent. Comme le texte ne couvre qu'une petite
-  /// partie de la page, cette couleur est beaucoup plus fiable pour
-  /// "effacer" une ligne qu'un échantillon local qui peut tomber sur de
-  /// l'encre selon l'endroit de la page.
-  PdfColor _calculerCouleurPage(img.Image image) {
-    final compteur = <int, int>{};
-    for (var y = 0; y < image.height; y += 15) {
-      for (var x = 0; x < image.width; x += 15) {
-        final pixel = image.getPixel(x, y);
-        final cle = ((pixel.r.toInt() ~/ 8) << 16) |
-            ((pixel.g.toInt() ~/ 8) << 8) |
-            (pixel.b.toInt() ~/ 8);
-        compteur[cle] = (compteur[cle] ?? 0) + 1;
-      }
-    }
-    if (compteur.isEmpty) return PdfColor(255, 255, 255);
-    var cleFrequente = compteur.keys.first;
-    var maxCompte = compteur[cleFrequente]!;
-    for (final entree in compteur.entries) {
-      if (entree.value > maxCompte) {
-        maxCompte = entree.value;
-        cleFrequente = entree.key;
-      }
-    }
-    final r = ((cleFrequente >> 16) & 0xFF) * 8;
-    final g = ((cleFrequente >> 8) & 0xFF) * 8;
-    final b = (cleFrequente & 0xFF) * 8;
-    return PdfColor(r, g, b);
-  }
-
   Future<void> _analyserParOcr(PdfDocument doc, PdfPage page) async {
     const dpi = _dpiOcr;
     TextRecognizer? recognizer;
@@ -1497,14 +1478,13 @@ class _AccueilState extends State<Accueil> {
         imageDeFond = pngOctets;
         imageDecodee = imageAnalysee;
         echelleOcr = echelle;
-        couleurPage = imageAnalysee != null
-            ? _calculerCouleurPage(imageAnalysee)
-            : PdfColor(255, 255, 255);
         selection.clear();
         statut = "${fusionnees.length} ligne(s) détectée(s) (OCR)";
       });
-    } catch (e) {
-      setState(() => statut = "Erreur OCR : $e");
+    } catch (_) {
+      // Remontée à l'appelant, qui remet le document en lecture plutôt que
+      // de laisser un écran de chargement sans fin.
+      rethrow;
     } finally {
       await recognizer?.close();
     }
@@ -1647,9 +1627,13 @@ class _AccueilState extends State<Accueil> {
     return [r, g, b];
   }
 
+  /// Couleur du papier autour d'une zone. À défaut, du blanc — et non la
+  /// couleur dominante de la page : sur un document à large bandeau de
+  /// couleur, cette dominante est celle du bandeau, et « effacer » une ligne
+  /// posait une barre sombre en travers du texte.
   PdfColor _couleurLocale(Rect zonePdf) {
     final fond = _fondAutour(zonePdf);
-    if (fond == null) return couleurPage;
+    if (fond == null) return PdfColor(255, 255, 255);
     return PdfColor(fond[0], fond[1], fond[2]);
   }
 
@@ -1764,10 +1748,61 @@ class _AccueilState extends State<Accueil> {
   /// exactement la largeur de son cadre détecté. C'est la calibration la
   /// plus fiable dont on dispose : le cadre OCR épouse l'étendue horizontale
   /// du texte, alors que sa hauteur inclut marge, accents et jambages.
+  /// Équivalents pour les caractères que les polices standard d'un PDF ne
+  /// savent pas écrire. Elles se limitent au jeu latin de Windows :
+  /// apostrophe typographique, tiret cadratin, puce ronde, points de
+  /// suspension — tout ce qu'un traitement de texte met sans qu'on le
+  /// demande — les faisaient lever « The character is not supported by the
+  /// font ». Cette erreur interrompait l'analyse entière du document et
+  /// laissait l'application sur un écran de chargement sans fin.
+  static const Map<int, String> _equivalentsPolice = {
+    0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'", 0x2032: "'",
+    0x201C: '"', 0x201D: '"', 0x201E: '"', 0x201F: '"', 0x2033: '"',
+    0x2010: '-', 0x2011: '-', 0x2012: '-', 0x2013: '-', 0x2014: '-',
+    0x2015: '-', 0x2212: '-', 0x00AD: '-',
+    0x2022: '-', 0x2023: '-', 0x25AA: '-', 0x25CF: '-', 0x25E6: '-',
+    0x00B7: '.', 0x2026: '...', 0x2044: '/',
+    0x00A0: ' ', 0x2007: ' ', 0x2009: ' ', 0x202F: ' ', 0x2060: '',
+    0x200B: '', 0xFEFF: '',
+    0x20AC: 'EUR', 0x2122: 'TM', 0x2039: '<', 0x203A: '>',
+    0x0152: 'OE', 0x0153: 'oe', 0x0178: 'Y', 0x0160: 'S', 0x0161: 's',
+    0x017D: 'Z', 0x017E: 'z', 0x0192: 'f', 0x02C6: '^', 0x02DC: '~',
+    0x2020: '+', 0x2021: '+', 0x2030: '%%', 0x2116: 'No',
+  };
+
+  /// Texte tel qu'on peut l'écrire dans le PDF avec une police standard.
+  /// Ce qui n'a pas d'équivalent connu et sort du jeu latin est retiré :
+  /// mieux vaut une ligne à laquelle il manque un signe rare qu'un document
+  /// entier qu'on ne peut plus ouvrir.
+  String _texteEcrivable(String texte) {
+    if (texte.codeUnits.every((c) => c >= 0x20 && c <= 0x7E)) return texte;
+    final tampon = StringBuffer();
+    for (final rune in texte.runes) {
+      final equivalent = _equivalentsPolice[rune];
+      if (equivalent != null) {
+        tampon.write(equivalent);
+      } else if (rune == 0x09 || rune == 0x0A || rune == 0x0D) {
+        tampon.write(' ');
+      } else if (rune >= 0x20 && rune <= 0xFF && rune != 0x7F) {
+        tampon.writeCharCode(rune);
+      }
+    }
+    return tampon.toString();
+  }
+
   double? _tailleParLargeur(MotDetecte mot) {
     if (mot.texte.trim().isEmpty || mot.zone.width <= 0) return null;
     const reference = 20.0;
-    final largeur = _police(mot, reference).measureString(mot.texte).width;
+    // Une mesure ne doit jamais faire échouer l'ouverture d'un document :
+    // au pire on se passe de la calibration pour cette ligne.
+    double largeur;
+    try {
+      largeur = _police(mot, reference)
+          .measureString(_texteEcrivable(mot.texte))
+          .width;
+    } catch (_) {
+      return null;
+    }
     if (largeur <= 0) return null;
     final taille = reference * mot.zone.width / largeur;
     if (taille < 4 || taille > 96) return null;
@@ -1778,8 +1813,12 @@ class _AccueilState extends State<Accueil> {
     // La taille calibrée sur la largeur du cadre (voir mot.tailleAuto) prime
     // sur l'estimation par la hauteur, qui donnait un texte trop gros.
     final tailleDepart = mot.tailleManuelle ?? mot.tailleAuto;
+    // Mesuré sur le texte tel qu'il sera écrit dans le PDF : mesurer les
+    // caractères d'origine ferait échouer le calcul sur ceux que les polices
+    // standard ignorent.
+    final texte = _texteEcrivable(mot.texte);
     var police = _police(mot, tailleDepart ?? zone.height * 0.75);
-    var mesure = police.measureString(mot.texte);
+    var mesure = police.measureString(texte);
 
     if (tailleDepart == null && mesure.height > 0 && zone.height > 0) {
       var taille = police.size * zone.height / mesure.height * 1.15;
@@ -1789,7 +1828,7 @@ class _AccueilState extends State<Accueil> {
       if (taille < 4) taille = 4;
       if (taille > 96) taille = 96;
       police = _police(mot, taille);
-      mesure = police.measureString(mot.texte);
+      mesure = police.measureString(texte);
     }
 
     // Largeur disponible pour ne pas déborder : le bord de la page pour une
@@ -1802,7 +1841,7 @@ class _AccueilState extends State<Accueil> {
       var taille = police.size * largeurDispo / mesure.width;
       if (taille < 4) taille = 4;
       police = _police(mot, taille);
-      mesure = police.measureString(mot.texte);
+      mesure = police.measureString(texte);
     }
 
     final largeur = mot.boiteLibre
@@ -2000,7 +2039,18 @@ class _AccueilState extends State<Accueil> {
         try {
           final bande = img.copyCrop(image,
               x: x, y: y, width: largeur, height: hauteurBande);
-          return PdfBitmap(img.encodePng(_surFondBlanc(bande)));
+          final octets = img.encodePng(_surFondBlanc(bande));
+          // Relecture de contrôle, comme pour une capture : un PNG que le
+          // moteur PDF n'accepte pas ne se signale qu'au moment du dessin,
+          // trop tard pour être rattrapé — et laisse un rectangle noir à la
+          // place de la ligne effacée. On préfère alors l'aplat de couleur.
+          final relu = img.decodePng(octets);
+          if (relu == null ||
+              relu.width != largeur ||
+              relu.height != hauteurBande) {
+            return null;
+          }
+          return PdfBitmap(octets);
         } catch (_) {
           return null;
         }
@@ -2078,7 +2128,7 @@ class _AccueilState extends State<Accueil> {
     if (mot.texte.isEmpty) return;
     final dessin = _dessinTexte(mot, zone);
     page.graphics.drawString(
-      mot.texte,
+      _texteEcrivable(mot.texte),
       dessin.police,
       bounds: dessin.rect,
       brush: PdfSolidBrush(mot.couleurTexte ?? PdfColor(0, 0, 0)),
@@ -3277,7 +3327,9 @@ class _AccueilState extends State<Accueil> {
     if (!mounted) return;
     setState(() {
       _occupe = false;
-      statut = "Document revenu à son état d'ouverture";
+      // L'analyse dit elle-même ce qui s'est passé quand elle échoue : on
+      // ne recouvre pas son message par une confirmation trompeuse.
+      if (mots.isNotEmpty) statut = "Document revenu à son état d'ouverture";
     });
   }
 
