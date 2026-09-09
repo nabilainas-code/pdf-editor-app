@@ -516,6 +516,78 @@ class _AccueilState extends State<Accueil> {
     focusDirect.requestFocus();
   }
 
+  /// Actions de texte pendant l'écriture sur une ligne : tout sélectionner,
+  /// couper, copier, coller. Android en propose déjà, mais ses poignées et
+  /// sa bulle « Copier/Coller » se dessinent dans la couche d'overlay de
+  /// l'application, sans tenir compte du zoom de la page : elles
+  /// atterrissaient n'importe où dès qu'on avait zoomé ou déplacé la vue, et
+  /// ont donc été masquées. Elles reviennent ici, dans la barre de
+  /// l'application, où leur position ne dépend de rien.
+  ///
+  /// Sans sélection, l'action porte sur toute la ligne — c'est ce qu'on
+  /// attend quand on n'a rien surligné.
+  Future<void> _actionTexte(String choix) async {
+    final texte = controleurDirect.text;
+    var etendue = controleurDirect.selection;
+    if (!etendue.isValid) {
+      etendue = TextSelection.collapsed(offset: texte.length);
+    }
+
+    if (choix == "tout") {
+      setState(() {
+        controleurDirect.selection =
+            TextSelection(baseOffset: 0, extentOffset: texte.length);
+      });
+      focusDirect.requestFocus();
+      return;
+    }
+
+    if (choix == "coller") {
+      final donnees = await Clipboard.getData(Clipboard.kTextPlain);
+      // Une ligne de PDF tient sur une seule ligne : un texte copié sur
+      // plusieurs lignes ailleurs est mis bout à bout plutôt que tronqué.
+      final aColler =
+          (donnees?.text ?? '').replaceAll(RegExp(r'\s*\n\s*'), ' ').trim();
+      if (aColler.isEmpty) {
+        setState(() => statut = "Rien à coller dans le presse-papiers");
+        return;
+      }
+      final nouveau = texte.replaceRange(etendue.start, etendue.end, aColler);
+      setState(() {
+        controleurDirect.value = TextEditingValue(
+          text: nouveau,
+          selection:
+              TextSelection.collapsed(offset: etendue.start + aColler.length),
+        );
+      });
+      focusDirect.requestFocus();
+      return;
+    }
+
+    // Copier et couper : sur la sélection, ou sur toute la ligne à défaut.
+    final debut = etendue.isCollapsed ? 0 : etendue.start;
+    final fin = etendue.isCollapsed ? texte.length : etendue.end;
+    final morceau = texte.substring(debut, fin);
+    if (morceau.isEmpty) {
+      setState(() => statut = "Rien à copier sur cette ligne");
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: morceau));
+
+    if (choix == "couper") {
+      setState(() {
+        controleurDirect.value = TextEditingValue(
+          text: texte.replaceRange(debut, fin, ''),
+          selection: TextSelection.collapsed(offset: debut),
+        );
+        statut = "Coupé — collez où vous voulez";
+      });
+    } else {
+      setState(() => statut = "Copié — collez où vous voulez");
+    }
+    focusDirect.requestFocus();
+  }
+
   void _annulerEditionDirecte() {
     focusDirect.unfocus();
     setState(() {
@@ -4098,16 +4170,50 @@ class _AccueilState extends State<Accueil> {
                         ),
                       ),
                       const Text("Gras", style: TextStyle(fontSize: 13)),
-                      IconButton(
+                      // Un seul bouton pour toutes les actions de texte : la
+                      // barre est déjà pleine, et les quatre tiennent dans un
+                      // menu sans rien en chasser.
+                      PopupMenuButton<String>(
                         icon: const Icon(Icons.select_all, size: 20),
-                        tooltip: "Tout sélectionner (pour copier ou remplacer)",
-                        onPressed: () {
-                          controleurDirect.selection = TextSelection(
-                            baseOffset: 0,
-                            extentOffset: controleurDirect.text.length,
-                          );
-                          focusDirect.requestFocus();
-                        },
+                        tooltip: "Sélectionner, couper, copier, coller",
+                        onSelected: _actionTexte,
+                        itemBuilder: (ctx) => const [
+                          PopupMenuItem(
+                            value: "tout",
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.select_all),
+                              title: Text("Tout sélectionner"),
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: "copier",
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.content_copy),
+                              title: Text("Copier"),
+                              subtitle: Text("La sélection, sinon la ligne"),
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: "couper",
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.content_cut),
+                              title: Text("Couper"),
+                              subtitle: Text("La sélection, sinon la ligne"),
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: "coller",
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.content_paste),
+                              title: Text("Coller ici"),
+                              subtitle: Text("À l'endroit du curseur"),
+                            ),
+                          ),
+                        ],
                       ),
                       const Spacer(),
                       const Text("Taille", style: TextStyle(fontSize: 13)),
