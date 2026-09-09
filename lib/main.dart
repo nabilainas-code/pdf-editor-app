@@ -76,6 +76,23 @@ class MotDetecte {
   List<List<Offset>>? traitsSignature;
   double ratioSignature;
 
+  /// Vrai pour une ligne trouvée par reconnaissance de caractères sur une
+  /// page scannée. On ne connaît alors ni sa police ni sa taille réelles :
+  /// la déplacer se fait en photographiant ses pixels. Une ligne venue du
+  /// texte d'un PDF, elle, est réécrite — c'est net à tous les zooms, et
+  /// sans perte à chaque déplacement.
+  bool depuisOcr;
+
+  /// Photo des pixels d'origine d'une ligne scannée, prise au premier
+  /// déplacement et reposée telle quelle à tous les suivants, avec la place
+  /// qu'elle occupe (taille, et décalage par rapport au cadre de la ligne).
+  /// La reprendre à chaque fois repartait de l'image du déplacement
+  /// précédent : le texte perdait un cran de netteté par appui, et finissait
+  /// gris et hachuré.
+  Uint8List? pixelsSource;
+  Size? tailleSource;
+  Offset? decalageSource;
+
   MotDetecte(this.texte, this.zone,
       {this.gras = false,
       this.redessine = false,
@@ -87,7 +104,11 @@ class MotDetecte {
       this.couleurTexte,
       this.tailleAuto,
       this.traitsSignature,
-      this.ratioSignature = 0.4});
+      this.ratioSignature = 0.4,
+      this.depuisOcr = false,
+      this.pixelsSource,
+      this.tailleSource,
+      this.decalageSource});
 }
 
 class Etat {
@@ -1487,6 +1508,7 @@ class _AccueilState extends State<Accueil> {
       // correspondance texte ↔ cadre est garantie.
       for (final ligne in fusionnees) {
         ligne.tailleAuto = _tailleParLargeur(ligne);
+        ligne.depuisOcr = true;
       }
 
       setState(() {
@@ -2292,7 +2314,11 @@ class _AccueilState extends State<Accueil> {
             couleurTexte: m.couleurTexte,
             tailleAuto: m.tailleAuto,
             traitsSignature: m.traitsSignature,
-            ratioSignature: m.ratioSignature))
+            ratioSignature: m.ratioSignature,
+            depuisOcr: m.depuisOcr,
+            pixelsSource: m.pixelsSource,
+            tailleSource: m.tailleSource,
+            decalageSource: m.decalageSource))
         .toList();
     return Etat(octetsDocument, motsCopie, imageDeFond, echelleOcr);
   }
@@ -2314,7 +2340,11 @@ class _AccueilState extends State<Accueil> {
               couleurTexte: m.couleurTexte,
               tailleAuto: m.tailleAuto,
               traitsSignature: m.traitsSignature,
-              ratioSignature: m.ratioSignature))
+              ratioSignature: m.ratioSignature,
+              depuisOcr: m.depuisOcr,
+              pixelsSource: m.pixelsSource,
+              tailleSource: m.tailleSource,
+              decalageSource: m.decalageSource))
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
@@ -2754,6 +2784,11 @@ class _AccueilState extends State<Accueil> {
 
       mot.gras = grasFinal;
       mot.texte = texteNettoye;
+      // Son texte a changé : la photo gardée de ses pixels d'origine ne lui
+      // correspond plus, elle sera réécrite désormais.
+      mot.pixelsSource = null;
+      mot.tailleSource = null;
+      mot.decalageSource = null;
       mot.tailleManuelle = tailleFinale;
       mot.alignement = alignementFinal;
       if (texteNettoye.isEmpty) mot.redessine = false;
@@ -2822,6 +2857,19 @@ class _AccueilState extends State<Accueil> {
       _deplacerGroupe([mot], dx, dy);
 
   Rect _aligner(Rect rect) => _zoneAlignee(rect) ?? rect;
+
+  /// Place qu'occupe dans la page la photo gardée d'une ligne scannée.
+  Rect _placeSource(MotDetecte mot) {
+    final taille = mot.tailleSource;
+    final decalage = mot.decalageSource;
+    if (taille == null || decalage == null) return mot.zone;
+    return Rect.fromLTWH(
+      mot.zone.left + decalage.dx,
+      mot.zone.top + decalage.dy,
+      taille.width,
+      taille.height,
+    );
+  }
 
   /// Déplace une signature posée. Elle flotte au-dessus de la page jusqu'à
   /// l'enregistrement : la déplacer ne fait donc que changer son cadre —
@@ -2949,20 +2997,44 @@ class _AccueilState extends State<Accueil> {
       // l'image imprimée conserve la police et la graisse d'origine, qu'on ne
       // saurait pas reproduire en Helvetica. Une zone vide (gomme, ligne
       // supprimée) n'a rien à déplacer ni à effacer.
+      // Seule une ligne scannée est déplacée en photo : d'elle, on ne
+      // connaît ni la police ni la taille réelles. Une ligne venue du texte
+      // du PDF est réécrite — on en connaît la police, le corps, la graisse
+      // et la couleur —, ce qui reste net à tous les zooms au lieu de pâlir
+      // à chaque déplacement.
       final captures = <MotDetecte, Uint8List?>{};
       for (final m in deplacements.keys) {
-        // Une ligne que l'application a elle-même écrite est réécrite
-        // plutôt que photographiée : son texte reste alors net à tous les
-        // agrandissements, là où une image la ferait pâlir un peu plus à
-        // chaque déplacement.
-        captures[m] = (m.texte.isEmpty || m.redessine)
-            ? null
-            : _capturerZone(rects[m]!);
+        if (m.texte.isEmpty || m.redessine || !m.depuisOcr) {
+          captures[m] = null;
+          continue;
+        }
+        // La photo n'est prise qu'une fois, au premier déplacement, et
+        // reposée telle quelle ensuite : la reprendre à chaque fois
+        // repartait de l'image du déplacement précédent, et le texte
+        // perdait un cran de netteté par appui.
+        if (m.pixelsSource == null) {
+          final photo = _capturerZone(rects[m]!);
+          if (photo != null) {
+            m.pixelsSource = photo;
+            m.tailleSource = rects[m]!.size;
+            m.decalageSource = rects[m]!.topLeft - m.zone.topLeft;
+          }
+        }
+        captures[m] = m.pixelsSource;
       }
+
+      // La place occupée par la photo, relevée avant de bouger les cadres.
+      final places = <MotDetecte, Rect>{
+        for (final m in deplacements.keys) m: _placeSource(m),
+      };
 
       for (final m in deplacements.keys) {
         if (m.texte.isEmpty) continue;
-        _effacerRect(page, rects[m]!, m);
+        var aEffacer = rects[m]!;
+        if (captures[m] != null) {
+          aEffacer = aEffacer.expandToInclude(places[m]!);
+        }
+        _effacerRect(page, aEffacer, m);
       }
 
       for (final entree in deplacements.entries) {
@@ -2971,7 +3043,7 @@ class _AccueilState extends State<Accueil> {
         final capture = captures[m];
         if (capture != null) {
           page.graphics
-              .drawImage(PdfBitmap(capture), rects[m]!.shift(entree.value));
+              .drawImage(PdfBitmap(capture), places[m]!.shift(entree.value));
         } else {
           _ecrire(page, m, m.zone.shift(entree.value));
         }
@@ -3113,9 +3185,13 @@ class _AccueilState extends State<Accueil> {
       largeurCopiee = rectCapture.width;
       hauteurCopiee = rectCapture.height;
       tailleCopiee = mot.tailleManuelle;
-      // Idem : une ligne redessinée n'a plus ses pixels à jour dans l'image
-      // de la page, on colle donc son texte plutôt qu'une capture obsolète.
-      imageCopiee = mot.redessine ? null : _capturerZone(rectCapture);
+      // Même règle qu'au déplacement : on ne colle une photo que d'une
+      // ligne scannée. Une ligne dont on connaît la police est réécrite,
+      // ce qui reste net ; une ligne déjà redessinée n'a de toute façon
+      // plus ses pixels à jour dans l'image de la page.
+      imageCopiee = (mot.redessine || !mot.depuisOcr)
+          ? null
+          : _capturerZone(rectCapture);
       statut = "Texte copié : collez-le ici ou dans n'importe quelle autre "
           "application";
     });
@@ -3423,6 +3499,11 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
       doc.pages[0].graphics.drawImage(PdfBitmap(octets), zone);
+      // Les pixels de la page ont changé sous ce cadre : la photo gardée de
+      // la ligne n'a plus lieu d'être, elle sera reprise au besoin.
+      mot.pixelsSource = null;
+      mot.tailleSource = null;
+      mot.decalageSource = null;
       setState(() => statut = "Zone remise dans son état d'origine");
       if (imageDeFond != null) await _rafraichirApercuOcr(doc);
     } catch (e) {
