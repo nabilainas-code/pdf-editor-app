@@ -1246,6 +1246,19 @@ class _AccueilState extends State<Accueil> {
         // place d'une ligne supprimée. Elle sert aussi à afficher la page
         // telle qu'elle est vraiment, couleurs et photos comprises.
         await _activerApercuImage(doc);
+        // L'extraction de texte donne la police, la taille et le gras, mais
+        // pas la couleur de l'encre. On la relève sur l'image de la page,
+        // comme pour un scan : sans elle, une ligne grise ou orange
+        // repassait en noir dès la première modification, ce qui se voyait
+        // immédiatement dans un document mis en forme.
+        if (imageDecodee != null) {
+          // Hors setState : l'affichage d'une ligne intacte vient de l'image
+          // de la page, pas de cette couleur — elle ne servira qu'au moment
+          // de la réécrire. Inutile de reconstruire l'écran pour chacune.
+          for (final ligne in mots) {
+            ligne.couleurTexte ??= _couleurEncre(ligne.zone);
+          }
+        }
         return;
       }
 
@@ -2072,6 +2085,25 @@ class _AccueilState extends State<Accueil> {
     return fond;
   }
 
+  /// Rectangle exactement couvert par la découpe de [zone] dans l'image de
+  /// la page. Une découpe se fait en pixels entiers, alors que le rectangle
+  /// demandé, lui, tombe entre deux pixels : reposer l'un dans l'autre
+  /// agrandissait le contenu d'une fraction de pour cent. Invisible une
+  /// fois — mais chaque déplacement repart de l'image du déplacement
+  /// précédent, et l'erreur se multipliait à chaque appui sur une flèche,
+  /// jusqu'à ce que la ligne sorte de son cadre. En calant le rectangle sur
+  /// les pixels avant tout le reste, la repose est exacte.
+  Rect? _zoneAlignee(Rect zone) {
+    final image = imageDecodee;
+    final e = echelleOcr;
+    if (image == null || e <= 0) return null;
+    final x = (zone.left * e).round().clamp(0, image.width - 1);
+    final y = (zone.top * e).round().clamp(0, image.height - 1);
+    final largeur = (zone.width * e).round().clamp(1, image.width - x);
+    final hauteur = (zone.height * e).round().clamp(1, image.height - y);
+    return Rect.fromLTWH(x / e, y / e, largeur / e, hauteur / e);
+  }
+
   Uint8List? _capturerZone(Rect zone) {
     final image = imageDecodee;
     if (image == null) return null;
@@ -2789,6 +2821,8 @@ class _AccueilState extends State<Accueil> {
   Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) =>
       _deplacerGroupe([mot], dx, dy);
 
+  Rect _aligner(Rect rect) => _zoneAlignee(rect) ?? rect;
+
   /// Déplace une signature posée. Elle flotte au-dessus de la page jusqu'à
   /// l'enregistrement : la déplacer ne fait donc que changer son cadre —
   /// instantané, et sans rien effacer sur son passage. Elle glisse librement
@@ -2862,8 +2896,12 @@ class _AccueilState extends State<Accueil> {
     // effacement et repose doivent porter exactement sur le même, sinon on
     // efface plus qu'on n'emporte. Il est élargi vers la gauche pour
     // embarquer un tiret ou une puce que l'OCR n'a pas rattachés à la ligne.
+    // Calé sur les pixels de l'image : photographie, effacement et repose
+    // portent alors sur exactement le même rectangle, et le contenu revient
+    // à sa taille d'origine au lieu de grandir d'un poil à chaque appui.
     final rects = <MotDetecte, Rect>{
-      for (final m in vises.keys) m: _etendreVersPuce(_rectDeplacement(m)),
+      for (final m in vises.keys)
+        m: _aligner(_etendreVersPuce(_rectDeplacement(m))),
     };
 
     // Rien ne doit finir hors de la page. Plutôt que de refuser tout le
@@ -3064,7 +3102,7 @@ class _AccueilState extends State<Accueil> {
     if (mot.texte.isEmpty) return;
     // Même rectangle que pour un déplacement (marge + tiret/puce embarqués),
     // pour que l'image capturée corresponde exactement à ce qui est copié.
-    final rectCapture = _etendreVersPuce(_rectDeplacement(mot));
+    final rectCapture = _aligner(_etendreVersPuce(_rectDeplacement(mot)));
     setState(() {
       texteCopie = mot.texte;
       grasCopie = mot.gras;
