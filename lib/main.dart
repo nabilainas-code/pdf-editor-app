@@ -1336,6 +1336,10 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Au lancement : le document qu'on nous a envoyé, sinon l'accueil.
+  /// L'application allait auparavant chercher un PDF d'exemple sur
+  /// internet — surprenant, inutile hors connexion, et sans rapport avec ce
+  /// que l'utilisateur venait faire.
   Future<void> _init() async {
     try {
       final path = await _channel.invokeMethod<String>("getInitialPdfPath");
@@ -1344,23 +1348,8 @@ class _AccueilState extends State<Accueil> {
         return;
       }
     } catch (_) {}
-    await _chargerPdfDeTest();
-  }
-
-  Future<void> _chargerPdfDeTest() async {
-    try {
-      final url = Uri.parse(
-          "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf");
-      final client = HttpClient();
-      final request = await client.getUrl(url);
-      final response = await request.close();
-      final builder = BytesBuilder();
-      await for (final chunk in response) {
-        builder.add(chunk);
-      }
-      await _chargerPourLecture(builder.toBytes());
-    } catch (e) {
-      setState(() => statut = "Erreur : $e");
+    if (mounted) {
+      setState(() => statut = "Choisissez ce que vous voulez faire");
     }
   }
 
@@ -1819,22 +1808,38 @@ class _AccueilState extends State<Accueil> {
     );
   }
 
-  Future<void> _importerDocument() async {
+  /// Choisit un PDF et l'ouvre en lecture. Renvoie vrai si un document a
+  /// bien été chargé, pour que les services de l'accueil puissent enchaîner
+  /// sur ce qu'ils ont à faire.
+  Future<bool> _importerDocument() async {
     try {
       final resultat = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf'],
       );
       final chemin = resultat?.files.single.path;
-      if (chemin == null) return;
+      if (chemin == null) return false;
       await _chargerPourLecture(File(chemin).readAsBytesSync());
+      return octetsDocument != null;
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Erreur d'importation : $e")),
         );
       }
+      return false;
     }
+  }
+
+  /// Services de l'accueil : chacun va au bout tout seul. On choisit ce
+  /// qu'on veut faire, l'application demande le document au bon moment, et
+  /// personne n'a à traverser une fonction dont il n'a pas besoin.
+  Future<void> _servicePourSigner() async {
+    if (await _importerDocument()) await _passerEnAnnotation();
+  }
+
+  Future<void> _servicePourModifier() async {
+    if (await _importerDocument()) await _passerEnModification();
   }
 
   /// Ouvre le document en simple lecture : juste une image de la page, sans
@@ -1855,6 +1860,10 @@ class _AccueilState extends State<Accueil> {
       octetsDocument = null;
       imageOrigine = null;
       modeLecture = true;
+      // Occupé pendant le rendu : sans ça, l'accueil (qui s'affiche dès
+      // qu'il n'y a pas de page à montrer) réapparaissait le temps du
+      // chargement, comme si le document avait été refusé.
+      _occupe = true;
       statut = "Chargement...";
     });
     try {
@@ -1874,10 +1883,12 @@ class _AccueilState extends State<Accueil> {
         octetsDocument = octets;
         taillePage = Size(taille.width, taille.height);
         apercuLecture = png;
-        statut = "Lecture seule — appuyez sur le crayon pour modifier";
+        statut = "Lecture seule — choisissez ce que vous voulez en faire";
       });
     } catch (e) {
       setState(() => statut = "Erreur d'ouverture : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
     }
   }
 
@@ -4538,8 +4549,8 @@ class _AccueilState extends State<Accueil> {
           value: "fermer",
           child: ListTile(
             contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.close),
-            title: Text("Fermer le document"),
+            leading: Icon(Icons.home_outlined),
+            title: Text("Fermer et revenir à l'accueil"),
           ),
         ),
         const PopupMenuItem(
@@ -4681,7 +4692,124 @@ class _AccueilState extends State<Accueil> {
 
   @override
   Widget build(BuildContext context) {
-    return modeLecture ? _buildLecture(context) : _buildEdition(context);
+    if (!modeLecture) return _buildEdition(context);
+    // Aucun document en main : on montre les services plutôt qu'un rond qui
+    // tourne. Chacun est une tâche entière, indépendante des autres.
+    if (apercuLecture == null && !_occupe) return _buildAccueil(context);
+    return _buildLecture(context);
+  }
+
+  /// Une carte de service sur l'accueil.
+  Widget _carteService({
+    required IconData icone,
+    required String titre,
+    required String description,
+    required VoidCallback? action,
+  }) {
+    return Card(
+      elevation: 0,
+      margin: const EdgeInsets.only(bottom: 12),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: action,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+          child: Row(
+            children: [
+              Icon(icone,
+                  size: 28, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(titre,
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 3),
+                    Text(
+                      description,
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.black.withOpacity(0.6),
+                          height: 1.25),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: Colors.black38),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Accueil : la liste des services. Chacun demande le document au moment
+  /// où il en a besoin et mène sa tâche jusqu'au bout — on ne traverse
+  /// jamais une fonction dont on n'a que faire.
+  Widget _buildAccueil(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Mon éditeur PDF"),
+        actions: [_menuGeneral(context)],
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: Text(
+                "Que voulez-vous faire ?",
+                style: TextStyle(
+                    fontSize: 15, color: Colors.black.withOpacity(0.6)),
+              ),
+            ),
+            _carteService(
+              icone: Icons.document_scanner,
+              titre: "Scanner",
+              description: "Document, photo, noir et blanc, ou pièce "
+                  "d'identité recto-verso sur une page. Le résultat part en "
+                  "PDF ou en image.",
+              action: _occupe ? null : _scanner,
+            ),
+            _carteService(
+              icone: Icons.draw,
+              titre: "Signer et remplir",
+              description: "Poser une signature, cocher et remplir un "
+                  "formulaire, ajouter du texte. Sans attendre la "
+                  "reconnaissance de caractères.",
+              action: _occupe ? null : _servicePourSigner,
+            ),
+            _carteService(
+              icone: Icons.edit,
+              titre: "Modifier le texte",
+              description: "Réécrire, déplacer, effacer les lignes d'un "
+                  "document existant, scanné ou non.",
+              action: _occupe ? null : _servicePourModifier,
+            ),
+            _carteService(
+              icone: Icons.menu_book,
+              titre: "Lire un document",
+              description: "Ouvrir un PDF pour le consulter, le zoomer, le "
+                  "partager tel quel.",
+              action: _occupe ? null : () => _importerDocument(),
+            ),
+            const SizedBox(height: 8),
+            Center(
+              child: Text(
+                statut,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    fontSize: 12, color: Colors.black.withOpacity(0.45)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
 
@@ -4726,40 +4854,7 @@ class _AccueilState extends State<Accueil> {
           ),
           Expanded(
             child: apercuLecture == null
-                // Pas de rond qui tourne indéfiniment quand il n'y a
-                // simplement rien à afficher : on dit quoi faire.
-                ? (_occupe
-                    ? const Center(child: CircularProgressIndicator())
-                    : Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.picture_as_pdf,
-                                  size: 64, color: Colors.grey),
-                              const SizedBox(height: 16),
-                              const Text(
-                                "Aucun document ouvert",
-                                textAlign: TextAlign.center,
-                                style: TextStyle(fontSize: 16),
-                              ),
-                              const SizedBox(height: 16),
-                              FilledButton.icon(
-                                onPressed: _scanner,
-                                icon: const Icon(Icons.document_scanner),
-                                label: const Text("Scanner un document"),
-                              ),
-                              const SizedBox(height: 10),
-                              OutlinedButton.icon(
-                                onPressed: _importerDocument,
-                                icon: const Icon(Icons.folder_open),
-                                label: const Text("Ouvrir un document"),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ))
+                ? const Center(child: CircularProgressIndicator())
                 : LayoutBuilder(
                     builder: (context, constraints) {
                       final echelle = constraints.maxWidth / taillePage.width;
