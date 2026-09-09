@@ -248,10 +248,34 @@ class _PeintreSignature extends CustomPainter {
   bool shouldRepaint(_PeintreSignature ancien) => true;
 }
 
-/// Dessine à l'écran une signature posée sur la page. Ses traits sont
-/// normalisés par leur largeur (x de 0 à 1) : la largeur du cadre commande
-/// l'échelle, épaisseur du trait comprise, exactement comme au moment de
-/// l'écrire dans le PDF.
+/// Hauteur d'un tracé normalisé, en fraction de sa largeur. Les traits sont
+/// normalisés par leur largeur (x de 0 à 1), leur y monte donc jusqu'à ce
+/// rapport. Le relire du tracé lui-même évite de dépendre d'un rapport
+/// mémorisé ailleurs, qui pourrait ne plus correspondre.
+double _hauteurTraits(List<List<Offset>> traits) {
+  var maxi = 0.0;
+  for (final trait in traits) {
+    for (final p in trait) {
+      if (p.dy > maxi) maxi = p.dy;
+    }
+  }
+  return maxi;
+}
+
+/// Échelle à appliquer aux traits pour qu'ils tiennent exactement dans un
+/// cadre, sans jamais en déborder. La largeur commande, sauf si le cadre est
+/// trop plat pour la hauteur du tracé — auquel cas c'est la hauteur qui
+/// commande. Sans cette seconde condition, un cadre écrasé contre le bord de
+/// la page laissait la signature dépasser par le bas.
+double _echelleTraits(List<List<Offset>> traits, Size cadre) {
+  final rapport = _hauteurTraits(traits);
+  if (rapport <= 0) return cadre.width;
+  final parHauteur = cadre.height / rapport;
+  return parHauteur < cadre.width ? parHauteur : cadre.width;
+}
+
+/// Dessine à l'écran une signature posée sur la page, à la même échelle que
+/// celle avec laquelle elle sera écrite dans le PDF.
 class _PeintreSignaturePosee extends CustomPainter {
   final List<List<Offset>> traits;
   _PeintreSignaturePosee(this.traits);
@@ -259,7 +283,8 @@ class _PeintreSignaturePosee extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (size.width <= 0) return;
-    final epaisseur = size.width * 0.006;
+    final k = _echelleTraits(traits, size);
+    final epaisseur = k * 0.006;
     final pinceau = Paint()
       ..color = Colors.black
       ..strokeWidth = epaisseur < 1.2 ? 1.2 : epaisseur
@@ -268,8 +293,7 @@ class _PeintreSignaturePosee extends CustomPainter {
       ..style = PaintingStyle.stroke;
     for (final trait in traits) {
       if (trait.isEmpty) continue;
-      Offset place(Offset p) =>
-          Offset(p.dx * size.width, p.dy * size.width);
+      Offset place(Offset p) => Offset(p.dx * k, p.dy * k);
       if (trait.length == 1) {
         canvas.drawLine(
             place(trait.first), place(trait.first).translate(0.1, 0), pinceau);
@@ -1073,15 +1097,15 @@ class _AccueilState extends State<Accueil> {
   /// coordonnées des traits sont normalisées par leur largeur, l'épaisseur du
   /// stylo suit donc la taille pour rester proportionnée.
   void _tracerSignature(PdfPage page, List<List<Offset>> traits, Rect zone) {
-    final stylo = PdfPen(PdfColor(0, 0, 0), width: zone.width * 0.006);
+    final k = _echelleTraits(traits, zone.size);
+    final stylo = PdfPen(PdfColor(0, 0, 0), width: k * 0.006);
     for (final trait in traits) {
       for (var i = 0; i + 1 < trait.length; i++) {
         page.graphics.drawLine(
           stylo,
-          Offset(zone.left + trait[i].dx * zone.width,
-              zone.top + trait[i].dy * zone.width),
-          Offset(zone.left + trait[i + 1].dx * zone.width,
-              zone.top + trait[i + 1].dy * zone.width),
+          Offset(zone.left + trait[i].dx * k, zone.top + trait[i].dy * k),
+          Offset(
+              zone.left + trait[i + 1].dx * k, zone.top + trait[i + 1].dy * k),
         );
       }
     }
@@ -1116,9 +1140,15 @@ class _AccueilState extends State<Accueil> {
     }
     if (gauche + largeur > taillePage.width) {
       largeur = taillePage.width - gauche;
+      if (traits != null) hauteur = largeur * mot.ratioSignature;
     }
     if (haut + hauteur > taillePage.height) {
       hauteur = taillePage.height - haut;
+      // Une signature garde ses proportions même contre le bord : sans ça,
+      // le cadre s'écrasait et le tracé en débordait.
+      if (traits != null && mot.ratioSignature > 0) {
+        largeur = hauteur / mot.ratioSignature;
+      }
     }
     if (largeur < mini || hauteur < mini) return;
 
@@ -1216,8 +1246,18 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
 
-      final largeur = taillePage.width * 0.28;
-      final hauteur = largeur * signatureRatio;
+      var largeur = taillePage.width * 0.28;
+      var hauteur = largeur * signatureRatio;
+      // Une signature ne doit pas manger la page. Un paraphe haut et étroit
+      // donnait, à 28 % de la largeur, un cadre de près d'un tiers de la
+      // hauteur de la feuille, posé par-dessus le texte. Sa hauteur est donc
+      // bornée au dixième de la page, et la largeur suit pour garder les
+      // proportions du tracé.
+      final hauteurMax = taillePage.height * 0.10;
+      if (hauteur > hauteurMax && signatureRatio > 0) {
+        hauteur = hauteurMax;
+        largeur = hauteur / signatureRatio;
+      }
       var gauche = x - largeur / 2;
       var haut = y - hauteur / 2;
       if (gauche < 0) gauche = 0;
