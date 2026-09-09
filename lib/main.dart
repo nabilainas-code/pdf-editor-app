@@ -247,6 +247,45 @@ class _PeintreSignature extends CustomPainter {
   bool shouldRepaint(_PeintreSignature ancien) => true;
 }
 
+/// Dessine à l'écran une signature posée sur la page. Ses traits sont
+/// normalisés par leur largeur (x de 0 à 1) : la largeur du cadre commande
+/// l'échelle, épaisseur du trait comprise, exactement comme au moment de
+/// l'écrire dans le PDF.
+class _PeintreSignaturePosee extends CustomPainter {
+  final List<List<Offset>> traits;
+  _PeintreSignaturePosee(this.traits);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0) return;
+    final epaisseur = size.width * 0.006;
+    final pinceau = Paint()
+      ..color = Colors.black
+      ..strokeWidth = epaisseur < 1.2 ? 1.2 : epaisseur
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
+    for (final trait in traits) {
+      if (trait.isEmpty) continue;
+      Offset place(Offset p) =>
+          Offset(p.dx * size.width, p.dy * size.width);
+      if (trait.length == 1) {
+        canvas.drawLine(
+            place(trait.first), place(trait.first).translate(0.1, 0), pinceau);
+        continue;
+      }
+      final chemin = Path()..moveTo(place(trait.first).dx, place(trait.first).dy);
+      for (var i = 1; i < trait.length; i++) {
+        chemin.lineTo(place(trait[i]).dx, place(trait[i]).dy);
+      }
+      canvas.drawPath(chemin, pinceau);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PeintreSignaturePosee ancien) => ancien.traits != traits;
+}
+
 class Accueil extends StatefulWidget {
   const Accueil({super.key});
 
@@ -916,8 +955,25 @@ class _AccueilState extends State<Accueil> {
       return;
     }
 
+    // Une signature flotte au-dessus de la page jusqu'à l'enregistrement :
+    // la redimensionner ne fait que changer son cadre. C'est instantané, et
+    // surtout ça n'efface rien. Quand elle était écrite dans le PDF dès sa
+    // pose, il fallait repeindre l'ancienne place à chaque geste, et ce coup
+    // de blanc emportait tout ce qui se trouvait entre les deux tailles —
+    // titres et débuts de lignes du document disparaissaient pour de bon.
+    if (traits != null) {
+      final avant = await _etatActuel(doc);
+      setState(() {
+        historique.add(avant);
+        futur.clear();
+        mot.zone = nouvelle;
+        statut = "Signature redimensionnée";
+      });
+      return;
+    }
+
     // Un repère vide n'a rien dans la page : son cadre seul change.
-    if (traits == null && mot.texte.isEmpty) {
+    if (mot.texte.isEmpty) {
       setState(() {
         mot.zone = nouvelle;
         statut = "Cadre redimensionné";
@@ -932,30 +988,21 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[0];
-      // On efface l'ancienne place : en agrandissant, l'ancien tracé serait
-      // recouvert, mais en réduisant il faut nettoyer ce qui dépasse.
-      final aEffacer = _rectEffacement(mot).expandToInclude(nouvelle);
-      _effacerRect(page, aEffacer, mot);
+      // On efface l'ancienne place, et elle seule : le nouveau texte est
+      // dessiné par-dessus ce qui reste. Effacer aussi la nouvelle place,
+      // comme on le faisait, revenait à repeindre tout l'espace entre les
+      // deux — et à emporter le contenu du document qui s'y trouvait.
+      _effacerRect(page, _rectEffacement(mot), mot);
 
-      if (traits != null) {
-        _tracerSignature(page, traits, nouvelle);
-        setState(() {
-          mot.zone = nouvelle;
-          statut = "Signature redimensionnée";
-        });
-        await _rafraichirApercuOcr(doc);
-      } else {
-        final tailleActuelle = _dessinTexte(mot, mot.zone).police.size;
-        final facteur = mot.zone.width <= 0
-            ? 1.0
-            : nouvelle.width / mot.zone.width;
-        mot.zone = nouvelle;
-        mot.tailleManuelle = (tailleActuelle * facteur).clamp(4.0, 96.0);
-        _ecrire(page, mot, mot.zone);
+      final tailleActuelle = _dessinTexte(mot, mot.zone).police.size;
+      final facteur =
+          mot.zone.width <= 0 ? 1.0 : nouvelle.width / mot.zone.width;
+      mot.zone = nouvelle;
+      mot.tailleManuelle = (tailleActuelle * facteur).clamp(4.0, 96.0);
+      _ecrire(page, mot, mot.zone);
 
-        setState(() => statut = "Ligne redimensionnée");
-        if (imageDeFond != null) await _rafraichirApercuOcr(doc);
-      }
+      setState(() => statut = "Ligne redimensionnée");
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
     } catch (e) {
       historique.removeLast();
       await _restaurerEtat(avant);
@@ -978,6 +1025,12 @@ class _AccueilState extends State<Accueil> {
         ),
       );
 
+  /// Pose la signature sur la page. Elle n'est pas écrite dans le PDF :
+  /// elle y flotte au-dessus jusqu'à l'enregistrement. C'est ce qui permet
+  /// de la déplacer et de la redimensionner autant qu'on veut sans jamais
+  /// rien abîmer — l'écrire tout de suite obligeait, à chaque geste, à
+  /// repeindre sa place d'avant, et ce coup de blanc emportait le texte du
+  /// document qui se trouvait dessous ou entre les deux positions.
   Future<void> _poserSignature(double x, double y) async {
     final traits = signatureNormalisee;
     final doc = document;
@@ -1001,11 +1054,6 @@ class _AccueilState extends State<Accueil> {
         haut = taillePage.height - hauteur;
       }
 
-      final page = doc.pages[0];
-      _tracerSignature(page, traits, Rect.fromLTWH(gauche, haut, largeur, hauteur));
-
-      // Un repère (sans texte) sur la signature : elle devient sélectionnable
-      // et déplaçable comme le reste, sans traitement particulier.
       final zone = Rect.fromLTWH(gauche, haut, largeur, hauteur);
       final posee = MotDetecte("", zone,
           traitsSignature: traits, ratioSignature: signatureRatio);
@@ -1020,11 +1068,8 @@ class _AccueilState extends State<Accueil> {
         statut = "Signature posée — tirez-la où vous voulez, les coins pour la taille";
       });
 
-      if (imageDeFond == null) {
-        await _activerApercuImage(doc);
-      } else {
-        await _rafraichirApercuOcr(doc);
-      }
+      // Rien n'a été écrit dans la page : inutile d'en refaire le rendu.
+      if (imageDeFond == null) await _activerApercuImage(doc);
     } catch (e) {
       historique.removeLast();
       await _restaurerEtat(avant);
@@ -1789,6 +1834,10 @@ class _AccueilState extends State<Accueil> {
   /// touche une ligne. Pendant la frappe, en revanche, il suit le texte
   /// tapé : sans ça la fin de la ligne sortirait du champ et serait coupée.
   Rect _rectAffichage(MotDetecte mot, double echelle) {
+    // Pendant qu'on tire une poignée, le cadre (et donc ce qu'il contient)
+    // suit le doigt : on voit la taille qu'on obtiendra avant de lâcher.
+    final vise = motRedimensionne == mot ? rectRedimension : null;
+    if (vise != null) return vise;
     if (motEnEditionDirecte != mot) return _rectContenu(mot);
 
     final texte = controleurDirect.text;
@@ -2135,7 +2184,9 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       const dpi = _dpiOcr;
-      final octetsDoc = Uint8List.fromList(await doc.save());
+      // Les signatures posées font partie de la page qu'on fige : elles
+      // entrent donc dans l'image, et leurs cadres flottants disparaissent.
+      final octetsDoc = Uint8List.fromList(await _octetsAvecSignatures(doc));
       PdfRaster? raster;
       await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
         raster = r;
@@ -2182,6 +2233,8 @@ class _AccueilState extends State<Accueil> {
         imageDeFond = pngOctets;
         imageDecodee = img.decodePng(pngOctets);
         echelleOcr = dpi / 72.0;
+        mots = mots.where((m) => m.traitsSignature == null).toList();
+        selection.removeWhere((m) => m.traitsSignature != null);
         for (final m in mots) {
           m.redessine = false;
         }
@@ -2572,9 +2625,10 @@ class _AccueilState extends State<Accueil> {
   Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) =>
       _deplacerGroupe([mot], dx, dy);
 
-  /// Déplace une signature posée : on efface sa place et on refait son tracé
-  /// un peu plus loin. Elle glisse librement sur toute la page et s'arrête
-  /// au bord, sans rien bousculer autour d'elle.
+  /// Déplace une signature posée. Elle flotte au-dessus de la page jusqu'à
+  /// l'enregistrement : la déplacer ne fait donc que changer son cadre —
+  /// instantané, et sans rien effacer sur son passage. Elle glisse librement
+  /// et s'arrête au bord de la page.
   Future<void> _deplacerSignature(
       MotDetecte mot, double dx, double dy) async {
     final traits = mot.traitsSignature;
@@ -2600,27 +2654,13 @@ class _AccueilState extends State<Accueil> {
       return;
     }
 
-    setState(() => _occupe = true);
     final avant = await _etatActuel(doc);
-    try {
+    setState(() {
       historique.add(avant);
       futur.clear();
-
-      final page = doc.pages[0];
-      _effacerRect(page, ancienne.inflate(2), mot);
-      _tracerSignature(page, traits, nouvelle);
-      setState(() {
-        mot.zone = nouvelle;
-        statut = "Signature déplacée";
-      });
-      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
-    } catch (e) {
-      historique.removeLast();
-      await _restaurerEtat(avant);
-      setState(() => statut = "Déplacement annulé (rien n'a été perdu) : $e");
-    } finally {
-      setState(() => _occupe = false);
-    }
+      mot.zone = nouvelle;
+      statut = "Signature déplacée";
+    });
   }
 
   /// Déplace ensemble une ou plusieurs lignes choisies (sélection multiple),
@@ -2972,13 +3012,33 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Octets du PDF, signatures comprises. Elles sont écrites ici et
+  /// nulle part ailleurs, sur une copie : le document en cours d'édition
+  /// reste vierge de leur encre, si bien qu'après un enregistrement on peut
+  /// encore les déplacer, les redimensionner ou les retirer.
+  Future<List<int>> _octetsAvecSignatures(PdfDocument doc) async {
+    final signatures = mots.where((m) => m.traitsSignature != null).toList();
+    final octets = await doc.save();
+    if (signatures.isEmpty) return octets;
+    final copie = PdfDocument(inputBytes: Uint8List.fromList(octets));
+    try {
+      final page = copie.pages[0];
+      for (final signature in signatures) {
+        _tracerSignature(page, signature.traitsSignature!, signature.zone);
+      }
+      return await copie.save();
+    } finally {
+      copie.dispose();
+    }
+  }
+
   Future<void> _enregistrer() async {
     final doc = document;
     if (doc == null) return;
 
     setState(() => enregistrementEnCours = true);
     try {
-      final List<int> octets = await doc.save();
+      final List<int> octets = await _octetsAvecSignatures(doc);
       final dossier = await getTemporaryDirectory();
       final horodatage = DateTime.now().millisecondsSinceEpoch;
       final fichier = File('${dossier.path}/pdf_modifie_$horodatage.pdf');
@@ -3015,8 +3075,22 @@ class _AccueilState extends State<Accueil> {
     final doc = document;
     if (doc == null || _occupe) return;
 
+    // Une signature n'est pas encore écrite dans la page : la retirer de la
+    // liste suffit, sans coup de blanc là où elle se trouvait.
+    if (mot.traitsSignature != null) {
+      final avant = await _etatActuel(doc);
+      setState(() {
+        historique.add(avant);
+        futur.clear();
+        mots = mots.where((m) => m != mot).toList();
+        selection.remove(mot);
+        statut = "Signature retirée";
+      });
+      return;
+    }
+
     // Rien d'écrit dans la page pour un simple repère : le cadre suffit.
-    if (mot.texte.isEmpty && mot.traitsSignature == null) {
+    if (mot.texte.isEmpty) {
       _retirerRepere(mot);
       return;
     }
@@ -3046,15 +3120,65 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Repose la même signature un peu plus loin : signer à deux endroits
+  /// d'un document ne doit pas obliger à ressortir le répertoire.
+  Future<void> _dupliquerSignature(MotDetecte mot) async {
+    final traits = mot.traitsSignature;
+    final doc = document;
+    if (traits == null || doc == null || _occupe) return;
+
+    const decalage = 16.0;
+    var gauche = mot.zone.left + decalage;
+    var haut = mot.zone.top + decalage;
+    if (gauche + mot.zone.width > taillePage.width) {
+      gauche = taillePage.width - mot.zone.width;
+    }
+    if (haut + mot.zone.height > taillePage.height) {
+      haut = taillePage.height - mot.zone.height;
+    }
+    final copie = MotDetecte(
+      "",
+      Rect.fromLTWH(gauche, haut, mot.zone.width, mot.zone.height),
+      traitsSignature: traits,
+      ratioSignature: mot.ratioSignature,
+    );
+
+    final avant = await _etatActuel(doc);
+    setState(() {
+      historique.add(avant);
+      futur.clear();
+      mots = [...mots, copie];
+      selection
+        ..clear()
+        ..add(copie);
+      statut = "Signature dupliquée — tirez-la à sa place";
+    });
+  }
+
   /// Actions moins courantes, rangées derrière « … » pour garder la barre
   /// principale courte.
   Future<void> _plusDActions(MotDetecte mot) async {
+    final estSignature = mot.traitsSignature != null;
     await showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Une signature n'a ni texte à copier, ni encre à gommer dans la
+            // page (elle flotte au-dessus jusqu'à l'enregistrement), et la
+            // corbeille de la barre la retire déjà : la seule chose qui lui
+            // manque, c'est de pouvoir se reposer ailleurs.
+            if (estSignature)
+              ListTile(
+                leading: const Icon(Icons.content_copy),
+                title: const Text("Dupliquer la signature"),
+                subtitle: const Text("Pour signer à un deuxième endroit"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _dupliquerSignature(mot);
+                },
+              ),
             if (mot.texte.isNotEmpty)
               ListTile(
                 leading: const Icon(Icons.content_copy),
@@ -3064,15 +3188,17 @@ class _AccueilState extends State<Accueil> {
                   _copierLigne();
                 },
               ),
-            ListTile(
-              leading: const Icon(Icons.cleaning_services),
-              title: const Text("Effacer le fond (gomme)"),
-              subtitle: const Text("Efface l'encre, garde le cadre en place"),
-              onTap: () {
-                Navigator.pop(ctx);
-                _effacerZone(mot);
-              },
-            ),
+            if (!estSignature)
+              ListTile(
+                leading: const Icon(Icons.cleaning_services),
+                title: const Text("Effacer le fond (gomme)"),
+                subtitle:
+                    const Text("Efface l'encre, garde le cadre en place"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _effacerZone(mot);
+                },
+              ),
             if (mot.traitsSignature == null)
               ListTile(
                 leading: const Icon(Icons.tune),
@@ -3083,15 +3209,16 @@ class _AccueilState extends State<Accueil> {
                   _modifierMot(mot);
                 },
               ),
-            ListTile(
-              leading: const Icon(Icons.crop_free),
-              title: const Text("Retirer le cadre seulement"),
-              subtitle: const Text("Ne touche pas à la page"),
-              onTap: () {
-                Navigator.pop(ctx);
-                _retirerRepere(mot);
-              },
-            ),
+            if (!estSignature)
+              ListTile(
+                leading: const Icon(Icons.crop_free),
+                title: const Text("Retirer le cadre seulement"),
+                subtitle: const Text("Ne touche pas à la page"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _retirerRepere(mot);
+                },
+              ),
             const SizedBox(height: 8),
           ],
         ),
@@ -3680,14 +3807,24 @@ class _AccueilState extends State<Accueil> {
                                         selectionne: selection.contains(mot),
                                         groupe: selection.length > 1,
                                       ),
-                                      // La page à l'écran est l'image du
-                                      // PDF, refaite après chaque
-                                      // modification : le cadre reste donc
+                                      // Une signature n'est pas dans le
+                                      // fichier tant qu'on n'a pas
+                                      // enregistré : c'est son cadre qui la
+                                      // dessine, ce qui la rend libre de se
+                                      // déplacer et de changer de taille.
+                                      // Pour le reste, la page à l'écran est
+                                      // l'image du PDF, refaite après chaque
+                                      // modification : le cadre est alors
                                       // transparent et ne cache jamais rien.
                                       // Seul un document sans image de page
                                       // (texte vectoriel, non scanné) fait
                                       // afficher le texte par le cadre.
-                                      child: (imageDeFond != null ||
+                                      child: mot.traitsSignature != null
+                                          ? CustomPaint(
+                                              painter: _PeintreSignaturePosee(
+                                                  mot.traitsSignature!),
+                                            )
+                                          : (imageDeFond != null ||
                                               mot.texte.isEmpty)
                                           ? null
                                           : Align(
