@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
+import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
@@ -1361,6 +1362,184 @@ class _AccueilState extends State<Accueil> {
     } catch (e) {
       setState(() => statut = "Erreur : $e");
     }
+  }
+
+  /// Blanchit le fond d'une photo pour qu'elle ressemble à un document
+  /// scanné. Une photo prise à la main a un papier gris et inégal : le
+  /// niveau du papier est relevé sur l'image elle-même (un haut percentile
+  /// de la luminance, insensible à l'encre), puis les valeurs sont étirées
+  /// entre ce niveau et un noir franc. Le traitement s'applique aux trois
+  /// couches séparément : un tampon bleu ou un logo en couleur garde sa
+  /// teinte, là où un passage en noir et blanc les aurait effacés.
+  img.Image _rehausserScan(img.Image source) {
+    final histogramme = List<int>.filled(256, 0);
+    var total = 0;
+    for (var y = 0; y < source.height; y += 3) {
+      for (var x = 0; x < source.width; x += 3) {
+        final p = source.getPixel(x, y);
+        final luminance =
+            (0.299 * p.r + 0.587 * p.g + 0.114 * p.b).round().clamp(0, 255);
+        histogramme[luminance]++;
+        total++;
+      }
+    }
+    if (total == 0) return source;
+
+    // Le papier est ce qu'il y a de plus clair et de plus étendu : on prend
+    // le niveau au-dessus duquel se trouvent 15 % des points.
+    var cumul = 0;
+    var papier = 255;
+    for (var v = 255; v >= 0; v--) {
+      cumul += histogramme[v];
+      if (cumul > total * 0.15) {
+        papier = v;
+        break;
+      }
+    }
+    if (papier < 70) papier = 70;
+    final noir = (papier * 0.35).round();
+    final table = List<int>.generate(256, (v) {
+      if (v <= noir) return 0;
+      if (v >= papier) return 255;
+      return ((v - noir) * 255 / (papier - noir)).round().clamp(0, 255);
+    });
+
+    final sortie = img.Image(
+        width: source.width, height: source.height, numChannels: 3);
+    for (var y = 0; y < source.height; y++) {
+      for (var x = 0; x < source.width; x++) {
+        final p = source.getPixel(x, y);
+        sortie.setPixelRgb(
+          x,
+          y,
+          table[p.r.toInt().clamp(0, 255)],
+          table[p.g.toInt().clamp(0, 255)],
+          table[p.b.toInt().clamp(0, 255)],
+        );
+      }
+    }
+    return sortie;
+  }
+
+  /// Transforme une photo en document : la page prend les proportions de
+  /// l'image, qui la remplit sans marge, et le tout devient un PDF ouvert
+  /// en lecture — de là, tout le reste de l'application s'applique
+  /// (reconnaissance de texte, modification, signature, enregistrement).
+  Future<void> _scannerDocument(ImageSource source, bool blanchir) async {
+    if (_occupe) return;
+    XFile? photo;
+    try {
+      photo = await ImagePicker().pickImage(
+        source: source,
+        // Assez fin pour que le texte reste lisible et reconnaissable
+        // (environ 210 points par pouce sur une A4), assez sobre pour que
+        // le traitement ne fige pas l'application.
+        maxWidth: 1800,
+        imageQuality: 92,
+      );
+    } catch (e) {
+      setState(() => statut = "Appareil photo indisponible : $e");
+      return;
+    }
+    if (photo == null) return;
+
+    setState(() {
+      _occupe = true;
+      statut = "Traitement de la photo...";
+    });
+    try {
+      final octets = await photo.readAsBytes();
+      var image = img.decodeImage(octets);
+      if (image == null) {
+        setState(() => statut = "Photo illisible");
+        return;
+      }
+      // Une photo porte son orientation dans ses métadonnées : sans ça, un
+      // document pris en tenant le téléphone de travers arrivait couché.
+      image = img.bakeOrientation(image);
+      if (blanchir) image = _rehausserScan(image);
+
+      final doc = PdfDocument();
+      doc.pageSettings.margins.all = 0;
+      const largeurPage = 595.0;
+      final hauteurPage = largeurPage * image.height / image.width;
+      doc.pageSettings.size = Size(largeurPage, hauteurPage);
+      final page = doc.pages.add();
+      page.graphics.drawImage(
+        PdfBitmap(Uint8List.fromList(img.encodeJpg(image, quality: 88))),
+        Rect.fromLTWH(0, 0, largeurPage, hauteurPage),
+      );
+      final octetsPdf = Uint8List.fromList(await doc.save());
+      doc.dispose();
+
+      if (!mounted) return;
+      setState(() => _occupe = false);
+      await _chargerPourLecture(octetsPdf);
+      if (mounted) {
+        setState(() => statut =
+            "Document scanné — appuyez sur le crayon pour le modifier");
+      }
+    } catch (e) {
+      setState(() => statut = "Scan impossible : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Propose de scanner : par l'appareil photo, ou depuis une photo déjà
+  /// prise. Le blanchiment du fond est actif par défaut — c'est ce qu'on
+  /// attend d'un scan — mais se coupe pour une page en couleur qu'on veut
+  /// garder telle quelle.
+  Future<void> _scanner() async {
+    var blanchir = true;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text("Scanner un document",
+                      style: TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold)),
+                ),
+              ),
+              SwitchListTile(
+                value: blanchir,
+                onChanged: (v) => setSheetState(() => blanchir = v),
+                secondary: const Icon(Icons.auto_fix_high),
+                title: const Text("Blanchir le fond"),
+                subtitle: const Text(
+                    "Le papier devient blanc et l'encre franche, comme un "
+                    "vrai scan. Les couleurs sont conservées."),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.photo_camera),
+                title: const Text("Prendre une photo"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _scannerDocument(ImageSource.camera, blanchir);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text("Choisir une photo déjà prise"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _scannerDocument(ImageSource.gallery, blanchir);
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _importerDocument() async {
@@ -3961,6 +4140,9 @@ class _AccueilState extends State<Accueil> {
           case "ouvrir":
             _importerDocument();
             break;
+          case "scanner":
+            _scanner();
+            break;
           case "fermer":
             _fermerDocument();
             break;
@@ -3999,6 +4181,15 @@ class _AccueilState extends State<Accueil> {
               subtitle: Text("Abandonne toutes les modifications"),
             ),
           ),
+        const PopupMenuItem(
+          value: "scanner",
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.document_scanner),
+            title: Text("Scanner un document"),
+            subtitle: Text("Appareil photo ou photo existante"),
+          ),
+        ),
         const PopupMenuItem(
           value: "ouvrir",
           child: ListTile(
@@ -4164,6 +4355,11 @@ class _AccueilState extends State<Accueil> {
         title: const Text("Mon éditeur PDF"),
         actions: [
           IconButton(
+            icon: const Icon(Icons.document_scanner),
+            tooltip: "Scanner un document (appareil photo)",
+            onPressed: _occupe ? null : _scanner,
+          ),
+          IconButton(
             icon: const Icon(Icons.folder_open),
             tooltip: "Importer un document",
             onPressed: _importerDocument,
@@ -4214,6 +4410,12 @@ class _AccueilState extends State<Accueil> {
                               ),
                               const SizedBox(height: 16),
                               FilledButton.icon(
+                                onPressed: _scanner,
+                                icon: const Icon(Icons.document_scanner),
+                                label: const Text("Scanner un document"),
+                              ),
+                              const SizedBox(height: 10),
+                              OutlinedButton.icon(
                                 onPressed: _importerDocument,
                                 icon: const Icon(Icons.folder_open),
                                 label: const Text("Ouvrir un document"),
