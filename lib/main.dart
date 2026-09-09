@@ -455,6 +455,47 @@ class _AccueilState extends State<Accueil> {
 
   bool _occupe = false;
 
+  /// Ligne d'où est parti un balayage de sélection (glisser du doigt en
+  /// travers de plusieurs lignes). Tant qu'il dure, le glissement choisit
+  /// des lignes au lieu de déplacer la sélection.
+  MotDetecte? balayageDepart;
+
+  /// Étend la sélection à toutes les lignes comprises entre celle d'où est
+  /// parti le doigt et la hauteur qu'il a atteinte. Choisir plusieurs lignes
+  /// demandait jusqu'ici un double-appui sur chacune : pour un paragraphe
+  /// entier, c'était intenable.
+  void _etendreBalayage(double yPage) {
+    final depart = balayageDepart;
+    if (depart == null) return;
+    final origine = depart.zone.center.dy;
+    final haut = origine < yPage ? origine : yPage;
+    final bas = origine < yPage ? yPage : origine;
+
+    // Bornée à la colonne où l'on a commencé : sur un document en deux
+    // colonnes, un balayage vertical aurait sinon emporté les lignes d'en
+    // face, à la même hauteur mais sans rapport.
+    const marge = 20.0;
+    final choisies = <MotDetecte>{depart};
+    for (final m in mots) {
+      if (m.texte.isEmpty || m.traitsSignature != null) continue;
+      final milieu = m.zone.center.dy;
+      if (milieu < haut || milieu > bas) continue;
+      if (m.zone.left > depart.zone.right + marge) continue;
+      if (m.zone.right < depart.zone.left - marge) continue;
+      choisies.add(m);
+    }
+
+    if (choisies.length == selection.length &&
+        selection.containsAll(choisies)) {
+      return;
+    }
+    setState(() {
+      selection
+        ..clear()
+        ..addAll(choisies);
+    });
+  }
+
   /// Les outils du bord droit sont repliés par défaut derrière un seul
   /// bouton : en colonne, ils recouvraient le bord droit de la page.
   bool outilsOuverts = false;
@@ -4743,36 +4784,71 @@ class _AccueilState extends State<Accueil> {
                                     // Le glisser ne déplace que si la ligne
                                     // fait partie de la sélection ; sinon le
                                     // geste passe à la page (défilement/zoom).
-                                    onPanStart: !selection.contains(mot)
-                                        ? null
-                                        : (_) => setState(() {
-                                              groupeEnDeplacement = true;
-                                              deplacementGroupeEnCours =
-                                                  Offset.zero;
-                                            }),
-                                    onPanUpdate: !selection.contains(mot)
-                                        ? null
-                                        : (details) => setState(() {
-                                              deplacementGroupeEnCours +=
-                                                  details.delta;
-                                            }),
-                                    onPanEnd: !selection.contains(mot)
-                                        ? null
-                                        : (_) async {
-                                            final dx =
-                                                deplacementGroupeEnCours.dx /
-                                                    echelle;
-                                            final dy =
-                                                deplacementGroupeEnCours.dy /
-                                                    echelle;
-                                            setState(() {
-                                              groupeEnDeplacement = false;
-                                              deplacementGroupeEnCours =
-                                                  Offset.zero;
-                                            });
-                                            await _deplacerGroupe(
-                                                selection.toList(), dx, dy);
-                                          },
+                                    // Le glisser fait deux choses selon
+                                    // l'état de la ligne : sur une ligne
+                                    // déjà choisie il déplace toute la
+                                    // sélection ; sur une ligne qui ne l'est
+                                    // pas, il balaie — on part d'une ligne et
+                                    // on descend, toutes celles traversées
+                                    // sont prises. Choisir un paragraphe
+                                    // demandait sinon un double-appui ligne
+                                    // par ligne.
+                                    onPanStart: (_) {
+                                      if (selection.contains(mot)) {
+                                        setState(() {
+                                          groupeEnDeplacement = true;
+                                          deplacementGroupeEnCours =
+                                              Offset.zero;
+                                        });
+                                        return;
+                                      }
+                                      setState(() {
+                                        balayageDepart = mot;
+                                        selection
+                                          ..clear()
+                                          ..add(mot);
+                                        statut = "Glissez pour prendre les "
+                                            "lignes voisines";
+                                      });
+                                    },
+                                    onPanUpdate: (details) {
+                                      if (balayageDepart != null) {
+                                        final rect =
+                                            _rectAffichage(mot, echelle);
+                                        _etendreBalayage(rect.top +
+                                            details.localPosition.dy /
+                                                echelle);
+                                        return;
+                                      }
+                                      if (!groupeEnDeplacement) return;
+                                      setState(() {
+                                        deplacementGroupeEnCours +=
+                                            details.delta;
+                                      });
+                                    },
+                                    onPanEnd: (_) async {
+                                      if (balayageDepart != null) {
+                                        setState(() {
+                                          balayageDepart = null;
+                                          statut = selection.length > 1
+                                              ? "${selection.length} lignes "
+                                                  "choisies"
+                                              : "Ligne choisie";
+                                        });
+                                        return;
+                                      }
+                                      if (!groupeEnDeplacement) return;
+                                      final dx =
+                                          deplacementGroupeEnCours.dx / echelle;
+                                      final dy =
+                                          deplacementGroupeEnCours.dy / echelle;
+                                      setState(() {
+                                        groupeEnDeplacement = false;
+                                        deplacementGroupeEnCours = Offset.zero;
+                                      });
+                                      await _deplacerGroupe(
+                                          selection.toList(), dx, dy);
+                                    },
                                     child: CustomPaint(
                                       painter: _CadreLigne(
                                         selectionne: selection.contains(mot),
