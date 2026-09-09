@@ -1547,15 +1547,84 @@ class _AccueilState extends State<Accueil> {
       if (!mounted) return;
       setState(() => _occupe = false);
       await _chargerPourLecture(octetsPdf);
-      if (mounted) {
-        setState(() => statut = images.length > 1
-            ? "${images.length} pages scannées — seule la première est "
-                "modifiable pour l'instant"
-            : "Document scanné — appuyez sur le crayon pour le modifier");
-      }
+      if (!mounted) return;
+      setState(() => statut = images.length > 1
+          ? "${images.length} pages scannées"
+          : "Document scanné");
+      // Scanner est une tâche qui se suffit à elle-même : on propose de la
+      // terminer sur place — partager, envoyer en image — sans obliger à
+      // passer par l'éditeur pour quelqu'un qui voulait seulement un PDF.
+      await _apresScan();
     } finally {
       doc.dispose();
     }
+  }
+
+  /// Ce qu'on fait d'un document qu'on vient de scanner. Le proposer tout
+  /// de suite évite d'avoir à deviner que l'enregistrement se trouve dans la
+  /// barre du haut : scanner pour envoyer est une tâche entière, qui n'a pas
+  /// à traverser l'éditeur.
+  Future<void> _apresScan() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text("Document scanné",
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.picture_as_pdf),
+              title: const Text("Enregistrer / partager en PDF"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _enregistrer();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.image_outlined),
+              title: const Text("Envoyer en image"),
+              subtitle: const Text("Pour un message, plus simple qu'un PDF"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _exporterImage();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.draw),
+              title: const Text("Signer / annoter"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _passerEnAnnotation();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit),
+              title: const Text("Modifier le texte"),
+              subtitle: const Text("Lance la reconnaissance de caractères"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _passerEnModification();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.visibility),
+              title: const Text("Le garder à l'écran, c'est tout"),
+              onTap: () => Navigator.pop(ctx),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
   }
 
   /// Scan d'une page simple : une photo, un document.
@@ -1809,6 +1878,52 @@ class _AccueilState extends State<Accueil> {
       });
     } catch (e) {
       setState(() => statut = "Erreur d'ouverture : $e");
+    }
+  }
+
+  /// Ouvre le document pour le signer ou l'annoter, sans lancer l'analyse
+  /// du texte. Signer un PDF, y poser une zone de texte ou remplir un
+  /// formulaire n'a aucun besoin de savoir où sont les lignes existantes :
+  /// exiger la reconnaissance de caractères d'abord — plusieurs secondes
+  /// sur un scan, et parfois un échec — revenait à faire dépendre une
+  /// fonction d'une autre sans raison.
+  Future<void> _passerEnAnnotation() async {
+    final octets = octetsDocument;
+    if (octets == null || _occupe) return;
+    setState(() {
+      _occupe = true;
+      statut = "Ouverture du document...";
+    });
+    try {
+      await _chargerPolices();
+      document?.dispose();
+      historique.clear();
+      futur.clear();
+      final doc = PdfDocument(inputBytes: octets);
+      final page = doc.pages[0];
+      if (!mounted) return;
+      setState(() {
+        document = doc;
+        mots = [];
+        selection.clear();
+        imageOrigine = null;
+        taillePage = Size(page.size.width, page.size.height);
+        imageDeFond = null;
+        imageDecodee = null;
+      });
+      // L'image de la page sert à connaître la couleur du papier et à
+      // afficher le document tel qu'il est : elle est nécessaire même sans
+      // analyse du texte.
+      await _activerApercuImage(doc);
+      if (!mounted) return;
+      setState(() {
+        modeLecture = false;
+        statut = "Signez, ajoutez du texte, remplissez le formulaire";
+      });
+    } catch (e) {
+      setState(() => statut = "Ouverture impossible : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
     }
   }
 
@@ -4668,13 +4783,35 @@ class _AccueilState extends State<Accueil> {
           ),
         ],
       ),
+      // Deux portes d'entrée, et non une. Signer ou annoter n'exige pas
+      // l'analyse du texte : la réclamer d'abord faisait attendre plusieurs
+      // secondes, et parfois échouer, pour une fonction qui n'en avait pas
+      // besoin.
       floatingActionButton: apercuLecture == null || _occupe
           ? null
-          : FloatingActionButton.extended(
-              heroTag: "modifier",
-              onPressed: _passerEnModification,
-              icon: const Icon(Icons.edit),
-              label: const Text("Modifier"),
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                FloatingActionButton.extended(
+                  heroTag: "annoter",
+                  elevation: 2,
+                  backgroundColor:
+                      Theme.of(context).colorScheme.secondaryContainer,
+                  foregroundColor:
+                      Theme.of(context).colorScheme.onSecondaryContainer,
+                  onPressed: _passerEnAnnotation,
+                  icon: const Icon(Icons.draw),
+                  label: const Text("Signer / annoter"),
+                ),
+                const SizedBox(height: 10),
+                FloatingActionButton.extended(
+                  heroTag: "modifier",
+                  onPressed: _passerEnModification,
+                  icon: const Icon(Icons.edit),
+                  label: const Text("Modifier le texte"),
+                ),
+              ],
             ),
     );
   }
@@ -5022,7 +5159,7 @@ class _AccueilState extends State<Accueil> {
             child: _occupe ? const LinearProgressIndicator(minHeight: 3) : null,
           ),
           Expanded(
-            child: mots.isEmpty
+            child: document == null
                 ? const Center(child: CircularProgressIndicator())
                 : LayoutBuilder(
                     builder: (context, constraints) {
@@ -5657,7 +5794,7 @@ class _AccueilState extends State<Accueil> {
       // Les outils se replient derrière un seul bouton. En colonne, les six
       // recouvraient tout le bord droit de la page — sur un document dont le
       // contenu va jusqu'au bord, ils mangeaient le cachet et la signature.
-      floatingActionButton: mots.isEmpty
+      floatingActionButton: document == null
           ? null
           : Column(
               mainAxisSize: MainAxisSize.min,
