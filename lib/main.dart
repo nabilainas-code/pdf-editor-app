@@ -310,6 +310,41 @@ class _PeintreSignaturePosee extends CustomPainter {
   bool shouldRepaint(_PeintreSignaturePosee ancien) => ancien.traits != traits;
 }
 
+/// Une ligne mise de côté par « copier », avec tout ce qu'il faut pour la
+/// reposer à l'identique et sa place dans le bloc copié. Copier plusieurs
+/// lignes ne retenait auparavant que la dernière : chaque ligne garde donc
+/// ici son décalage par rapport au coin haut-gauche du bloc, ce qui permet
+/// de reposer l'ensemble en conservant les interlignes.
+class _LigneCopiee {
+  final String texte;
+  final Offset decalage;
+  final Size taille;
+  final bool gras;
+  final bool italique;
+  final PdfFontFamily famille;
+  final PdfColor? couleur;
+  final double? tailleManuelle;
+  final double? tailleAuto;
+
+  /// Pixels réels de la ligne (page scannée uniquement) : coller pose cette
+  /// image telle quelle plutôt que de réécrire le texte, pour garder
+  /// exactement la police du scan, qu'on ne saurait pas reproduire.
+  final Uint8List? image;
+
+  const _LigneCopiee({
+    required this.texte,
+    required this.decalage,
+    required this.taille,
+    required this.gras,
+    required this.italique,
+    required this.famille,
+    required this.couleur,
+    required this.tailleManuelle,
+    required this.tailleAuto,
+    required this.image,
+  });
+}
+
 class Accueil extends StatefulWidget {
   const Accueil({super.key});
 
@@ -353,21 +388,11 @@ class _AccueilState extends State<Accueil> {
   final List<Etat> historique = [];
   final List<Etat> futur = [];
 
-  String? texteCopie;
-  bool grasCopie = false;
-  bool italiqueCopie = false;
-  double? tailleAutoCopiee;
-  PdfFontFamily familleCopiee = PdfFontFamily.helvetica;
-  PdfColor? couleurCopiee;
-  double largeurCopiee = 100;
-  double hauteurCopiee = 14;
-  double? tailleCopiee;
-
-  /// Pixels réels de la ligne copiée (page scannée uniquement) : coller pose
-  /// cette image telle quelle plutôt que de réécrire le texte en Helvetica,
-  /// pour garder exactement la même police que « Monsieur » a partout
-  /// ailleurs sur la page.
-  Uint8List? imageCopiee;
+  /// Lignes mises de côté par « copier », dans l'ordre de lecture, avec la
+  /// taille du bloc qu'elles formaient. Coller les repose toutes d'un coup,
+  /// en gardant leurs écarts : deux lignes copiées restent deux lignes.
+  final List<_LigneCopiee> lignesCopiees = [];
+  Size tailleBlocCopie = Size.zero;
 
   bool enCollage = false;
 
@@ -3171,69 +3196,107 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
-  void _copierLigne() {
-    if (selection.length != 1) return;
-    final mot = selection.first;
-    if (mot.texte.isEmpty) return;
+  /// Copie toute la sélection, d'une ligne à autant qu'on veut. Chaque ligne
+  /// garde sa place dans le bloc, si bien que le collage restitue les
+  /// interlignes au lieu d'empiler les lignes au même endroit.
+  void _copier() {
+    final choisies = selection.where((m) => m.texte.isNotEmpty).toList()
+      ..sort((a, b) {
+        final vertical = a.zone.top.compareTo(b.zone.top);
+        return vertical != 0 ? vertical : a.zone.left.compareTo(b.zone.left);
+      });
+    if (choisies.isEmpty) return;
+
     // Même rectangle que pour un déplacement (marge + tiret/puce embarqués),
     // pour que l'image capturée corresponde exactement à ce qui est copié.
-    final rectCapture = _aligner(_etendreVersPuce(_rectDeplacement(mot)));
+    final rects = <MotDetecte, Rect>{
+      for (final m in choisies)
+        m: _aligner(_etendreVersPuce(_rectDeplacement(m))),
+    };
+    var bloc = rects[choisies.first]!;
+    for (final r in rects.values) {
+      bloc = bloc.expandToInclude(r);
+    }
+
     setState(() {
-      texteCopie = mot.texte;
-      grasCopie = mot.gras;
-      italiqueCopie = mot.italique;
-      tailleAutoCopiee = mot.tailleAuto;
-      familleCopiee = mot.famille;
-      couleurCopiee = mot.couleurTexte;
-      largeurCopiee = rectCapture.width;
-      hauteurCopiee = rectCapture.height;
-      tailleCopiee = mot.tailleManuelle;
-      // Même règle qu'au déplacement : on ne colle une photo que d'une
-      // ligne scannée. Une ligne dont on connaît la police est réécrite,
-      // ce qui reste net ; une ligne déjà redessinée n'a de toute façon
-      // plus ses pixels à jour dans l'image de la page.
-      imageCopiee = (mot.redessine || !mot.depuisOcr)
-          ? null
-          : _capturerZone(rectCapture);
-      statut = "Texte copié : collez-le ici ou dans n'importe quelle autre "
-          "application";
+      lignesCopiees
+        ..clear()
+        ..addAll([
+          for (final m in choisies)
+            _LigneCopiee(
+              texte: m.texte,
+              decalage: rects[m]!.topLeft - bloc.topLeft,
+              taille: rects[m]!.size,
+              gras: m.gras,
+              italique: m.italique,
+              famille: m.famille,
+              couleur: m.couleurTexte,
+              tailleManuelle: m.tailleManuelle,
+              tailleAuto: m.tailleAuto,
+              // Même règle qu'au déplacement : on ne garde une photo que
+              // d'une ligne scannée. Une ligne dont on connaît la police est
+              // réécrite, ce qui reste net ; une ligne déjà redessinée n'a
+              // de toute façon plus ses pixels à jour dans l'image.
+              image: (m.redessine || !m.depuisOcr)
+                  ? null
+                  : _capturerZone(rects[m]!),
+            )
+        ]);
+      tailleBlocCopie = bloc.size;
+      statut = choisies.length == 1
+          ? "Texte copié : collez-le ici ou dans n'importe quelle autre "
+              "application"
+          : "${choisies.length} lignes copiées : touchez l'endroit où les "
+              "coller";
     });
+
     // Aussi dans le presse-papiers d'Android : le texte est alors collable
     // partout ailleurs (SMS, mail, autre application), avec le collage
     // habituel du téléphone, et pas seulement dans ce document.
-    Clipboard.setData(ClipboardData(text: mot.texte));
+    Clipboard.setData(
+        ClipboardData(text: choisies.map((m) => m.texte).join('\n')));
   }
 
   void _activerModeCollage() {
-    if (texteCopie == null) return;
+    if (lignesCopiees.isEmpty) return;
     setState(() {
       enCollage = true;
       enAjoutTexte = false;
-      statut = "Touchez l'endroit de la page où coller le texte";
+      statut = lignesCopiees.length == 1
+          ? "Touchez l'endroit de la page où coller le texte"
+          : "Touchez l'endroit où coller les ${lignesCopiees.length} lignes";
     });
   }
 
-  /// Colle le texte copié à l'endroit touché sur la page, comme une
-  /// nouvelle ligne indépendante qu'on peut ensuite déplacer/modifier.
+  /// Colle les lignes copiées à l'endroit touché, le bloc centré sur le
+  /// doigt, chacune gardant sa place dans l'ensemble. Ce sont de nouvelles
+  /// lignes indépendantes, qu'on peut ensuite déplacer ou modifier.
   Future<void> _collerA(double xPage, double yPage) async {
     final doc = document;
-    final texte = texteCopie;
-    if (doc == null || texte == null || _occupe) return;
+    if (doc == null || lignesCopiees.isEmpty || _occupe) return;
 
-    final zoneVisee = Rect.fromLTWH(
-      xPage - largeurCopiee / 2,
-      yPage - hauteurCopiee / 2,
-      largeurCopiee,
-      hauteurCopiee,
+    final coin = Offset(
+      xPage - tailleBlocCopie.width / 2,
+      yPage - tailleBlocCopie.height / 2,
     );
+    final zones = [
+      for (final ligne in lignesCopiees)
+        Rect.fromLTWH(
+          coin.dx + ligne.decalage.dx,
+          coin.dy + ligne.decalage.dy,
+          ligne.taille.width,
+          ligne.taille.height,
+        )
+    ];
 
     // Coller ne fait qu'ajouter du texte à l'endroit touché : ça ne repeint
     // pas la destination, donc coller sur une ligne existante empile le
     // texte collé par-dessus au lieu de le remplacer, illisible. On demande
-    // un autre endroit plutôt que de produire ce chevauchement.
-    final surLigneExistante = mots.any(
-      (m) => m.texte.isNotEmpty && zoneVisee.inflate(3).overlaps(m.zone),
-    );
+    // un autre endroit plutôt que de produire ce chevauchement. La
+    // vérification porte sur tout le bloc, pas sur sa première ligne.
+    final surLigneExistante = mots.any((m) =>
+        m.texte.isNotEmpty &&
+        zones.any((z) => z.inflate(3).overlaps(m.zone)));
     if (surLigneExistante) {
       const message =
           "Cet endroit chevauche une ligne existante : touchez un espace "
@@ -3255,30 +3318,42 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
 
-      final zone = zoneVisee;
-
       final page = doc.pages[0];
-      final nouvelleLigne = MotDetecte(texte, zone,
-          gras: grasCopie,
-          tailleManuelle: tailleCopiee,
-          italique: italiqueCopie,
-          famille: familleCopiee,
-          couleurTexte: couleurCopiee,
-          tailleAuto: tailleAutoCopiee);
-      final image = imageCopiee;
-      if (image != null) {
-        page.graphics.drawImage(PdfBitmap(image), zone);
-      } else {
-        _ecrire(page, nouvelleLigne, zone);
+      final nouvelles = <MotDetecte>[];
+      for (var i = 0; i < lignesCopiees.length; i++) {
+        final ligne = lignesCopiees[i];
+        final zone = zones[i];
+        final posee = MotDetecte(
+          ligne.texte,
+          zone,
+          gras: ligne.gras,
+          tailleManuelle: ligne.tailleManuelle,
+          italique: ligne.italique,
+          famille: ligne.famille,
+          couleurTexte: ligne.couleur,
+          tailleAuto: ligne.tailleAuto,
+          // Une ligne posée en image vient d'un scan : la redéplacer devra
+          // repasser par la photo, pas par une réécriture.
+          depuisOcr: ligne.image != null,
+        );
+        final image = ligne.image;
+        if (image != null) {
+          page.graphics.drawImage(PdfBitmap(image), zone);
+        } else {
+          _ecrire(page, posee, zone);
+        }
+        nouvelles.add(posee);
       }
 
       setState(() {
-        mots = [...mots, nouvelleLigne];
+        mots = [...mots, ...nouvelles];
         selection
             ..clear()
-            ..add(nouvelleLigne);
+            ..addAll(nouvelles);
         enCollage = false;
-        statut = "Texte collé";
+        statut = nouvelles.length == 1
+            ? "Texte collé"
+            : "${nouvelles.length} lignes collées";
       });
 
       if (imageDeFond != null) {
@@ -3688,6 +3763,49 @@ class _AccueilState extends State<Accueil> {
     );
   }
 
+  /// Supprime tout ce qui est sélectionné d'un seul geste : l'encre est
+  /// effacée de la page et les cadres disparaissent. Une seule opération,
+  /// qu'un seul « annuler » défait — supprimer ligne par ligne obligeait
+  /// sinon à annuler autant de fois.
+  Future<void> _supprimerSelection() async {
+    final doc = document;
+    if (doc == null || _occupe) return;
+    final choisis = selection.toList();
+    if (choisis.isEmpty) return;
+    if (choisis.length == 1) return _supprimerObjet(choisis.first);
+
+    setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
+    try {
+      historique.add(avant);
+      futur.clear();
+
+      final page = doc.pages[0];
+      for (final mot in choisis) {
+        // Une signature n'est pas écrite dans la page tant qu'on n'a pas
+        // enregistré, et un cadre vide n'a rien sous lui : dans les deux
+        // cas il n'y a rien à effacer, seulement un cadre à retirer.
+        if (mot.traitsSignature == null && mot.texte.isNotEmpty) {
+          _effacerRect(page, _rectEffacement(mot), mot);
+        }
+      }
+
+      setState(() {
+        mots = mots.where((m) => !choisis.contains(m)).toList();
+        selection.clear();
+        statut = "${choisis.length} éléments supprimés";
+      });
+
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Suppression annulée (rien n'a été perdu) : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
   /// Actions moins courantes, rangées derrière « … » pour garder la barre
   /// principale courte.
   Future<void> _plusDActions(MotDetecte mot) async {
@@ -3718,7 +3836,7 @@ class _AccueilState extends State<Accueil> {
                 title: const Text("Copier le texte"),
                 onTap: () {
                   Navigator.pop(ctx);
-                  _copierLigne();
+                  _copier();
                 },
               ),
             if (!estSignature)
@@ -3891,8 +4009,10 @@ class _AccueilState extends State<Accueil> {
             ),
             tooltip: enCollage
                 ? "Touchez la page pour coller"
-                : "Coller le texte copié",
-            onPressed: (texteCopie == null || _occupe)
+                : (lignesCopiees.length > 1
+                    ? "Coller les ${lignesCopiees.length} lignes copiées"
+                    : "Coller le texte copié"),
+            onPressed: (lignesCopiees.isEmpty || _occupe)
                 ? null
                 : (enCollage
                     ? () => setState(() {
@@ -4071,10 +4191,11 @@ class _AccueilState extends State<Accueil> {
                       ),
                       IconButton(
                         icon: const Icon(Icons.content_copy, size: 20),
-                        tooltip: "Copier cette ligne",
-                        onPressed: selection.length == 1 &&
-                                selection.first.texte.isNotEmpty
-                            ? _copierLigne
+                        tooltip: selection.length > 1
+                            ? "Copier les ${selection.length} lignes"
+                            : "Copier cette ligne",
+                        onPressed: selection.any((m) => m.texte.isNotEmpty)
+                            ? _copier
                             : null,
                       ),
                       IconButton(
@@ -4086,11 +4207,17 @@ class _AccueilState extends State<Accueil> {
                       ),
                       IconButton(
                         icon: const Icon(Icons.delete_outline, size: 20),
-                        tooltip: "Retirer ce cadre (n'efface rien dans le PDF)",
-                        onPressed: selection.length == 1 &&
-                                selection.first.texte.isEmpty
-                            ? () => _retirerRepere(selection.first)
-                            : null,
+                        tooltip: selection.length > 1
+                            ? "Supprimer les ${selection.length} éléments"
+                            : "Retirer ce cadre (n'efface rien dans le PDF)",
+                        onPressed: _occupe
+                            ? null
+                            : (selection.length > 1
+                                ? _supprimerSelection
+                                : (selection.length == 1 &&
+                                        selection.first.texte.isEmpty
+                                    ? () => _retirerRepere(selection.first)
+                                    : null)),
                       ),
                       Expanded(
                         child: Text(
