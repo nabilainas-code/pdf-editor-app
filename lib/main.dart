@@ -549,8 +549,15 @@ class _AccueilState extends State<Accueil> {
     super.dispose();
   }
 
-  /// Ouvre l'écriture directement sur la ligne, dans la page.
-  void _ecrireSurLaLigne(MotDetecte mot) {
+  /// Ouvre l'écriture directement sur la ligne, dans la page. Ce qui était
+  /// tapé sur une autre ligne est validé avant : passer d'une ligne à
+  /// l'autre abandonnait la saisie en cours sans rien dire.
+  Future<void> _ecrireSurLaLigne(MotDetecte mot) async {
+    final enCours = motEnEditionDirecte;
+    if (enCours != null && enCours != mot) {
+      await _validerEditionDirecte();
+      if (!mounted) return;
+    }
     setState(() {
       // Écrire et poser un repère à effacer sont deux gestes contraires :
       // se retrouver dans les deux à la fois (barre d'écriture affichée et
@@ -712,6 +719,41 @@ class _AccueilState extends State<Accueil> {
         }),
       ],
     );
+  }
+
+  /// Porte le curseur sur la ligne du dessus ou du dessous, dans la même
+  /// colonne. Le curseur d'Android ne se déplace qu'à l'intérieur de son
+  /// propre champ : chaque ligne du document en étant un, on ne pouvait pas
+  /// le glisser d'une ligne à la suivante. Ces deux flèches font le trajet.
+  Future<void> _ligneVoisine(int sens) async {
+    final depart = motEnEditionDirecte;
+    if (depart == null || _occupe) return;
+
+    const marge = 20.0;
+    MotDetecte? cible;
+    var meilleurEcart = double.infinity;
+    for (final m in mots) {
+      if (identical(m, depart) || m.traitsSignature != null) continue;
+      final ecart = m.zone.center.dy - depart.zone.center.dy;
+      if (sens < 0 && ecart >= -0.5) continue;
+      if (sens > 0 && ecart <= 0.5) continue;
+      // Même colonne : sur un document en deux colonnes, la ligne « du
+      // dessous » ne doit pas être celle d'en face.
+      if (m.zone.left > depart.zone.right + marge) continue;
+      if (m.zone.right < depart.zone.left - marge) continue;
+      if (ecart.abs() < meilleurEcart) {
+        meilleurEcart = ecart.abs();
+        cible = m;
+      }
+    }
+
+    if (cible == null) {
+      setState(() => statut = sens < 0
+          ? "C'est déjà la première ligne de la colonne"
+          : "C'est déjà la dernière ligne de la colonne");
+      return;
+    }
+    await _ecrireSurLaLigne(cible);
   }
 
   void _annulerEditionDirecte() {
@@ -5009,19 +5051,25 @@ class _AccueilState extends State<Accueil> {
                 preferredSize: const Size.fromHeight(40),
                 child: ColoredBox(
                   color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  // Les outils défilent si l'écran est étroit, mais annuler
+                  // et valider restent toujours à leur place à droite : ce
+                  // sont les deux boutons dont on ne doit jamais avoir à
+                  // partir à la recherche.
                   child: Row(
                     children: [
+                      Expanded(
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                    children: [
                       const SizedBox(width: 8),
-                      SizedBox(
-                        height: 32,
-                        width: 32,
-                        child: Checkbox(
-                          value: grasDirect,
-                          onChanged: (v) =>
-                              setState(() => grasDirect = v ?? false),
-                        ),
+                      IconButton(
+                        icon: const Icon(Icons.format_bold, size: 20),
+                        tooltip: "Gras",
+                        isSelected: grasDirect,
+                        onPressed: () =>
+                            setState(() => grasDirect = !grasDirect),
                       ),
-                      const Text("Gras", style: TextStyle(fontSize: 13)),
                       // Un seul bouton pour toutes les actions de texte : la
                       // barre est déjà pleine, et les quatre tiennent dans un
                       // menu sans rien en chasser.
@@ -5067,7 +5115,10 @@ class _AccueilState extends State<Accueil> {
                           ),
                         ],
                       ),
-                      const Spacer(),
+                      // Un écart fixe, et non un Spacer : dans une barre qui
+                      // défile, la largeur n'est pas bornée et un ressort n'a
+                      // rien où s'étendre.
+                      const SizedBox(width: 10),
                       const Text("Taille", style: TextStyle(fontSize: 13)),
                       IconButton(
                         icon: const Icon(Icons.remove, size: 20),
@@ -5095,7 +5146,7 @@ class _AccueilState extends State<Accueil> {
                                   .clamp(4, 200);
                         }),
                       ),
-                      const Spacer(),
+                      const SizedBox(width: 10),
                       // Supprimer juste ici, là où l'on tape déjà : plus
                       // besoin de rectangle ni de passer par les réglages
                       // pour retirer une ligne.
@@ -5108,6 +5159,23 @@ class _AccueilState extends State<Accueil> {
                         icon: const Icon(Icons.keyboard_return, size: 20),
                         tooltip: "Ligne suivante (écarte ce qui gêne)",
                         onPressed: _occupe ? null : _ligneSuivante,
+                      ),
+                    ],
+                          ),
+                        ),
+                      ),
+                      // Porter le curseur sur la ligne du dessus ou du
+                      // dessous, ce que la poignée d'Android ne sait pas
+                      // faire : elle ne se déplace que dans son propre champ.
+                      IconButton(
+                        icon: const Icon(Icons.keyboard_arrow_up, size: 22),
+                        tooltip: "Ligne du dessus",
+                        onPressed: _occupe ? null : () => _ligneVoisine(-1),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.keyboard_arrow_down, size: 22),
+                        tooltip: "Ligne du dessous",
+                        onPressed: _occupe ? null : () => _ligneVoisine(1),
                       ),
                       IconButton(
                         icon: const Icon(Icons.close, size: 20),
