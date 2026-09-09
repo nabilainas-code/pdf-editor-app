@@ -347,6 +347,44 @@ class _LigneCopiee {
   });
 }
 
+/// Trace à l'écran le trait qu'on est en train de faire au doigt, avant
+/// qu'il ne soit écrit dans la page : sans lui, on dessinerait à l'aveugle
+/// et on ne verrait le résultat qu'une fois le doigt levé.
+class _PeintreTrace extends CustomPainter {
+  final List<Offset> points;
+  final double epaisseur;
+  final bool gomme;
+  _PeintreTrace(this.points, this.epaisseur, this.gomme);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (points.isEmpty) return;
+    final pinceau = Paint()
+      ..color = gomme ? Colors.white.withOpacity(0.85) : Colors.black
+      ..strokeWidth = epaisseur
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
+    if (points.length == 1) {
+      // Un point isolé : un trait minuscule, que le bout rond arrondit en
+      // disque. Évite d'avoir à sortir un mode de dessin pour un seul point.
+      canvas.drawLine(points.first, points.first.translate(0.1, 0), pinceau);
+      return;
+    }
+    final chemin = Path()..moveTo(points.first.dx, points.first.dy);
+    for (var i = 1; i < points.length; i++) {
+      chemin.lineTo(points[i].dx, points[i].dy);
+    }
+    canvas.drawPath(chemin, pinceau);
+  }
+
+  @override
+  bool shouldRepaint(_PeintreTrace ancien) =>
+      ancien.points.length != points.length ||
+      ancien.epaisseur != epaisseur ||
+      ancien.gomme != gomme;
+}
+
 class Accueil extends StatefulWidget {
   const Accueil({super.key});
 
@@ -455,6 +493,100 @@ class _AccueilState extends State<Accueil> {
   static const double _dpiApercu = 150.0;
 
   bool _occupe = false;
+
+  /// Outil de tracé au doigt actif : « stylo » pour écrire à la main,
+  /// « gomme » pour effacer au passage. Rien à sélectionner, aucun cadre à
+  /// poser puis à retirer : on touche la page, ça agit.
+  String? outilTrace;
+  final List<Offset> traceEnCours = [];
+  double epaisseurStylo = 2;
+  double epaisseurGomme = 8;
+
+  double get _epaisseurOutil =>
+      outilTrace == "gomme" ? epaisseurGomme : epaisseurStylo;
+
+  void _reglerEpaisseur(double delta) {
+    setState(() {
+      if (outilTrace == "gomme") {
+        epaisseurGomme = (epaisseurGomme + delta).clamp(2.0, 40.0);
+      } else {
+        epaisseurStylo = (epaisseurStylo + delta).clamp(0.5, 20.0);
+      }
+    });
+  }
+
+  void _choisirOutilTrace(String outil) {
+    setState(() {
+      outilTrace = outilTrace == outil ? null : outil;
+      traceEnCours.clear();
+      if (outilTrace != null) {
+        selection.clear();
+        motEnEditionDirecte = null;
+        enCollage = false;
+        enAjoutTexte = false;
+        statut = outilTrace == "gomme"
+            ? "Gomme : passez le doigt sur ce qu'il faut effacer"
+            : "Stylo : écrivez ou dessinez avec le doigt";
+      } else {
+        statut = "Outil rangé";
+      }
+    });
+  }
+
+  /// Écrit dans la page le trait qu'on vient de faire. Le stylo pose de
+  /// l'encre noire ; la gomme repose la couleur du papier relevée autour du
+  /// trait, si bien qu'elle disparaît sur un fond gris comme sur un blanc.
+  Future<void> _appliquerTrace(List<Offset> points, String outil) async {
+    final doc = document;
+    if (doc == null || points.isEmpty || _occupe) return;
+    setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
+    try {
+      historique.add(avant);
+      futur.clear();
+      final page = doc.pages[0];
+      final epaisseur = outil == "gomme" ? epaisseurGomme : epaisseurStylo;
+
+      if (outil == "gomme") {
+        var boite = Rect.fromCircle(center: points.first, radius: epaisseur);
+        for (final p in points) {
+          boite = boite.expandToInclude(
+              Rect.fromCircle(center: p, radius: epaisseur));
+        }
+        final brosse = PdfSolidBrush(_couleurLocale(boite));
+        // Un disque par point plutôt qu'un trait : les bouts sont ronds et
+        // le passage reste régulier même quand le doigt accélère.
+        for (final p in points) {
+          page.graphics.drawEllipse(
+            Rect.fromCircle(center: p, radius: epaisseur / 2),
+            brush: brosse,
+          );
+        }
+      } else {
+        final encre = PdfColor(0, 0, 0);
+        final stylo = PdfPen(encre, width: epaisseur);
+        if (points.length == 1) {
+          page.graphics.drawEllipse(
+            Rect.fromCircle(center: points.first, radius: epaisseur / 2),
+            brush: PdfSolidBrush(encre),
+          );
+        }
+        for (var i = 0; i + 1 < points.length; i++) {
+          page.graphics.drawLine(stylo, points[i], points[i + 1]);
+        }
+      }
+
+      setState(() => statut =
+          outil == "gomme" ? "Effacé au doigt" : "Tracé ajouté");
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Tracé annulé (rien n'a été perdu) : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
 
   /// Ligne d'où est parti un balayage de sélection (glisser du doigt en
   /// travers de plusieurs lignes). Tant qu'il dure, le glissement choisit
@@ -4008,23 +4140,25 @@ class _AccueilState extends State<Accueil> {
     await _modifierMot(nouvelleLigne);
   }
 
-  /// Pose un repère à l'endroit d'un appui long, pour attraper un résidu
-  /// (trait, tache) que l'OCR n'a pas détecté comme ligne. Il n'efface rien
-  /// tout seul : on le place d'abord (flèches / glisser), et c'est le bouton
-  /// gomme qui efface, quand on le décide.
+  /// Pose un cadre vide au milieu de ce qu'on a sous les yeux. Il sert à
+  /// délimiter une grande zone — l'effacer d'un coup, ou y récupérer
+  /// l'original du document.
+  ///
+  /// Il naissait autrefois d'un appui long n'importe où sur la page : il
+  /// suffisait de garder le doigt une seconde de trop en voulant écrire pour
+  /// en semer un, et il fallait ensuite le retrouver et le retirer. Pour les
+  /// petites retouches — un point, un trait, une lettre isolée — la gomme au
+  /// doigt fait le travail sans rien laisser derrière elle.
+  void _poserCadre() {
+    final centre = _centreVisible();
+    _ajouterZoneEffacee(centre.dx, centre.dy);
+  }
+
   void _ajouterZoneEffacee(double xPage, double yPage) {
     if (document == null || _occupe) return;
 
-    // Si l'appui long tombe sur une ligne déjà détectée, inutile d'empiler un
-    // repère par-dessus : cette ligne est déjà sélectionnable telle quelle.
-    const tolerance = 4.0;
-    final surLigneExistante = mots.any(
-      (m) => m.zone.inflate(tolerance).contains(Offset(xPage, yPage)),
-    );
-    if (surLigneExistante) return;
-
-    const largeur = 30.0;
-    const hauteur = 14.0;
+    const largeur = 60.0;
+    const hauteur = 24.0;
     final nouvelleLigne = MotDetecte(
       "",
       Rect.fromLTWH(
@@ -4040,7 +4174,8 @@ class _AccueilState extends State<Accueil> {
       selection
             ..clear()
             ..add(nouvelleLigne);
-      statut = "Repère posé : placez-le puis touchez la gomme pour effacer";
+      statut = "Cadre posé : étirez-le par ses coins, puis la gomme ou "
+          "« Récupérer l'original »";
     });
   }
 
@@ -5113,7 +5248,54 @@ class _AccueilState extends State<Accueil> {
           ),
           _menuGeneral(context),
         ],
-        bottom: champEnEdition != null
+        bottom: outilTrace != null
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(40),
+                child: ColoredBox(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 12),
+                      Icon(
+                          outilTrace == "gomme"
+                              ? Icons.cleaning_services
+                              : Icons.brush,
+                          size: 20),
+                      const SizedBox(width: 10),
+                      Text(outilTrace == "gomme" ? "Gomme" : "Stylo",
+                          style: const TextStyle(fontSize: 13)),
+                      const Spacer(),
+                      const Text("Épaisseur", style: TextStyle(fontSize: 13)),
+                      IconButton(
+                        icon: const Icon(Icons.remove, size: 20),
+                        tooltip: "Plus fin",
+                        onPressed: () => _reglerEpaisseur(-1),
+                      ),
+                      SizedBox(
+                        width: 34,
+                        child: Text(
+                          _epaisseurOutil.toStringAsFixed(
+                              _epaisseurOutil < 2 ? 1 : 0),
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add, size: 20),
+                        tooltip: "Plus épais",
+                        onPressed: () => _reglerEpaisseur(1),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 20),
+                        tooltip: "Ranger l'outil",
+                        onPressed: () => _choisirOutilTrace(outilTrace!),
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                  ),
+                ),
+              )
+            : champEnEdition != null
             ? PreferredSize(
                 preferredSize: const Size.fromHeight(40),
                 child: ColoredBox(
@@ -5455,18 +5637,57 @@ class _AccueilState extends State<Accueil> {
                               children: [
                                 SizedBox.expand(
                                   child: GestureDetector(
-                                    onLongPressStart: modeNavigation
+                                    // Stylo et gomme : on trace au doigt, et
+                                    // le trait s'écrit dans la page au
+                                    // relâchement.
+                                    onPanStart: outilTrace == null
+                                        ? null
+                                        : (details) => setState(() {
+                                              traceEnCours
+                                                ..clear()
+                                                ..add(details.localPosition /
+                                                    echelle);
+                                            }),
+                                    onPanUpdate: outilTrace == null
                                         ? null
                                         : (details) {
-                                            _ajouterZoneEffacee(
-                                              details.localPosition.dx / echelle,
-                                              details.localPosition.dy / echelle,
-                                            );
+                                            final p = details.localPosition /
+                                                echelle;
+                                            // On ne garde qu'un point tous
+                                            // les tiers d'épaisseur : assez
+                                            // dense pour un trait lisse, sans
+                                            // en accumuler des milliers.
+                                            final pas = _epaisseurOutil / 3;
+                                            if (traceEnCours.isNotEmpty &&
+                                                (p - traceEnCours.last)
+                                                        .distance <
+                                                    (pas < 1 ? 1 : pas)) {
+                                              return;
+                                            }
+                                            setState(() =>
+                                                traceEnCours.add(p));
+                                          },
+                                    onPanEnd: outilTrace == null
+                                        ? null
+                                        : (_) async {
+                                            final points =
+                                                List<Offset>.from(traceEnCours);
+                                            final outil = outilTrace!;
+                                            setState(
+                                                () => traceEnCours.clear());
+                                            await _appliquerTrace(
+                                                points, outil);
                                           },
                                     onTapUp: modeNavigation
                                         ? null
                                         : (details) {
-                                            if (enCollage) {
+                                            if (outilTrace != null) {
+                                              // Un simple appui pose un point
+                                              // ou efface une tache.
+                                              _appliquerTrace([
+                                                details.localPosition / echelle
+                                              ], outilTrace!);
+                                            } else if (enCollage) {
                                               _collerA(
                                                 details.localPosition.dx /
                                                     echelle,
@@ -5495,6 +5716,7 @@ class _AccueilState extends State<Accueil> {
                               if (!modeNavigation &&
                                   !enCollage &&
                                   !enAjoutTexte &&
+                                  outilTrace == null &&
                                   !modeRemplissage)
                                 for (final mot in mots)
                                 Positioned(
@@ -5731,6 +5953,23 @@ class _AccueilState extends State<Accueil> {
                                                 ),
                                               ),
                                             ),
+                                    ),
+                                  ),
+                                ),
+                              // Le trait qu'on est en train de faire, avant
+                              // qu'il ne soit écrit dans la page.
+                              if (traceEnCours.isNotEmpty)
+                                Positioned.fill(
+                                  child: IgnorePointer(
+                                    child: CustomPaint(
+                                      painter: _PeintreTrace(
+                                        [
+                                          for (final p in traceEnCours)
+                                            p * echelle
+                                        ],
+                                        _epaisseurOutil * echelle,
+                                        outilTrace == "gomme",
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -6122,6 +6361,48 @@ class _AccueilState extends State<Accueil> {
                               child: Icon(modeNavigation
                                   ? Icons.pan_tool
                                   : Icons.touch_app),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "cadre",
+                              elevation: 2,
+                              tooltip: "Poser un cadre (grande zone)",
+                              onPressed:
+                                  _outil(_occupe ? null : _poserCadre),
+                              child: const Icon(Icons.crop_free),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "stylo",
+                              elevation: 2,
+                              tooltip: "Stylo : écrire ou dessiner au doigt",
+                              backgroundColor: outilTrace == "stylo"
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                              foregroundColor: outilTrace == "stylo"
+                                  ? Theme.of(context).colorScheme.onPrimary
+                                  : null,
+                              onPressed: _outil(_occupe
+                                  ? null
+                                  : () => _choisirOutilTrace("stylo")),
+                              child: const Icon(Icons.brush),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "gommeDoigt",
+                              elevation: 2,
+                              tooltip:
+                                  "Gomme : effacer au doigt, sans poser de cadre",
+                              backgroundColor: outilTrace == "gomme"
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                              foregroundColor: outilTrace == "gomme"
+                                  ? Theme.of(context).colorScheme.onPrimary
+                                  : null,
+                              onPressed: _outil(_occupe
+                                  ? null
+                                  : () => _choisirOutilTrace("gomme")),
+                              child: const Icon(Icons.cleaning_services),
                             ),
                             const SizedBox(height: 8),
                             FloatingActionButton.small(
