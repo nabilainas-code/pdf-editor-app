@@ -149,23 +149,26 @@ class ChampFormulaire {
 /// Cadre d'une ligne détectée. Tant qu'elle n'est pas choisie, de simples
 /// pointillés gris : comme dans les éditeurs PDF courants, les cadres
 /// signalent ce qui est modifiable sans concurrencer le document. Une fois
-/// choisie, trait plein et fond légèrement teinté — bleu pour une ligne
-/// seule, rouge quand plusieurs lignes forment un groupe à déplacer.
+/// choisie, trait plein bleu et fond légèrement teinté.
+///
+/// Un groupe de plusieurs lignes s'affichait auparavant en rouge. Or il se
+/// manipule exactement comme une ligne seule — on pose le doigt sur
+/// n'importe laquelle et tout suit —, et la barre du haut annonce déjà
+/// combien d'éléments sont choisis : le rouge n'ajoutait rien, sinon une
+/// couleur d'alerte sur une opération parfaitement ordinaire.
 class _CadreLigne extends CustomPainter {
   final bool selectionne;
-  final bool groupe;
-  const _CadreLigne({required this.selectionne, required this.groupe});
+  const _CadreLigne({required this.selectionne});
 
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
     if (selectionne) {
-      final couleur = groupe ? Colors.red : Colors.blue;
-      canvas.drawRect(rect, Paint()..color = couleur.withOpacity(0.10));
+      canvas.drawRect(rect, Paint()..color = Colors.blue.withOpacity(0.10));
       canvas.drawRect(
         rect,
         Paint()
-          ..color = couleur
+          ..color = Colors.blue
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2,
       );
@@ -194,7 +197,7 @@ class _CadreLigne extends CustomPainter {
 
   @override
   bool shouldRepaint(_CadreLigne ancien) =>
-      ancien.selectionne != selectionne || ancien.groupe != groupe;
+      ancien.selectionne != selectionne;
 }
 
 /// Une signature enregistrée dans le répertoire : ses traits normalisés
@@ -4375,7 +4378,6 @@ class _AccueilState extends State<Accueil> {
                                     child: CustomPaint(
                                       painter: _CadreLigne(
                                         selectionne: selection.contains(mot),
-                                        groupe: selection.length > 1,
                                       ),
                                       // Une signature n'est pas dans le
                                       // fichier tant qu'on n'a pas
