@@ -567,6 +567,71 @@ class _AccueilState extends State<Accueil> {
     focusDirect.requestFocus();
   }
 
+  /// Bouton d'une bulle de sélection : une icône claire sur fond sombre.
+  Widget _boutonBulle(IconData icone, String infobulle, VoidCallback action) {
+    return IconButton(
+      icon: Icon(icone, size: 20),
+      color: Colors.white,
+      tooltip: infobulle,
+      visualDensity: VisualDensity.compact,
+      onPressed: action,
+    );
+  }
+
+  /// Bulle qui apparaît sur une sélection de texte, à la place de celle
+  /// d'Android. Celle du téléphone occupait toute la largeur de l'écran,
+  /// en anglais, avec des entrées qui n'ont rien à faire ici (« Share »,
+  /// « Demander à Copilot », « Lire à voix haute »). Celle-ci tient en cinq
+  /// icônes sur un fond sombre, comme la barre d'actions d'une ligne
+  /// sélectionnée : même langage visuel d'un bout à l'autre de
+  /// l'application.
+  Widget _bulleSelection(BuildContext context, EditableTextState champ) {
+    final reperes = champ.contextMenuAnchors;
+    return TextSelectionToolbar(
+      anchorAbove: reperes.primaryAnchor,
+      anchorBelow: reperes.secondaryAnchor ?? reperes.primaryAnchor,
+      toolbarBuilder: (context, contenu) => Material(
+        color: const Color(0xFF2E2E2E),
+        borderRadius: BorderRadius.circular(24),
+        clipBehavior: Clip.antiAlias,
+        elevation: 4,
+        child: contenu,
+      ),
+      children: [
+        _boutonBulle(Icons.content_copy, "Copier", () {
+          champ.copySelection(SelectionChangedCause.toolbar);
+        }),
+        _boutonBulle(Icons.content_cut, "Couper", () {
+          champ.cutSelection(SelectionChangedCause.toolbar);
+        }),
+        _boutonBulle(Icons.content_paste, "Coller", () {
+          champ.pasteText(SelectionChangedCause.toolbar);
+        }),
+        _boutonBulle(Icons.select_all, "Tout sélectionner", () {
+          champ.selectAll(SelectionChangedCause.toolbar);
+        }),
+        _boutonBulle(Icons.delete_outline, "Supprimer", () {
+          final texte = controleurDirect.text;
+          final etendue = controleurDirect.selection;
+          // Rien de surligné : la corbeille vide toute la ligne, comme
+          // celle de la barre du haut.
+          final debut =
+              (etendue.isValid && !etendue.isCollapsed) ? etendue.start : 0;
+          final fin = (etendue.isValid && !etendue.isCollapsed)
+              ? etendue.end
+              : texte.length;
+          setState(() {
+            controleurDirect.value = TextEditingValue(
+              text: texte.replaceRange(debut, fin, ''),
+              selection: TextSelection.collapsed(offset: debut),
+            );
+          });
+          champ.hideToolbar();
+        }),
+      ],
+    );
+  }
+
   void _annulerEditionDirecte() {
     focusDirect.unfocus();
     setState(() {
@@ -4485,7 +4550,9 @@ class _AccueilState extends State<Accueil> {
                                               autofocus: true,
                                               maxLines: 1,
                                               cursorWidth: 2,
-                                              cursorColor: Colors.blue,
+                                              cursorColor: _brunSelection,
+                                              contextMenuBuilder:
+                                                  _bulleSelection,
                                               textAlignVertical:
                                                   TextAlignVertical.center,
                                               style: TextStyle(
@@ -4758,6 +4825,8 @@ class _AccueilState extends State<Accueil> {
                                                 focusNode: focusDirect,
                                                 autofocus: true,
                                                 maxLines: 1,
+                                                contextMenuBuilder:
+                                                    _bulleSelection,
                                                 style: TextStyle(
                                                   fontSize: (champ.zone.height *
                                                           echelle *
