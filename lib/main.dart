@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -13,12 +12,22 @@ import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 const _channel = MethodChannel("com.nabilainas.pdfeditor/open_pdf");
 
+/// Couleur de la sélection de texte et de ses poignées. Le bleu par défaut
+/// se confondait avec le cadre bleu de la ligne choisie : on ne savait plus
+/// ce qui était sélectionné dans le texte et ce qui l'était sur la page.
+const Color _brunSelection = Color(0xFF8B5A3C);
+
 void main() => runApp(MaterialApp(
       home: const Accueil(),
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: Colors.blueGrey,
         scaffoldBackgroundColor: Colors.white,
+        textSelectionTheme: const TextSelectionThemeData(
+          cursorColor: _brunSelection,
+          selectionColor: Color(0x668B5A3C),
+          selectionHandleColor: _brunSelection,
+        ),
       ),
     ));
 
@@ -211,40 +220,6 @@ class _SignatureEnregistree {
 }
 
 /// Dessine la signature en cours de tracé dans la boîte de signature.
-/// Masque les poignées et la bulle « Copier/Coller » natives d'Android sur
-/// le champ d'écriture directe. Ces poignées se dessinent dans la couche
-/// d'overlay globale de l'application, indépendamment du zoom/déplacement de
-/// la page : positionnées pour une page à l'échelle 1, elles atterrissaient
-/// n'importe où sur l'écran dès que la page était zoomée ou déplacée — vues
-/// comme une goutte flottante sur une autre ligne. Le bouton « tout
-/// sélectionner » de la barre du haut reste le moyen fiable de sélectionner.
-class _AucunePoignee extends TextSelectionControls {
-  @override
-  Widget buildHandle(BuildContext context, TextSelectionHandleType type,
-          double textLineHeight,
-          [VoidCallback? onTap]) =>
-      const SizedBox.shrink();
-
-  @override
-  Widget buildToolbar(
-          BuildContext context,
-          Rect globalEditableRegion,
-          double textLineHeight,
-          Offset selectionMidpoint,
-          List<TextSelectionPoint> endpoints,
-          TextSelectionDelegate delegate,
-          ValueListenable<ClipboardStatus>? clipboardStatus,
-          Offset? lastSecondaryTapDownPosition) =>
-      const SizedBox.shrink();
-
-  @override
-  Size getHandleSize(double textLineHeight) => Size.zero;
-
-  @override
-  Offset getHandleAnchor(TextSelectionHandleType type, double textLineHeight) =>
-      Offset.zero;
-}
-
 class _PeintreSignature extends CustomPainter {
   final List<List<Offset>> traits;
   _PeintreSignature(this.traits);
@@ -535,8 +510,12 @@ class _AccueilState extends State<Accueil> {
 
     if (choix == "tout") {
       setState(() {
+        // Le curseur (l'extrémité mobile) est laissé au début : un champ
+        // d'une seule ligne fait défiler son contenu pour montrer le
+        // curseur, et le placer à la fin cachait le début de la ligne — on
+        // croyait alors avoir perdu ses premiers mots.
         controleurDirect.selection =
-            TextSelection(baseOffset: 0, extentOffset: texte.length);
+            TextSelection(baseOffset: texte.length, extentOffset: 0);
       });
       focusDirect.requestFocus();
       return;
@@ -4400,6 +4379,8 @@ class _AccueilState extends State<Accueil> {
                 : LayoutBuilder(
                     builder: (context, constraints) {
                       final echelle = constraints.maxWidth / taillePage.width;
+                      _echelleVue = echelle;
+                      _tailleVue = constraints.biggest;
                       return ClipRect(
                         child: Stack(children: [
                         InteractiveViewer(
@@ -4505,8 +4486,6 @@ class _AccueilState extends State<Accueil> {
                                               maxLines: 1,
                                               cursorWidth: 2,
                                               cursorColor: Colors.blue,
-                                              selectionControls:
-                                                  _AucunePoignee(),
                                               textAlignVertical:
                                                   TextAlignVertical.center,
                                               style: TextStyle(
