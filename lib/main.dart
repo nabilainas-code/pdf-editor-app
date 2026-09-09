@@ -408,6 +408,13 @@ class _AccueilState extends State<Accueil> {
 
   final TransformationController _transformation = TransformationController();
 
+  /// Page telle qu'elle était à l'ouverture, et son échelle pixels/point.
+  /// Elle est gardée en réserve pour pouvoir remettre une zone abîmée dans
+  /// son état d'origine sans avoir à annuler tout le travail fait depuis.
+  /// Elle n'est calculée qu'à la première demande.
+  img.Image? imageOrigine;
+  double echelleOrigine = 1;
+
   /// Taille de la zone d'affichage et échelle page → écran, relevées au
   /// dernier rendu : elles disent quelle partie de la page est réellement
   /// sous les yeux, pour y poser ce qu'on ajoute plutôt qu'au petit bonheur.
@@ -1141,6 +1148,7 @@ class _AccueilState extends State<Accueil> {
       imageDecodee = null;
       apercuLecture = null;
       octetsDocument = null;
+      imageOrigine = null;
       modeLecture = true;
       statut = "Chargement...";
     });
@@ -3155,6 +3163,124 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  /// Image de la page telle qu'elle était à l'ouverture du fichier,
+  /// calculée à la première demande et gardée ensuite.
+  Future<img.Image?> _pageOrigine() async {
+    final deja = imageOrigine;
+    if (deja != null) return deja;
+    final octets = octetsDocument;
+    if (octets == null) return null;
+    PdfRaster? raster;
+    await for (final r
+        in Printing.raster(octets, pages: const [0], dpi: _dpiApercu)) {
+      raster = r;
+      break;
+    }
+    if (raster == null) return null;
+    final decodee = img.decodePng(await raster.toPng());
+    if (decodee == null) return null;
+    imageOrigine = decodee;
+    echelleOrigine = _dpiApercu / 72.0;
+    return decodee;
+  }
+
+  /// Remet dans la page ce que le document contenait à son ouverture, sur
+  /// la zone du cadre choisi. Rien n'est jamais supprimé d'un PDF par cette
+  /// application : effacer, c'est peindre par-dessus. Ce qui a été recouvert
+  /// par erreur est donc toujours dans le fichier d'origine, et il suffit de
+  /// le remettre — sans annuler, une par une, toutes les modifications
+  /// faites depuis. Pour récupérer plusieurs lignes d'un coup, on pose un
+  /// cadre (appui long), on l'étire aux quatre coins sur toute la zone
+  /// abîmée, puis on récupère.
+  Future<void> _recupererOrigine(MotDetecte mot) async {
+    final doc = document;
+    if (doc == null || _occupe) return;
+    setState(() => _occupe = true);
+    Etat? avant;
+    try {
+      final origine = await _pageOrigine();
+      if (origine == null) {
+        setState(() => statut =
+            "Impossible de relire le document d'origine pour cette zone");
+        return;
+      }
+
+      final zone = mot.zone;
+      final e = echelleOrigine;
+      final x = (zone.left * e).round().clamp(0, origine.width - 1);
+      final y = (zone.top * e).round().clamp(0, origine.height - 1);
+      final largeur = (zone.width * e).round().clamp(1, origine.width - x);
+      final hauteur = (zone.height * e).round().clamp(1, origine.height - y);
+      if (largeur < 2 || hauteur < 2) {
+        setState(() => statut = "Cadre trop petit pour être récupéré");
+        return;
+      }
+
+      final morceau = img.copyCrop(origine,
+          x: x, y: y, width: largeur, height: hauteur);
+      final octets = Uint8List.fromList(img.encodePng(_surFondBlanc(morceau)));
+
+      avant = await _etatActuel(doc);
+      historique.add(avant);
+      futur.clear();
+      doc.pages[0].graphics.drawImage(PdfBitmap(octets), zone);
+      setState(() => statut = "Zone remise dans son état d'origine");
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      if (avant != null) {
+        historique.removeLast();
+        await _restaurerEtat(avant);
+      }
+      setState(() => statut = "Récupération annulée (rien n'a été perdu) : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
+  /// Repart du fichier tel qu'il a été ouvert : toutes les modifications de
+  /// la session sont abandonnées, le fichier sur le téléphone n'ayant lui
+  /// jamais été touché (l'enregistrement crée toujours un nouveau document).
+  Future<void> _revenirAuDocumentOrigine() async {
+    final octets = octetsDocument;
+    if (octets == null || _occupe) return;
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Revenir au document d'origine"),
+        content: const Text(
+            "Tout ce qui a été modifié depuis l'ouverture sera abandonné, "
+            "et le document redeviendra exactement celui que vous avez "
+            "ouvert. Le fichier d'origine sur le téléphone n'a jamais été "
+            "touché."),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Revenir au document d'origine"),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true) return;
+
+    setState(() {
+      _occupe = true;
+      historique.clear();
+      futur.clear();
+      selection.clear();
+      motEnEditionDirecte = null;
+    });
+    await _analyser(octets);
+    if (!mounted) return;
+    setState(() {
+      _occupe = false;
+      statut = "Document revenu à son état d'ouverture";
+    });
+  }
+
   /// Actions moins courantes, rangées derrière « … » pour garder la barre
   /// principale courte.
   Future<void> _plusDActions(MotDetecte mot) async {
@@ -3207,6 +3333,17 @@ class _AccueilState extends State<Accueil> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _modifierMot(mot);
+                },
+              ),
+            if (!estSignature)
+              ListTile(
+                leading: const Icon(Icons.restore_page),
+                title: const Text("Récupérer l'original de cette zone"),
+                subtitle: const Text(
+                    "Remet ce que le document contenait à l'ouverture"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _recupererOrigine(mot);
                 },
               ),
             if (!estSignature)
@@ -3346,6 +3483,24 @@ class _AccueilState extends State<Accueil> {
             onPressed: (document == null || enregistrementEnCours)
                 ? null
                 : _enregistrer,
+          ),
+          PopupMenuButton<String>(
+            tooltip: "Autres actions",
+            enabled: !_occupe,
+            onSelected: (choix) {
+              if (choix == "origine") _revenirAuDocumentOrigine();
+            },
+            itemBuilder: (ctx) => const [
+              PopupMenuItem(
+                value: "origine",
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.restore),
+                  title: Text("Revenir au document d'origine"),
+                  subtitle: Text("Abandonne toutes les modifications"),
+                ),
+              ),
+            ],
           ),
         ],
         bottom: champEnEdition != null
