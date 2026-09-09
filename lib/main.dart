@@ -1533,7 +1533,15 @@ class _AccueilState extends State<Accueil> {
         imageDecodee = nouvelle;
         echelleOcr = dpi / 72.0;
       });
-    } catch (_) {}
+    } catch (e) {
+      // Ne plus avaler l'erreur en silence : refaire l'image de la page
+      // passe par un enregistrement du document, si bien qu'un échec ici
+      // annonce un échec à l'enregistrement. Le taire faisait découvrir le
+      // problème beaucoup trop tard, au moment de partager le fichier.
+      if (mounted) {
+        setState(() => statut = "Aperçu non rafraîchi : $e");
+      }
+    }
   }
 
   /// Couleur utilisée pour "effacer" une ligne. On échantillonne d'abord
@@ -1686,6 +1694,13 @@ class _AccueilState extends State<Accueil> {
   /// plusieurs (mesure, ajustement, dessin).
   final Map<String, PdfFont> _policesPretes = {};
 
+  /// Document auquel appartiennent les polices déjà construites. Une police
+  /// embarquée s'attache au document dans lequel on l'a d'abord dessinée :
+  /// la réutiliser dans un autre (après un annuler, qui recharge le
+  /// document entier) produisait un fichier bancal, et l'enregistrement
+  /// échouait sur « Null check operator used on a null value ».
+  PdfDocument? _documentDesPolices;
+
   bool _policesChargees = false;
 
   Future<void> _chargerPolices() async {
@@ -1718,6 +1733,11 @@ class _AccueilState extends State<Accueil> {
     // valeurs toutes différentes qui ne se réutiliseraient jamais. Un
     // vingtième de point ne se voit pas.
     corps = (corps * 10).roundToDouble() / 10;
+
+    if (!identical(_documentDesPolices, document)) {
+      _policesPretes.clear();
+      _documentDesPolices = document;
+    }
 
     final chemin = _fichiersPolice[mot.famille]?[style];
     final octets = chemin == null ? null : _octetsPolice[chemin];
@@ -3191,7 +3211,12 @@ class _AccueilState extends State<Accueil> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Erreur d'enregistrement : $e")),
+          SnackBar(
+            duration: const Duration(seconds: 8),
+            content: Text("Erreur d'enregistrement : $e\n"
+                "Annulez la dernière action (↶) puis réessayez. Le document "
+                "ouvert sur le téléphone n'a pas été touché."),
+          ),
         );
       }
     } finally {
@@ -3419,6 +3444,128 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  /// Referme le document et revient à l'écran d'accueil. Sert de sortie de
+  /// secours : quoi qu'il arrive, on peut toujours repartir de zéro sans
+  /// avoir à tuer l'application depuis Android.
+  void _fermerDocument() {
+    document?.dispose();
+    setState(() {
+      document = null;
+      mots = [];
+      selection.clear();
+      historique.clear();
+      futur.clear();
+      imageDeFond = null;
+      imageDecodee = null;
+      imageOrigine = null;
+      apercuLecture = null;
+      octetsDocument = null;
+      motEnEditionDirecte = null;
+      champEnEdition = null;
+      champsFormulaire = [];
+      modeRemplissage = false;
+      modeLecture = true;
+      _occupe = false;
+      enregistrementEnCours = false;
+      statut = "Aucun document — ouvrez-en un";
+    });
+  }
+
+  /// Menu de la barre du haut, identique en lecture et en modification.
+  /// Il reste actif même quand l'application est occupée : c'est justement
+  /// dans ces moments-là qu'il faut pouvoir en sortir.
+  Widget _menuGeneral(BuildContext context) {
+    return PopupMenuButton<String>(
+      tooltip: "Autres actions",
+      onSelected: (choix) {
+        switch (choix) {
+          case "debloquer":
+            setState(() {
+              _occupe = false;
+              enregistrementEnCours = false;
+              statut = "Débloqué — reprenez où vous en étiez";
+            });
+            break;
+          case "lecture":
+            setState(() {
+              motEnEditionDirecte = null;
+              selection.clear();
+              modeLecture = true;
+              statut = "Lecture seule — appuyez sur le crayon pour modifier";
+            });
+            break;
+          case "origine":
+            _revenirAuDocumentOrigine();
+            break;
+          case "ouvrir":
+            _importerDocument();
+            break;
+          case "fermer":
+            _fermerDocument();
+            break;
+          case "quitter":
+            SystemNavigator.pop();
+            break;
+        }
+      },
+      itemBuilder: (ctx) => [
+        if (_occupe || enregistrementEnCours)
+          const PopupMenuItem(
+            value: "debloquer",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.lock_open),
+              title: Text("Débloquer l'application"),
+              subtitle: Text("Si elle reste occupée sans avancer"),
+            ),
+          ),
+        if (!modeLecture && apercuLecture != null)
+          const PopupMenuItem(
+            value: "lecture",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.menu_book),
+              title: Text("Revenir à la lecture"),
+            ),
+          ),
+        if (!modeLecture && octetsDocument != null)
+          const PopupMenuItem(
+            value: "origine",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.restore),
+              title: Text("Revenir au document d'origine"),
+              subtitle: Text("Abandonne toutes les modifications"),
+            ),
+          ),
+        const PopupMenuItem(
+          value: "ouvrir",
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.folder_open),
+            title: Text("Ouvrir un autre document"),
+          ),
+        ),
+        const PopupMenuItem(
+          value: "fermer",
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.close),
+            title: Text("Fermer le document"),
+          ),
+        ),
+        const PopupMenuItem(
+          value: "quitter",
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.exit_to_app),
+            title: Text("Quitter l'application"),
+          ),
+        ),
+      ],
+    );
+  }
+
   /// Actions moins courantes, rangées derrière « … » pour garder la barre
   /// principale courte.
   Future<void> _plusDActions(MotDetecte mot) async {
@@ -3517,6 +3664,7 @@ class _AccueilState extends State<Accueil> {
             tooltip: "Importer un document",
             onPressed: _importerDocument,
           ),
+          _menuGeneral(context),
         ],
       ),
       body: Column(
@@ -3537,7 +3685,34 @@ class _AccueilState extends State<Accueil> {
           ),
           Expanded(
             child: apercuLecture == null
-                ? const Center(child: CircularProgressIndicator())
+                // Pas de rond qui tourne indéfiniment quand il n'y a
+                // simplement rien à afficher : on dit quoi faire.
+                ? (_occupe
+                    ? const Center(child: CircularProgressIndicator())
+                    : Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.picture_as_pdf,
+                                  size: 64, color: Colors.grey),
+                              const SizedBox(height: 16),
+                              const Text(
+                                "Aucun document ouvert",
+                                textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 16),
+                              ),
+                              const SizedBox(height: 16),
+                              FilledButton.icon(
+                                onPressed: _importerDocument,
+                                icon: const Icon(Icons.folder_open),
+                                label: const Text("Ouvrir un document"),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ))
                 : LayoutBuilder(
                     builder: (context, constraints) {
                       final echelle = constraints.maxWidth / taillePage.width;
@@ -3622,24 +3797,7 @@ class _AccueilState extends State<Accueil> {
                 ? null
                 : _enregistrer,
           ),
-          PopupMenuButton<String>(
-            tooltip: "Autres actions",
-            enabled: !_occupe,
-            onSelected: (choix) {
-              if (choix == "origine") _revenirAuDocumentOrigine();
-            },
-            itemBuilder: (ctx) => const [
-              PopupMenuItem(
-                value: "origine",
-                child: ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.restore),
-                  title: Text("Revenir au document d'origine"),
-                  subtitle: Text("Abandonne toutes les modifications"),
-                ),
-              ),
-            ],
-          ),
+          _menuGeneral(context),
         ],
         bottom: champEnEdition != null
             ? PreferredSize(
