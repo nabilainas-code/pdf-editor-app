@@ -756,6 +756,112 @@ class _AccueilState extends State<Accueil> {
     await _ecrireSurLaLigne(cible);
   }
 
+  /// Le gras porte sur ce qui est surligné, et sur toute la ligne à défaut.
+  /// Une ligne ne connaît qu'une graisse pour tout son texte : mettre un
+  /// seul mot en gras demande donc de la couper en morceaux — avant, le mot,
+  /// après — dont chacun devient une ligne à part avec sa propre graisse.
+  /// C'est déjà ainsi que sont représentées les lignes d'un scan mêlant gras
+  /// et normal, et le déplacement les emmène ensemble, comme une seule
+  /// rangée.
+  Future<void> _appliquerGras() async {
+    final mot = motEnEditionDirecte;
+    if (mot == null || _occupe) return;
+    final texte = controleurDirect.text;
+    final etendue = controleurDirect.selection;
+    final surTout = !etendue.isValid ||
+        etendue.isCollapsed ||
+        (etendue.start <= 0 && etendue.end >= texte.length);
+    if (surTout) {
+      setState(() => grasDirect = !grasDirect);
+      return;
+    }
+    await _scinderPourGras(mot, texte, etendue.start, etendue.end, !grasDirect);
+  }
+
+  Future<void> _scinderPourGras(
+      MotDetecte mot, String texte, int debut, int fin, bool gras) async {
+    final doc = document;
+    if (doc == null) return;
+    final avant = texte.substring(0, debut);
+    final milieu = texte.substring(debut, fin);
+    final apres = texte.substring(fin);
+    if (milieu.trim().isEmpty) return;
+
+    focusDirect.unfocus();
+    setState(() {
+      motEnEditionDirecte = null;
+      _occupe = true;
+    });
+
+    final etatAvant = await _etatActuel(doc);
+    try {
+      historique.add(etatAvant);
+      futur.clear();
+
+      // Taille figée pour les trois morceaux : sans elle, chacun serait
+      // recalibré sur la largeur de son propre cadre et les trois n'auraient
+      // plus le même corps.
+      final taille = _dessinTexte(mot, mot.zone).police.size;
+
+      double largeurDe(String t, bool g) {
+        if (t.isEmpty) return 0;
+        final gabarit = MotDetecte(t, mot.zone,
+            gras: g, italique: mot.italique, famille: mot.famille);
+        final police = _police(gabarit, taille);
+        return police.measureString(_texteSelonPolice(police, t)).width;
+      }
+
+      final page = doc.pages[0];
+      _effacerRect(page, _rectEffacement(mot), mot);
+
+      final morceaux = <MotDetecte>[];
+      var gauche = mot.zone.left;
+      for (final part in [
+        [avant, mot.gras],
+        [milieu, gras],
+        [apres, mot.gras],
+      ]) {
+        final contenu = part[0] as String;
+        if (contenu.isEmpty) continue;
+        final grasPart = part[1] as bool;
+        final largeur = largeurDe(contenu, grasPart);
+        final piece = MotDetecte(
+          contenu,
+          Rect.fromLTWH(gauche, mot.zone.top, largeur, mot.zone.height),
+          gras: grasPart,
+          italique: mot.italique,
+          famille: mot.famille,
+          couleurTexte: mot.couleurTexte,
+          tailleManuelle: taille,
+        );
+        _ecrire(page, piece, piece.zone);
+        morceaux.add(piece);
+        gauche += largeur;
+      }
+
+      final aGarder = morceaux.firstWhere((m) => m.texte == milieu,
+          orElse: () => morceaux.first);
+      setState(() {
+        mots = [
+          for (final m in mots)
+            if (identical(m, mot)) ...morceaux else m,
+        ];
+        selection
+          ..clear()
+          ..add(aGarder);
+        statut = gras ? "Mis en gras" : "Gras retiré";
+      });
+
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(etatAvant);
+      setState(() => statut = "Mise en gras annulée (rien n'a été perdu) : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
   void _annulerEditionDirecte() {
     focusDirect.unfocus();
     setState(() {
@@ -5065,10 +5171,9 @@ class _AccueilState extends State<Accueil> {
                       const SizedBox(width: 8),
                       IconButton(
                         icon: const Icon(Icons.format_bold, size: 20),
-                        tooltip: "Gras",
+                        tooltip: "Gras (le texte surligné, sinon la ligne)",
                         isSelected: grasDirect,
-                        onPressed: () =>
-                            setState(() => grasDirect = !grasDirect),
+                        onPressed: _occupe ? null : _appliquerGras,
                       ),
                       // Un seul bouton pour toutes les actions de texte : la
                       // barre est déjà pleine, et les quatre tiennent dans un
