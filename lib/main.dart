@@ -430,6 +430,7 @@ class _AccueilState extends State<Accueil> {
   @override
   void initState() {
     super.initState();
+    _chargerPolices();
     _init();
   }
 
@@ -1192,6 +1193,10 @@ class _AccueilState extends State<Accueil> {
   }
 
   Future<void> _analyser(Uint8List octets) async {
+    // Les polices embarquées doivent être là avant la calibration des
+    // lignes : c'est avec elles qu'on mesure la place que prendra un texte
+    // réécrit, et les mesurer avec une autre fausserait tous les cadres.
+    await _chargerPolices();
     document?.dispose();
     document = null;
     historique.clear();
@@ -1646,19 +1651,99 @@ class _AccueilState extends State<Accueil> {
     return Color.fromARGB(255, fond[0], fond[1], fond[2]);
   }
 
-  PdfStandardFont _police(MotDetecte mot, [double? taille]) {
+  /// Fichiers des polices embarquées, chargés une fois au démarrage. Les
+  /// polices standard d'un PDF (Helvetica, Times, Courier) ne connaissent
+  /// que le jeu latin de Windows : un tiret cadratin, une puce ronde ou une
+  /// apostrophe typographique — ce qu'un traitement de texte met tout seul —
+  /// n'y existent pas. Les Liberation, elles, les ont, et sont dessinées aux
+  /// mêmes largeurs qu'Arial, Times New Roman et Courier New : une ligne
+  /// réécrite garde donc ses caractères et occupe la même place qu'avant.
+  static const Map<PdfFontFamily, Map<PdfFontStyle, String>> _fichiersPolice = {
+    PdfFontFamily.helvetica: {
+      PdfFontStyle.regular: 'assets/fonts/LiberationSans-Regular.ttf',
+      PdfFontStyle.bold: 'assets/fonts/LiberationSans-Bold.ttf',
+      PdfFontStyle.italic: 'assets/fonts/LiberationSans-Italic.ttf',
+    },
+    PdfFontFamily.timesRoman: {
+      PdfFontStyle.regular: 'assets/fonts/LiberationSerif-Regular.ttf',
+      PdfFontStyle.bold: 'assets/fonts/LiberationSerif-Bold.ttf',
+      PdfFontStyle.italic: 'assets/fonts/LiberationSerif-Italic.ttf',
+    },
+    PdfFontFamily.courier: {
+      PdfFontStyle.regular: 'assets/fonts/LiberationMono-Regular.ttf',
+      PdfFontStyle.bold: 'assets/fonts/LiberationMono-Bold.ttf',
+      PdfFontStyle.italic: 'assets/fonts/LiberationMono-Italic.ttf',
+    },
+  };
+
+  /// Octets des polices, une fois lus. Vide tant que le chargement n'a pas
+  /// eu lieu (ou s'il a échoué) : on retombe alors sur les polices standard,
+  /// et l'application marche comme avant.
+  final Map<String, Uint8List> _octetsPolice = {};
+
+  /// Polices déjà construites, par fichier et par taille : construire une
+  /// police TrueType relit tout le fichier, et une seule ligne en demande
+  /// plusieurs (mesure, ajustement, dessin).
+  final Map<String, PdfFont> _policesPretes = {};
+
+  bool _policesChargees = false;
+
+  Future<void> _chargerPolices() async {
+    if (_policesChargees) return;
+    _policesChargees = true;
+    for (final famille in _fichiersPolice.values) {
+      for (final chemin in famille.values) {
+        if (_octetsPolice.containsKey(chemin)) continue;
+        try {
+          final donnees = await rootBundle.load(chemin);
+          _octetsPolice[chemin] = donnees.buffer.asUint8List();
+        } catch (_) {
+          // Police absente ou illisible : on s'en passe pour celle-là.
+        }
+      }
+    }
+  }
+
+  PdfFont _police(MotDetecte mot, [double? taille]) {
     // Un seul style à la fois : le gras l'emporte sur l'italique quand les
     // deux sont détectés, ce qui reste plus proche de l'original que de
     // perdre les deux.
     final style = mot.gras
         ? PdfFontStyle.bold
         : (mot.italique ? PdfFontStyle.italic : PdfFontStyle.regular);
-    return PdfStandardFont(
-      mot.famille,
-      taille ?? mot.zone.height * 0.75,
-      style: style,
-    );
+    var corps = taille ?? mot.zone.height * 0.75;
+    if (corps <= 0 || corps.isNaN) corps = 12;
+    // Arrondi au dixième de point : construire une police TrueType relit
+    // tout son fichier, et les tailles calculées tombent sinon sur des
+    // valeurs toutes différentes qui ne se réutiliseraient jamais. Un
+    // vingtième de point ne se voit pas.
+    corps = (corps * 10).roundToDouble() / 10;
+
+    final chemin = _fichiersPolice[mot.famille]?[style];
+    final octets = chemin == null ? null : _octetsPolice[chemin];
+    if (octets != null) {
+      final cle = "$chemin|$corps";
+      final deja = _policesPretes[cle];
+      if (deja != null) return deja;
+      try {
+        final police = PdfTrueTypeFont(octets, corps);
+        // Un document long finirait par en accumuler des centaines : on
+        // repart de zéro plutôt que de laisser la mémoire enfler.
+        if (_policesPretes.length > 400) _policesPretes.clear();
+        _policesPretes[cle] = police;
+        return police;
+      } catch (_) {
+        // Police refusée par le moteur PDF : on continue avec la standard.
+      }
+    }
+    return PdfStandardFont(mot.famille, corps, style: style);
   }
+
+  /// Texte à écrire avec cette police-là. Une police embarquée sait tout
+  /// écrire ; une police standard non, et il faut alors remplacer ce qu'elle
+  /// ne connaît pas plutôt que de la laisser échouer.
+  String _texteSelonPolice(PdfFont police, String texte) =>
+      police is PdfTrueTypeFont ? texte : _texteEcrivable(texte);
 
   /// Famille de police approchée à partir du nom trouvé dans le PDF. Les
   /// polices d'un document sont innombrables, les familles dessinables ici
@@ -1797,9 +1882,8 @@ class _AccueilState extends State<Accueil> {
     // au pire on se passe de la calibration pour cette ligne.
     double largeur;
     try {
-      largeur = _police(mot, reference)
-          .measureString(_texteEcrivable(mot.texte))
-          .width;
+      final police = _police(mot, reference);
+      largeur = police.measureString(_texteSelonPolice(police, mot.texte)).width;
     } catch (_) {
       return null;
     }
@@ -1809,15 +1893,15 @@ class _AccueilState extends State<Accueil> {
     return taille;
   }
 
-  ({Rect rect, PdfStandardFont police}) _dessinTexte(MotDetecte mot, Rect zone) {
+  ({Rect rect, PdfFont police}) _dessinTexte(MotDetecte mot, Rect zone) {
     // La taille calibrée sur la largeur du cadre (voir mot.tailleAuto) prime
     // sur l'estimation par la hauteur, qui donnait un texte trop gros.
     final tailleDepart = mot.tailleManuelle ?? mot.tailleAuto;
-    // Mesuré sur le texte tel qu'il sera écrit dans le PDF : mesurer les
-    // caractères d'origine ferait échouer le calcul sur ceux que les polices
-    // standard ignorent.
-    final texte = _texteEcrivable(mot.texte);
     var police = _police(mot, tailleDepart ?? zone.height * 0.75);
+    // Mesuré sur le texte tel qu'il sera écrit dans le PDF : avec une police
+    // embarquée c'est le texte tel quel, avec une police standard c'est sa
+    // version dépouillée des caractères qu'elle ne sait pas écrire.
+    var texte = _texteSelonPolice(police, mot.texte);
     var mesure = police.measureString(texte);
 
     if (tailleDepart == null && mesure.height > 0 && zone.height > 0) {
@@ -1828,6 +1912,7 @@ class _AccueilState extends State<Accueil> {
       if (taille < 4) taille = 4;
       if (taille > 96) taille = 96;
       police = _police(mot, taille);
+      texte = _texteSelonPolice(police, mot.texte);
       mesure = police.measureString(texte);
     }
 
@@ -1841,6 +1926,7 @@ class _AccueilState extends State<Accueil> {
       var taille = police.size * largeurDispo / mesure.width;
       if (taille < 4) taille = 4;
       police = _police(mot, taille);
+      texte = _texteSelonPolice(police, mot.texte);
       mesure = police.measureString(texte);
     }
 
@@ -2128,7 +2214,7 @@ class _AccueilState extends State<Accueil> {
     if (mot.texte.isEmpty) return;
     final dessin = _dessinTexte(mot, zone);
     page.graphics.drawString(
-      _texteEcrivable(mot.texte),
+      _texteSelonPolice(dessin.police, mot.texte),
       dessin.police,
       bounds: dessin.rect,
       brush: PdfSolidBrush(mot.couleurTexte ?? PdfColor(0, 0, 0)),

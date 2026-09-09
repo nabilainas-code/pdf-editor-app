@@ -22,6 +22,7 @@ jobs:
         run: |
           flutter create --platforms=android --org com.nabilainas.pdfeditor temp_app
           cp -r lib/. temp_app/lib/
+          cp -r assets temp_app/assets
           cp pubspec.yaml temp_app/pubspec.yaml
 
       - name: Autoriser l'accès à internet et l'ouverture de PDF

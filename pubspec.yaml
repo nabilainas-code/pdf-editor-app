@@ -24,3 +24,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # Polices Liberation (SIL OFL 1.1), embarquées dans le PDF quand une
+  # ligne est réécrite : contrairement aux polices standard d'un PDF,
+  # elles savent écrire tirets cadratins, puces et apostrophes
+  # typographiques, et sont dessinées aux largeurs d'Arial, Times New
+  # Roman et Courier New.
+  assets:
+    - assets/fonts/
