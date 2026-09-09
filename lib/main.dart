@@ -505,7 +505,6 @@ class _AccueilState extends State<Accueil> {
     focusDirect.unfocus();
     setState(() => motEnEditionDirecte = null);
     await _appliquerModification(mot, texte: texte, gras: gras, taille: taille);
-    _nettoyerBoitesLibresVides();
   }
 
   /// Supprime la ligne en cours d'écriture, au clavier : plus besoin de
@@ -525,21 +524,10 @@ class _AccueilState extends State<Accueil> {
     }
     await _appliquerModification(mot,
         texte: '', gras: mot.gras, taille: mot.tailleManuelle);
-    _nettoyerBoitesLibresVides();
-  }
-
-  /// Retire les zones de texte libres restées vides : une boîte ouverte puis
-  /// abandonnée ne laisse plus un cadre fantôme derrière elle. Les repères
-  /// de gomme, eux, sont vides par nature et posés exprès : on n'y touche
-  /// pas (c'est le bouton « tout nettoyer » qui s'en charge).
-  void _nettoyerBoitesLibresVides() {
-    final aRetirer =
-        mots.where((m) => m.boiteLibre && m.texte.isEmpty).toList();
-    if (aRetirer.isEmpty) return;
-    setState(() {
-      mots = mots.where((m) => !aRetirer.contains(m)).toList();
-      selection.removeAll(aRetirer);
-    });
+    // Une zone de texte qu'on a soi-même ajoutée disparaît entièrement
+    // quand on la supprime : il n'y a pas de ligne du document en dessous
+    // à laquelle son cadre servirait encore.
+    if (mot.boiteLibre && mounted) _retirerRepere(mot);
   }
 
   /// Entrée : on valide la ligne et on en ouvre une nouvelle juste dessous,
@@ -3069,25 +3057,43 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
-  /// Pose une zone de texte libre à l'endroit touché et ouvre directement sa
-  /// modification : un seul geste pour écrire n'importe où, avec largeur
-  /// fixe et alignement au choix (gauche/centre/droite), contrairement aux
-  /// lignes détectées dont le cadre s'ajuste toujours au contenu.
+  /// Pose une zone de texte libre là où l'on a touché et ouvre directement
+  /// sa modification. Le cadre est posé autour du doigt et le texte y est
+  /// centré : ce qu'on écrit apparaît donc à l'endroit visé. Il gardait
+  /// auparavant toute la largeur de la page, si bien qu'un texte centré
+  /// atterrissait au milieu de la page et non sous le doigt.
+  ///
+  /// Le cadre reste ensuite en place tant qu'on ne le retire pas soi-même
+  /// (corbeille de la barre, ou « Retirer tous les cadres vides ») : on peut
+  /// le déplacer, l'étirer par ses coins, et y écrire plus tard.
   Future<void> _ajouterTexte(double xPage, double yPage) async {
     if (document == null || _occupe) return;
 
-    // Presque toute la largeur de la page, comme une vraie règle : sans
-    // ça, « centrer » ne centrait qu'à l'intérieur d'une petite boîte
-    // posée là où l'on a touché, pas sur la page comme on l'attendrait.
     const marge = 24.0;
     const hauteur = 18.0;
-    final zone = Rect.fromLTWH(
-      marge,
-      yPage - hauteur / 2,
-      taillePage.width - marge * 2,
-      hauteur,
+    final utile = taillePage.width - marge * 2;
+    // La moitié de la largeur utile : assez large pour une phrase, assez
+    // étroit pour qu'on voie où elle va se poser. Les poignées des coins
+    // permettent de l'ajuster ensuite.
+    var largeur = utile / 2;
+    if (largeur < 40) largeur = utile;
+    var gauche = xPage - largeur / 2;
+    if (gauche < marge) gauche = marge;
+    if (gauche + largeur > taillePage.width - marge) {
+      gauche = taillePage.width - marge - largeur;
+    }
+    var haut = yPage - hauteur / 2;
+    if (haut < 0) haut = 0;
+    if (haut + hauteur > taillePage.height) {
+      haut = taillePage.height - hauteur;
+    }
+
+    final nouvelleLigne = MotDetecte(
+      "",
+      Rect.fromLTWH(gauche, haut, largeur, hauteur),
+      boiteLibre: true,
+      alignement: PdfTextAlignment.center,
     );
-    final nouvelleLigne = MotDetecte("", zone, boiteLibre: true);
 
     setState(() {
       mots = [...mots, nouvelleLigne];
@@ -3098,12 +3104,6 @@ class _AccueilState extends State<Accueil> {
     });
 
     await _modifierMot(nouvelleLigne);
-
-    // Rien écrit et rien saisi dans la boîte : on retire le cadre vide au
-    // lieu de laisser un repère fantôme après un appui accidentel.
-    if (nouvelleLigne.texte.isEmpty && mots.contains(nouvelleLigne)) {
-      _retirerRepere(nouvelleLigne);
-    }
   }
 
   /// Pose un repère à l'endroit d'un appui long, pour attraper un résidu
