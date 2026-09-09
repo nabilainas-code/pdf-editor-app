@@ -3344,20 +3344,68 @@ class _AccueilState extends State<Accueil> {
 
   /// Repeint le fond sur la zone sélectionnée : sert de gomme, qu'on peut
   /// donc positionner d'abord (flèches / glisser) puis appliquer.
+  ///
+  /// Un cadre étiré à la main peut couvrir un quart de la page. Passer la
+  /// gomme dessus recouvrait alors tout ce qui s'y trouvait — plusieurs
+  /// paragraphes d'un coup — sans rien demander, et il n'y paraissait plus
+  /// qu'un grand blanc. Au-delà d'une zone de la taille de quelques lignes,
+  /// on demande donc confirmation.
   Future<void> _effacerZone(MotDetecte mot) async {
     final doc = document;
     if (doc == null || _occupe) return;
+
+    // Une signature n'est pas écrite dans la page : la gomme n'effacerait
+    // que le document en dessous, ce que personne ne demande en visant une
+    // signature. C'est la corbeille qui la retire.
+    if (mot.traitsSignature != null) {
+      setState(() => statut =
+          "La gomme efface la page, pas la signature — utilisez la corbeille");
+      return;
+    }
+
+    final zone = _rectEffacement(mot);
+    final partPage = (taillePage.width * taillePage.height) <= 0
+        ? 0.0
+        : (zone.width * zone.height) /
+            (taillePage.width * taillePage.height);
+    if (partPage > 0.03) {
+      final confirme = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("Effacer toute cette zone ?"),
+          content: Text(
+              "Le cadre couvre environ ${(partPage * 100).round()} % de la "
+              "page. Tout ce qui s'y trouve — texte, tampon, signature du "
+              "document — sera recouvert.\n\n"
+              "Vous pourrez revenir en arrière avec ↶, ou avec « Récupérer "
+              "l'original de cette zone »."),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Annuler"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Effacer"),
+            ),
+          ],
+        ),
+      );
+      if (confirme != true) return;
+    }
+
     setState(() => _occupe = true);
     try {
       historique.add(await _etatActuel(doc));
       futur.clear();
 
       final page = doc.pages[0];
-      _effacerRect(page, _rectEffacement(mot), mot);
+      _effacerRect(page, zone, mot);
 
       setState(() {
         mot.texte = "";
         mot.redessine = false;
+        statut = "Zone effacée — ↶ pour revenir en arrière";
       });
 
       if (imageDeFond != null) {
@@ -4415,7 +4463,9 @@ class _AccueilState extends State<Accueil> {
                       IconButton(
                         icon: const Icon(Icons.cleaning_services, size: 20),
                         tooltip: "Effacer ici (gomme)",
-                        onPressed: _occupe || selection.length != 1
+                        onPressed: _occupe ||
+                                selection.length != 1 ||
+                                selection.first.traitsSignature != null
                             ? null
                             : () => _effacerZone(selection.first),
                       ),
