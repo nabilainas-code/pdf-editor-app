@@ -76,22 +76,6 @@ class MotDetecte {
   List<List<Offset>>? traitsSignature;
   double ratioSignature;
 
-  /// Zone de la page que l'application a repeinte (effacée puis redessinée)
-  /// dans le PDF. L'image d'aperçu n'étant plus rafraîchie après chaque
-  /// modification, elle y montre encore les pixels d'avant : l'écran doit
-  /// donc recouvrir cette zone. C'est ce qui manquait à une ligne dont on
-  /// supprime le texte — sans texte à afficher, plus rien ne masquait
-  /// l'ancien, qui semblait « revenir ».
-  Rect? zoneMasque;
-
-  /// Couleur de fond à peindre derrière le texte affiché à l'écran quand la
-  /// ligne a été redessinée (voir [redessine]) : rafraîchir tout l'aperçu de
-  /// la page à chaque modification (un rendu complet de la page scannée,
-  /// coûteux) n'est alors plus nécessaire — la ligne s'affiche directement en
-  /// texte natif, sur ce fond, par-dessus les pixels d'origine désormais
-  /// obsolètes.
-  Color? fondEcran;
-
   MotDetecte(this.texte, this.zone,
       {this.gras = false,
       this.redessine = false,
@@ -102,8 +86,6 @@ class MotDetecte {
       this.famille = PdfFontFamily.helvetica,
       this.couleurTexte,
       this.tailleAuto,
-      this.fondEcran,
-      this.zoneMasque,
       this.traitsSignature,
       this.ratioSignature = 0.4});
 }
@@ -112,7 +94,13 @@ class Etat {
   final Uint8List octetsDocument;
   final List<MotDetecte> mots;
   final Uint8List? image;
-  Etat(this.octetsDocument, this.mots, this.image);
+
+  /// Nombre de pixels d'[image] par point PDF. L'aperçu n'est pas toujours
+  /// rendu à la même finesse ; sans retenir la sienne, un retour en arrière
+  /// relisait l'ancienne image avec l'échelle de la nouvelle, et les
+  /// couleurs et découpes étaient prises au mauvais endroit.
+  final double echelleImage;
+  Etat(this.octetsDocument, this.mots, this.image, this.echelleImage);
 }
 
 /// Un champ de formulaire du PDF (AcroForm). Il est repéré par sa position
@@ -354,7 +342,6 @@ class _AccueilState extends State<Accueil> {
   /// et sans rectangle blanc autour comme le serait une image).
   List<List<Offset>>? signatureNormalisee;
   double signatureRatio = 0.4;
-  bool enPoseSignature = false;
 
   /// Répertoire des signatures tracées, pour les reposer sans les retracer.
   /// Gardé pour la session en cours ; retracer après avoir fermé et rouvert
@@ -370,9 +357,23 @@ class _AccueilState extends State<Accueil> {
   /// zoom — flou, traits plus épais qu'autour.
   static const double _dpiOcr = 300.0;
 
+  /// Finesse du rendu de la page rafraîchi après chaque modification. Bien
+  /// plus basse que celle de la reconnaissance de texte : à 300 dpi, une A4
+  /// fait près de neuf millions de pixels, dont le décodage bloquait
+  /// l'application assez longtemps pour qu'Android affiche « ne répond
+  /// pas ». À 150 dpi l'image reste nette sur un écran de téléphone pour un
+  /// quart du travail.
+  static const double _dpiApercu = 150.0;
+
   bool _occupe = false;
 
   final TransformationController _transformation = TransformationController();
+
+  /// Taille de la zone d'affichage et échelle page → écran, relevées au
+  /// dernier rendu : elles disent quelle partie de la page est réellement
+  /// sous les yeux, pour y poser ce qu'on ajoute plutôt qu'au petit bonheur.
+  Size _tailleVue = Size.zero;
+  double _echelleVue = 0;
 
   /// En mode navigation, le doigt fait glisser la page et les lignes ne
   /// réagissent plus ; en mode édition, le doigt sélectionne / modifie et le
@@ -404,7 +405,6 @@ class _AccueilState extends State<Accueil> {
       // message « repère posé ») ne pouvait qu'embrouiller.
       enAjoutTexte = false;
       enCollage = false;
-      enPoseSignature = false;
       motEnEditionDirecte = mot;
       controleurDirect.text = mot.texte;
       controleurDirect.selection =
@@ -742,18 +742,45 @@ class _AccueilState extends State<Accueil> {
         normalises,
         ratio,
       ));
-      _preparerPoseSignature(normalises, ratio);
     });
+    await _poserSignatureChoisie(normalises, ratio);
   }
 
-  /// Arme la pose : la prochaine touche sur la page pose ces traits-là.
-  void _preparerPoseSignature(List<List<Offset>> traits, double ratio) {
-    signatureNormalisee = traits;
-    signatureRatio = ratio;
-    enPoseSignature = true;
-    enCollage = false;
-    enAjoutTexte = false;
-    statut = "Touchez la page à l'endroit où poser la signature";
+  /// Pose la signature choisie immédiatement, au milieu de ce qu'on a sous
+  /// les yeux, et la sélectionne : elle apparaît dans le document dès qu'on
+  /// l'a choisie, déjà entourée de ses quatre poignées, prête à être tirée
+  /// où l'on veut. Il fallait auparavant la choisir puis viser un endroit de
+  /// la page — un geste de plus, que rien n'annonçait, et qui donnait
+  /// l'impression que le choix n'avait pas été pris en compte.
+  Future<void> _poserSignatureChoisie(
+      List<List<Offset>> traits, double ratio) async {
+    setState(() {
+      signatureNormalisee = traits;
+      signatureRatio = ratio;
+      enCollage = false;
+      enAjoutTexte = false;
+    });
+    final centre = _centreVisible();
+    await _poserSignature(centre.dx, centre.dy);
+  }
+
+  /// Milieu de la partie de la page réellement visible, en points PDF : si
+  /// la page est zoomée ou défilée, ce qu'on ajoute doit apparaître là où
+  /// l'on regarde, pas en haut d'une page qu'il faudrait aller rechercher.
+  Offset _centreVisible() {
+    final milieuPage = Offset(taillePage.width / 2, taillePage.height / 2);
+    final echelle = _echelleVue;
+    if (echelle <= 0 || _tailleVue.isEmpty) return milieuPage;
+    final matrice = _transformation.value;
+    final zoom = matrice.getMaxScaleOnAxis();
+    if (zoom <= 0) return milieuPage;
+    final x = (_tailleVue.width / 2 - matrice.storage[12]) / (zoom * echelle);
+    final y = (_tailleVue.height / 2 - matrice.storage[13]) / (zoom * echelle);
+    if (x.isNaN || y.isNaN) return milieuPage;
+    return Offset(
+      x.clamp(0.0, taillePage.width),
+      y.clamp(0.0, taillePage.height),
+    );
   }
 
   /// Répertoire des signatures : en choisir une à poser, en tracer une
@@ -800,8 +827,7 @@ class _AccueilState extends State<Accueil> {
                   title: Text(sig.nom),
                   onTap: () {
                     Navigator.pop(ctx);
-                    setState(() =>
-                        _preparerPoseSignature(sig.traits, sig.ratio));
+                    _poserSignatureChoisie(sig.traits, sig.ratio);
                   },
                   trailing: IconButton(
                     icon: const Icon(Icons.delete_outline),
@@ -927,12 +953,8 @@ class _AccueilState extends State<Accueil> {
         mot.tailleManuelle = (tailleActuelle * facteur).clamp(4.0, 96.0);
         _ecrire(page, mot, mot.zone);
 
-        if (imageDeFond != null) {
-          final fond = _couleurLocale(mot.zone);
-          mot.fondEcran = Color.fromARGB(255, fond.r, fond.g, fond.b);
-          mot.zoneMasque = aEffacer.expandToInclude(_rectContenu(mot));
-        }
         setState(() => statut = "Ligne redimensionnée");
+        if (imageDeFond != null) await _rafraichirApercuOcr(doc);
       }
     } catch (e) {
       historique.removeLast();
@@ -985,11 +1007,17 @@ class _AccueilState extends State<Accueil> {
       // Un repère (sans texte) sur la signature : elle devient sélectionnable
       // et déplaçable comme le reste, sans traitement particulier.
       final zone = Rect.fromLTWH(gauche, haut, largeur, hauteur);
+      final posee = MotDetecte("", zone,
+          traitsSignature: traits, ratioSignature: signatureRatio);
       setState(() {
-        mots.add(MotDetecte("", zone,
-            traitsSignature: traits, ratioSignature: signatureRatio));
-        enPoseSignature = false;
-        statut = "Signature posée — double-tapez dessus pour la redimensionner";
+        mots.add(posee);
+        // Sélectionnée d'emblée : ses poignées et sa barre d'actions sont
+        // là tout de suite, sans avoir à deviner qu'il faut d'abord la
+        // toucher pour pouvoir la déplacer ou la redimensionner.
+        selection
+          ..clear()
+          ..add(posee);
+        statut = "Signature posée — tirez-la où vous voulez, les coins pour la taille";
       });
 
       if (imageDeFond == null) {
@@ -1430,7 +1458,7 @@ class _AccueilState extends State<Accueil> {
   }
 
   Future<void> _rafraichirApercuOcr(PdfDocument doc) async {
-    const dpi = _dpiOcr;
+    const dpi = _dpiApercu;
     try {
       final octetsDoc = Uint8List.fromList(await doc.save());
       PdfRaster? raster;
@@ -1465,6 +1493,7 @@ class _AccueilState extends State<Accueil> {
       setState(() {
         imageDeFond = pngOctets;
         imageDecodee = nouvelle;
+        echelleOcr = dpi / 72.0;
       });
     } catch (_) {}
   }
@@ -1753,41 +1782,29 @@ class _AccueilState extends State<Accueil> {
 
   Rect _rectEffacement(MotDetecte mot) => _rectContenu(mot).inflate(2);
 
-  /// Rectangle occupé à l'écran par une ligne. Le texte que l'application
-  /// redessine est souvent plus large que le texte scanné d'origine (la
-  /// police de substitution est moins condensée) : s'en tenir au cadre
-  /// détecté coupait la fin de la ligne à l'écran — « FRANCILITE GRAND
-  /// PROVINOIS depuis » devenait « FRANCILITE GRAND P » — alors que le PDF,
-  /// lui, contenait bien tout le texte. Le cadre suit donc le texte
-  /// réellement dessiné, sans dépasser le bord de la page.
+  /// Rectangle occupé à l'écran par une ligne. Au repos, c'est exactement la
+  /// place qu'elle occupe dans le PDF : l'aperçu de la page étant rafraîchi
+  /// après chaque modification, l'écran n'a plus rien à deviner ni à
+  /// recouvrir, et le cadre ne s'allonge donc plus tout seul dès qu'on
+  /// touche une ligne. Pendant la frappe, en revanche, il suit le texte
+  /// tapé : sans ça la fin de la ligne sortirait du champ et serait coupée.
   Rect _rectAffichage(MotDetecte mot, double echelle) {
-    final enEcriture = motEnEditionDirecte == mot;
-    // La zone repeinte doit toujours être recouverte, même sans texte.
-    final masque = mot.zoneMasque;
-    if (!enEcriture && !mot.redessine) {
-      return masque == null ? mot.zone : mot.zone.expandToInclude(masque);
-    }
+    if (motEnEditionDirecte != mot) return _rectContenu(mot);
 
-    final texte = enEcriture ? controleurDirect.text : mot.texte;
-    if (texte.isEmpty || echelle <= 0) {
-      return masque == null ? mot.zone : mot.zone.expandToInclude(masque);
-    }
+    final texte = controleurDirect.text;
+    if (texte.isEmpty || echelle <= 0) return _rectContenu(mot);
 
     // Mesure avec la police d'écran (celle du téléphone), et non celle du
     // PDF : les deux n'ont pas les mêmes largeurs de caractères, et se fier
     // à celle du PDF laissait la fin de la ligne dépasser du cadre, donc
     // coupée à l'affichage.
-    final taille = enEcriture
-        ? _tailleEditionDirecte(mot)
-        : _dessinTexte(mot, mot.zone).police.size;
-    final gras = enEcriture ? grasDirect : mot.gras;
     final peintre = TextPainter(
       text: TextSpan(
         text: texte,
         style: TextStyle(
-          fontSize: taille * echelle,
+          fontSize: _tailleEditionDirecte(mot) * echelle,
           height: 1.0,
-          fontWeight: gras ? FontWeight.bold : FontWeight.normal,
+          fontWeight: grasDirect ? FontWeight.bold : FontWeight.normal,
           fontStyle: mot.italique ? FontStyle.italic : FontStyle.normal,
         ),
       ),
@@ -1808,13 +1825,12 @@ class _AccueilState extends State<Accueil> {
     final hauteurTexte = peintre.height / echelle;
     if (hauteurTexte > hauteur) hauteur = hauteurTexte;
 
-    final rect = Rect.fromLTWH(
+    return Rect.fromLTWH(
       mot.zone.left,
       mot.zone.center.dy - hauteur / 2,
       largeur,
       hauteur,
     );
-    return masque == null ? rect : rect.expandToInclude(masque);
   }
 
   /// Rectangle utilisé pour déplacer une ligne : il sert à la fois à la
@@ -2030,12 +2046,10 @@ class _AccueilState extends State<Accueil> {
             famille: m.famille,
             couleurTexte: m.couleurTexte,
             tailleAuto: m.tailleAuto,
-            fondEcran: m.fondEcran,
-            zoneMasque: m.zoneMasque,
             traitsSignature: m.traitsSignature,
             ratioSignature: m.ratioSignature))
         .toList();
-    return Etat(octetsDocument, motsCopie, imageDeFond);
+    return Etat(octetsDocument, motsCopie, imageDeFond, echelleOcr);
   }
 
   Future<void> _restaurerEtat(Etat etat) async {
@@ -2054,13 +2068,12 @@ class _AccueilState extends State<Accueil> {
               famille: m.famille,
               couleurTexte: m.couleurTexte,
               tailleAuto: m.tailleAuto,
-              fondEcran: m.fondEcran,
-              zoneMasque: m.zoneMasque,
               traitsSignature: m.traitsSignature,
               ratioSignature: m.ratioSignature))
           .toList();
       imageDeFond = etat.image;
       imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
+      echelleOcr = etat.echelleImage;
       selection.clear();
       // Le document vient d'être rechargé : les champs lus dans l'ancien
       // n'existent plus, il faut les relire dans le nouveau.
@@ -2497,21 +2510,18 @@ class _AccueilState extends State<Accueil> {
       if (texteNettoye.isEmpty) mot.redessine = false;
       _ecrire(page, mot, mot.zone);
 
-      // La ligne s'affiche désormais en texte natif à l'écran, par-dessus le
-      // fond relevé ici : plus besoin de rafraîchir tout l'aperçu de la page
-      // — un rendu complet à 300dpi, assez lourd pour geler l'appli (« ne
-      // répond pas ») ou laisser voir un instant la ligne à moitié dessinée.
-      // On retient la zone repeinte pour la recouvrir à l'écran, y compris
-      // quand il n'y a plus de texte du tout à afficher par-dessus.
-      if (imageDeFond != null) {
-        final fond = _couleurLocale(mot.zone);
-        mot.fondEcran = Color.fromARGB(255, fond.r, fond.g, fond.b);
-        mot.zoneMasque = rectEfface.expandToInclude(_rectContenu(mot));
-      }
-
       setState(() {
         if (texteNettoye.isEmpty) selection.remove(mot);
       });
+
+      // La page affichée est réellement celle du PDF : on la redemande après
+      // chaque modification. La recouvrir à l'écran d'un rectangle de la
+      // couleur du papier avec le texte par-dessus, comme on le faisait pour
+      // éviter ce rendu, cachait ce qui dépassait du rectangle — d'où des
+      // fins de lignes qui « disparaissaient » à l'écran alors qu'elles
+      // étaient bien dans le document. Le rendu est maintenant assez léger
+      // (voir _dpiApercu) pour être refait à chaque fois.
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
     } catch (e) {
       // La zone a déjà été effacée à cet instant : sans ce retour en
       // arrière, un échec du dessin laisserait un cadre vide sans texte.
@@ -2562,6 +2572,57 @@ class _AccueilState extends State<Accueil> {
   Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) =>
       _deplacerGroupe([mot], dx, dy);
 
+  /// Déplace une signature posée : on efface sa place et on refait son tracé
+  /// un peu plus loin. Elle glisse librement sur toute la page et s'arrête
+  /// au bord, sans rien bousculer autour d'elle.
+  Future<void> _deplacerSignature(
+      MotDetecte mot, double dx, double dy) async {
+    final traits = mot.traitsSignature;
+    final doc = document;
+    if (traits == null || doc == null || _occupe) return;
+
+    final ancienne = mot.zone;
+    var gauche = ancienne.left + dx;
+    var haut = ancienne.top + dy;
+    if (gauche < 0) gauche = 0;
+    if (haut < 0) haut = 0;
+    if (gauche + ancienne.width > taillePage.width) {
+      gauche = taillePage.width - ancienne.width;
+    }
+    if (haut + ancienne.height > taillePage.height) {
+      haut = taillePage.height - ancienne.height;
+    }
+    final nouvelle =
+        Rect.fromLTWH(gauche, haut, ancienne.width, ancienne.height);
+    if ((nouvelle.left - ancienne.left).abs() < 0.5 &&
+        (nouvelle.top - ancienne.top).abs() < 0.5) {
+      setState(() => statut = "C'est déjà le bord de la page");
+      return;
+    }
+
+    setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
+    try {
+      historique.add(avant);
+      futur.clear();
+
+      final page = doc.pages[0];
+      _effacerRect(page, ancienne.inflate(2), mot);
+      _tracerSignature(page, traits, nouvelle);
+      setState(() {
+        mot.zone = nouvelle;
+        statut = "Signature déplacée";
+      });
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Déplacement annulé (rien n'a été perdu) : $e");
+    } finally {
+      setState(() => _occupe = false);
+    }
+  }
+
   /// Déplace ensemble une ou plusieurs lignes choisies (sélection multiple),
   /// avec exactement la même logique que le déplacement d'une seule ligne :
   /// chacune emmène ce qui est sur sa rangée, pousse les voisines gênantes,
@@ -2571,6 +2632,14 @@ class _AccueilState extends State<Accueil> {
     if (dx == 0 && dy == 0 || lignesPrincipales.isEmpty) return;
     final doc = document;
     if (doc == null || _occupe) return;
+    // Une signature n'est pas une ligne de texte : elle n'a pas de voisines
+    // à bousculer ni de puce à emmener, et son encre est du tracé qu'on
+    // refait plutôt que de la photographier. Elle a donc son propre
+    // déplacement, bien plus simple — et surtout qui aboutit.
+    if (lignesPrincipales.length == 1 &&
+        lignesPrincipales.first.traitsSignature != null) {
+      return _deplacerSignature(lignesPrincipales.first, dx, dy);
+    }
     // Chaque ligne emmène avec elle ce qui est sur sa rangée : un tiret ou
     // une puce détectés à part restaient sinon en arrière.
     final groupe = <MotDetecte>{
@@ -2580,7 +2649,7 @@ class _AccueilState extends State<Accueil> {
             (m) => m != principal && _memeRangee(m.zone, principal.zone)),
     }.toList();
 
-    final deplacements = <MotDetecte, Offset>{
+    final vises = <MotDetecte, Offset>{
       for (final m in groupe) m: Offset(dx, dy),
       for (final m in _lignesPoussees(groupe, dx, dy)) m: Offset(0, dy),
     };
@@ -2590,23 +2659,41 @@ class _AccueilState extends State<Accueil> {
     // efface plus qu'on n'emporte. Il est élargi vers la gauche pour
     // embarquer un tiret ou une puce que l'OCR n'a pas rattachés à la ligne.
     final rects = <MotDetecte, Rect>{
-      for (final m in deplacements.keys)
-        m: _etendreVersPuce(_rectDeplacement(m)),
+      for (final m in vises.keys) m: _etendreVersPuce(_rectDeplacement(m)),
     };
 
-    // Rien ne doit finir hors de la page : c'est ce qui faisait disparaître
-    // des lignes bousculées vers le bas.
-    final sortDeLaPage = deplacements.entries.any((e) {
-      final r = rects[e.key]!.shift(e.value);
-      return r.left < 0 ||
-          r.top < 0 ||
-          r.right > taillePage.width ||
-          r.bottom > taillePage.height;
-    });
-    if (sortDeLaPage) {
-      setState(() => statut = "Déplacement refusé : ça sortirait de la page");
+    // Rien ne doit finir hors de la page. Plutôt que de refuser tout le
+    // déplacement — au doigt, on ne comprenait pas pourquoi la sélection
+    // refusait de bouger —, on le raccourcit juste assez : le doigt glisse
+    // et l'objet s'arrête au bord, comme partout ailleurs.
+    var dxOk = dx;
+    var dyOk = dy;
+    for (final entree in vises.entries) {
+      final r = rects[entree.key]!;
+      if (entree.value.dx != 0) {
+        if (r.left + dxOk < 0) dxOk = -r.left;
+        if (r.right + dxOk > taillePage.width) {
+          dxOk = taillePage.width - r.right;
+        }
+      }
+      if (r.top + dyOk < 0) dyOk = -r.top;
+      if (r.bottom + dyOk > taillePage.height) {
+        dyOk = taillePage.height - r.bottom;
+      }
+    }
+    // Une ligne plus grande que la page ferait repartir la correction dans
+    // l'autre sens : mieux vaut alors ne pas bouger de cet axe.
+    if (dxOk.sign != dx.sign) dxOk = 0;
+    if (dyOk.sign != dy.sign) dyOk = 0;
+    if (dxOk == 0 && dyOk == 0) {
+      setState(() => statut = "C'est déjà le bord de la page");
       return;
     }
+
+    final deplacements = <MotDetecte, Offset>{
+      for (final entree in vises.entries)
+        entree.key: Offset(entree.value.dx == 0 ? 0.0 : dxOk, dyOk),
+    };
 
     setState(() => _occupe = true);
     final avant = await _etatActuel(doc);
@@ -2622,11 +2709,10 @@ class _AccueilState extends State<Accueil> {
       // supprimée) n'a rien à déplacer ni à effacer.
       final captures = <MotDetecte, Uint8List?>{};
       for (final m in deplacements.keys) {
-        // Une ligne redessinée (texte modifié) n'a plus ses pixels
-        // d'origine à jour dans l'image de la page (l'aperçu n'est plus
-        // rafraîchi après une modification, pour rester réactif) : on la
-        // redessine en texte plutôt que de photographier des pixels
-        // devenus obsolètes.
+        // Une ligne que l'application a elle-même écrite est réécrite
+        // plutôt que photographiée : son texte reste alors net à tous les
+        // agrandissements, là où une image la ferait pâlir un peu plus à
+        // chaque déplacement.
         captures[m] = (m.texte.isEmpty || m.redessine)
             ? null
             : _capturerZone(rects[m]!);
@@ -3040,12 +3126,21 @@ class _AccueilState extends State<Accueil> {
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
           ),
+          // Un trait qui avance pendant que la page est refaite : sans lui,
+          // l'application semblait figée le temps du rendu, et on appuyait
+          // une deuxième fois en croyant que rien ne s'était passé.
+          SizedBox(
+            height: 3,
+            child: _occupe ? const LinearProgressIndicator(minHeight: 3) : null,
+          ),
           Expanded(
             child: apercuLecture == null
                 ? const Center(child: CircularProgressIndicator())
                 : LayoutBuilder(
                     builder: (context, constraints) {
                       final echelle = constraints.maxWidth / taillePage.width;
+                      _echelleVue = echelle;
+                      _tailleVue = constraints.biggest;
                       return ClipRect(
                         child: InteractiveViewer(
                           constrained: false,
@@ -3359,6 +3454,13 @@ class _AccueilState extends State<Accueil> {
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
           ),
+          // Un trait qui avance pendant que la page est refaite : sans lui,
+          // l'application semblait figée le temps du rendu, et on appuyait
+          // une deuxième fois en croyant que rien ne s'était passé.
+          SizedBox(
+            height: 3,
+            child: _occupe ? const LinearProgressIndicator(minHeight: 3) : null,
+          ),
           Expanded(
             child: mots.isEmpty
                 ? const Center(child: CircularProgressIndicator())
@@ -3411,13 +3513,6 @@ class _AccueilState extends State<Accueil> {
                                                 details.localPosition.dy /
                                                     echelle,
                                               );
-                                            } else if (enPoseSignature) {
-                                              _poserSignature(
-                                                details.localPosition.dx /
-                                                    echelle,
-                                                details.localPosition.dy /
-                                                    echelle,
-                                              );
                                             }
                                           },
                                     child: imageDeFond != null
@@ -3433,7 +3528,6 @@ class _AccueilState extends State<Accueil> {
                               if (!modeNavigation &&
                                   !enCollage &&
                                   !enAjoutTexte &&
-                                  !enPoseSignature &&
                                   !modeRemplissage)
                                 for (final mot in mots)
                                 Positioned(
@@ -3586,26 +3680,20 @@ class _AccueilState extends State<Accueil> {
                                         selectionne: selection.contains(mot),
                                         groupe: selection.length > 1,
                                       ),
-                                      // Sur une page scannée, une ligne pas
-                                      // encore modifiée montre les pixels du
-                                      // scan tels quels (le cadre est
-                                      // transparent). Une ligne modifiée
-                                      // (mot.redessine) s'affiche en texte
-                                      // natif sur son fond relevé : c'est ce
-                                      // qui permet d'afficher la modification
-                                      // sans redessiner toute la page.
-                                      child: (imageDeFond != null &&
-                                              mot.zoneMasque == null)
+                                      // La page à l'écran est l'image du
+                                      // PDF, refaite après chaque
+                                      // modification : le cadre reste donc
+                                      // transparent et ne cache jamais rien.
+                                      // Seul un document sans image de page
+                                      // (texte vectoriel, non scanné) fait
+                                      // afficher le texte par le cadre.
+                                      child: (imageDeFond != null ||
+                                              mot.texte.isEmpty)
                                           ? null
-                                          : Container(
-                                              color: imageDeFond != null
-                                                  ? (mot.fondEcran ??
-                                                      Colors.white)
-                                                  : null,
-                                              child: mot.texte.isEmpty
-                                                  ? null
-                                                  : FittedBox(
-                                                fit: BoxFit.contain,
+                                          : Align(
+                                              alignment: Alignment.centerLeft,
+                                              child: FittedBox(
+                                                fit: BoxFit.scaleDown,
                                                 alignment:
                                                     Alignment.centerLeft,
                                                 child: Text(
@@ -3645,7 +3733,6 @@ class _AccueilState extends State<Accueil> {
                                   !modeNavigation &&
                                   !enCollage &&
                                   !enAjoutTexte &&
-                                  !enPoseSignature &&
                                   !groupeEnDeplacement)
                                 for (final coin in const [
                                   Alignment.topLeft,
@@ -3659,7 +3746,10 @@ class _AccueilState extends State<Accueil> {
                                             ? rectRedimension
                                             : null) ??
                                         _rectAffichage(mot, echelle);
-                                    const rayon = 11.0;
+                                    // Assez large pour un doigt : des
+                                    // poignées trop fines se laissaient
+                                    // difficilement attraper.
+                                    const rayon = 15.0;
                                     final x =
                                         (coin.x < 0 ? rect.left : rect.right) *
                                             echelle;
@@ -3827,8 +3917,7 @@ class _AccueilState extends State<Accueil> {
                             !modeRemplissage &&
                             !modeNavigation &&
                             !enCollage &&
-                            !enAjoutTexte &&
-                            !enPoseSignature)
+                            !enAjoutTexte)
                           Positioned.fill(
                             child: AnimatedBuilder(
                               animation: _transformation,
@@ -4000,23 +4089,8 @@ class _AccueilState extends State<Accueil> {
                 const SizedBox(height: 8),
                 FloatingActionButton.small(
                   heroTag: "signature",
-                  tooltip: enPoseSignature
-                      ? "Touchez la page où poser la signature"
-                      : "Signature (mes signatures / en tracer une)",
-                  backgroundColor: enPoseSignature
-                      ? Theme.of(context).colorScheme.primary
-                      : null,
-                  foregroundColor: enPoseSignature
-                      ? Theme.of(context).colorScheme.onPrimary
-                      : null,
-                  onPressed: _occupe
-                      ? null
-                      : (enPoseSignature
-                          ? () => setState(() {
-                                enPoseSignature = false;
-                                statut = "Signature annulée";
-                              })
-                          : _choisirSignature),
+                  tooltip: "Signature (mes signatures / en tracer une)",
+                  onPressed: _occupe ? null : _choisirSignature,
                   child: const Icon(Icons.draw),
                 ),
                 const SizedBox(height: 8),
