@@ -1371,7 +1371,7 @@ class _AccueilState extends State<Accueil> {
   /// entre ce niveau et un noir franc. Le traitement s'applique aux trois
   /// couches séparément : un tampon bleu ou un logo en couleur garde sa
   /// teinte, là où un passage en noir et blanc les aurait effacés.
-  img.Image _rehausserScan(img.Image source) {
+  img.Image _rehausserScan(img.Image source, {bool noirEtBlanc = false}) {
     final histogramme = List<int>.filled(256, 0);
     var total = 0;
     for (var y = 0; y < source.height; y += 3) {
@@ -1409,6 +1409,16 @@ class _AccueilState extends State<Accueil> {
     for (var y = 0; y < source.height; y++) {
       for (var x = 0; x < source.width; x++) {
         final p = source.getPixel(x, y);
+        if (noirEtBlanc) {
+          // Une seule valeur pour les trois couches : le document devient
+          // gris neutre, sans la dominante jaune ou bleutée que laisse
+          // l'éclairage de la pièce.
+          final gris = table[(0.299 * p.r + 0.587 * p.g + 0.114 * p.b)
+              .round()
+              .clamp(0, 255)];
+          sortie.setPixelRgb(x, y, gris, gris, gris);
+          continue;
+        }
         sortie.setPixelRgb(
           x,
           y,
@@ -1421,12 +1431,22 @@ class _AccueilState extends State<Accueil> {
     return sortie;
   }
 
-  /// Transforme une photo en document : la page prend les proportions de
-  /// l'image, qui la remplit sans marge, et le tout devient un PDF ouvert
-  /// en lecture — de là, tout le reste de l'application s'applique
-  /// (reconnaissance de texte, modification, signature, enregistrement).
-  Future<void> _scannerDocument(ImageSource source, bool blanchir) async {
-    if (_occupe) return;
+  /// Applique à une photo le traitement du mode choisi.
+  img.Image _traiterScan(img.Image source, String mode) {
+    switch (mode) {
+      case "photo":
+        return source;
+      case "nb":
+        return _rehausserScan(source, noirEtBlanc: true);
+      default:
+        return _rehausserScan(source);
+    }
+  }
+
+  /// Prend une photo et la ramène droite, à l'endroit, traitée selon le
+  /// mode. Renvoie null si l'utilisateur a renoncé ou si la photo est
+  /// illisible.
+  Future<img.Image?> _photoTraitee(ImageSource source, String mode) async {
     XFile? photo;
     try {
       photo = await ImagePicker().pickImage(
@@ -1438,47 +1458,117 @@ class _AccueilState extends State<Accueil> {
         imageQuality: 92,
       );
     } catch (e) {
-      setState(() => statut = "Appareil photo indisponible : $e");
-      return;
+      if (mounted) {
+        setState(() => statut = "Appareil photo indisponible : $e");
+      }
+      return null;
     }
-    if (photo == null) return;
+    if (photo == null) return null;
+    final octets = await photo.readAsBytes();
+    final decodee = img.decodeImage(octets);
+    if (decodee == null) return null;
+    // Une photo porte son orientation dans ses métadonnées : sans ça, un
+    // document pris en tenant le téléphone de travers arrivait couché.
+    return _traiterScan(img.bakeOrientation(decodee), mode);
+  }
 
+  /// Rectangle où poser une image dans un emplacement, en gardant ses
+  /// proportions et en la centrant : une carte photographiée de travers ne
+  /// doit pas être étirée pour remplir sa moitié de page.
+  Rect _placerDans(img.Image image, Rect emplacement) {
+    if (image.width <= 0 || image.height <= 0) return emplacement;
+    final rapportImage = image.height / image.width;
+    var largeur = emplacement.width;
+    var hauteur = largeur * rapportImage;
+    if (hauteur > emplacement.height) {
+      hauteur = emplacement.height;
+      largeur = hauteur / rapportImage;
+    }
+    return Rect.fromLTWH(
+      emplacement.left + (emplacement.width - largeur) / 2,
+      emplacement.top + (emplacement.height - hauteur) / 2,
+      largeur,
+      hauteur,
+    );
+  }
+
+  PdfBitmap _versBitmap(img.Image image) =>
+      PdfBitmap(Uint8List.fromList(img.encodeJpg(image, quality: 88)));
+
+  /// Ouvre un PDF fabriqué à partir d'images. Une seule photo donne une
+  /// page à ses proportions, qu'elle remplit sans marge. Plusieurs donnent
+  /// une A4 par photo — sauf en mode pièce d'identité, où recto et verso
+  /// sont posés l'un au-dessus de l'autre sur la même page, comme le
+  /// demandent les administrations.
+  Future<void> _ouvrirDepuisImages(
+      List<img.Image> images, String mode) async {
+    if (images.isEmpty) return;
+    final doc = PdfDocument();
+    doc.pageSettings.margins.all = 0;
+    try {
+      if (mode == "identite") {
+        const largeur = 595.0;
+        const hauteur = 842.0;
+        doc.pageSettings.size = const Size(largeur, hauteur);
+        final page = doc.pages.add();
+        const marge = 48.0;
+        // Une moitié de page chacun : la carte reste à une taille lisible
+        // et le verso tombe juste en dessous, prêt à imprimer.
+        for (var i = 0; i < images.length && i < 2; i++) {
+          final emplacement = Rect.fromLTWH(
+            marge,
+            marge + i * (hauteur / 2 - marge),
+            largeur - marge * 2,
+            hauteur / 2 - marge * 1.5,
+          );
+          page.graphics.drawImage(
+              _versBitmap(images[i]), _placerDans(images[i], emplacement));
+        }
+      } else if (images.length == 1) {
+        final image = images.first;
+        const largeur = 595.0;
+        final hauteur = largeur * image.height / image.width;
+        doc.pageSettings.size = Size(largeur, hauteur);
+        final page = doc.pages.add();
+        page.graphics.drawImage(
+            _versBitmap(image), Rect.fromLTWH(0, 0, largeur, hauteur));
+      } else {
+        const largeur = 595.0;
+        const hauteur = 842.0;
+        doc.pageSettings.size = const Size(largeur, hauteur);
+        for (final image in images) {
+          final page = doc.pages.add();
+          page.graphics.drawImage(_versBitmap(image),
+              _placerDans(image, const Rect.fromLTWH(0, 0, largeur, hauteur)));
+        }
+      }
+
+      final octetsPdf = Uint8List.fromList(await doc.save());
+      if (!mounted) return;
+      setState(() => _occupe = false);
+      await _chargerPourLecture(octetsPdf);
+      if (mounted) {
+        setState(() => statut = images.length > 1
+            ? "${images.length} pages scannées — seule la première est "
+                "modifiable pour l'instant"
+            : "Document scanné — appuyez sur le crayon pour le modifier");
+      }
+    } finally {
+      doc.dispose();
+    }
+  }
+
+  /// Scan d'une page simple : une photo, un document.
+  Future<void> _scannerPage(ImageSource source, String mode) async {
+    if (_occupe) return;
+    final image = await _photoTraitee(source, mode);
+    if (image == null) return;
     setState(() {
       _occupe = true;
       statut = "Traitement de la photo...";
     });
     try {
-      final octets = await photo.readAsBytes();
-      var image = img.decodeImage(octets);
-      if (image == null) {
-        setState(() => statut = "Photo illisible");
-        return;
-      }
-      // Une photo porte son orientation dans ses métadonnées : sans ça, un
-      // document pris en tenant le téléphone de travers arrivait couché.
-      image = img.bakeOrientation(image);
-      if (blanchir) image = _rehausserScan(image);
-
-      final doc = PdfDocument();
-      doc.pageSettings.margins.all = 0;
-      const largeurPage = 595.0;
-      final hauteurPage = largeurPage * image.height / image.width;
-      doc.pageSettings.size = Size(largeurPage, hauteurPage);
-      final page = doc.pages.add();
-      page.graphics.drawImage(
-        PdfBitmap(Uint8List.fromList(img.encodeJpg(image, quality: 88))),
-        Rect.fromLTWH(0, 0, largeurPage, hauteurPage),
-      );
-      final octetsPdf = Uint8List.fromList(await doc.save());
-      doc.dispose();
-
-      if (!mounted) return;
-      setState(() => _occupe = false);
-      await _chargerPourLecture(octetsPdf);
-      if (mounted) {
-        setState(() => statut =
-            "Document scanné — appuyez sur le crayon pour le modifier");
-      }
+      await _ouvrirDepuisImages([image], mode);
     } catch (e) {
       setState(() => statut = "Scan impossible : $e");
     } finally {
@@ -1486,56 +1576,174 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
-  /// Propose de scanner : par l'appareil photo, ou depuis une photo déjà
-  /// prise. Le blanchiment du fond est actif par défaut — c'est ce qu'on
-  /// attend d'un scan — mais se coupe pour une page en couleur qu'on veut
-  /// garder telle quelle.
+  /// Scan d'une pièce d'identité : le recto, puis le verso si on le
+  /// souhaite, posés tous deux sur une seule page.
+  Future<void> _scannerIdentite(ImageSource source) async {
+    if (_occupe) return;
+    setState(() => statut = "Photographiez le recto");
+    final recto = await _photoTraitee(source, "identite");
+    if (recto == null) return;
+
+    final images = <img.Image>[recto];
+    if (mounted) {
+      final avecVerso = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("Et le verso ?"),
+          content: const Text(
+              "Le verso sera posé sous le recto, sur la même page."),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Recto seul"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Photographier le verso"),
+            ),
+          ],
+        ),
+      );
+      if (avecVerso == true) {
+        final verso = await _photoTraitee(source, "identite");
+        if (verso != null) images.add(verso);
+      }
+    }
+
+    setState(() {
+      _occupe = true;
+      statut = "Composition de la page...";
+    });
+    try {
+      await _ouvrirDepuisImages(images, "identite");
+    } catch (e) {
+      setState(() => statut = "Scan impossible : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Enregistre la page telle qu'elle s'affiche, en image, et la propose au
+  /// partage. Un PDF ne se glisse pas dans une conversation aussi
+  /// facilement qu'une photo : pour envoyer une attestation par message,
+  /// c'est souvent l'image qu'on attend.
+  Future<void> _exporterImage() async {
+    final doc = document;
+    if (doc == null || enregistrementEnCours) return;
+    setState(() => enregistrementEnCours = true);
+    try {
+      final octets =
+          Uint8List.fromList(await _octetsAvecSignatures(doc));
+      PdfRaster? raster;
+      await for (final r
+          in Printing.raster(octets, pages: const [0], dpi: 200)) {
+        raster = r;
+        break;
+      }
+      if (raster == null) throw Exception("rendu impossible");
+      final png = await raster.toPng();
+      final dossier = await getTemporaryDirectory();
+      final fichier = File(
+          '${dossier.path}/page_${DateTime.now().millisecondsSinceEpoch}.png');
+      await fichier.writeAsBytes(png, flush: true);
+      await Share.shareXFiles([XFile(fichier.path)], text: "Page en image");
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Export en image impossible : $e")),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => enregistrementEnCours = false);
+    }
+  }
+
+  /// Panneau du scan : le mode d'abord — c'est lui qui change le résultat —,
+  /// puis la source. Les quatre modes couvrent ce qu'on scanne vraiment :
+  /// un document sur papier, une photo à garder telle quelle, un texte à
+  /// rendre franc en noir et blanc, une carte d'identité recto-verso.
   Future<void> _scanner() async {
-    var blanchir = true;
+    var mode = "document";
+    const descriptions = {
+      "document": "Le papier devient blanc et l'encre franche. Les couleurs "
+          "— tampon, logo — sont conservées.",
+      "photo": "Aucun traitement : la photo est gardée telle quelle.",
+      "nb": "Gris neutre et contrasté, sans dominante de couleur. Léger, et "
+          "net à l'impression.",
+      "identite": "Recto et verso posés l'un au-dessus de l'autre sur une "
+          "seule page, comme le demandent les administrations.",
+    };
     await showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheetState) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text("Scanner un document",
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text("Scanner",
+                    style:
+                        TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (final entree in const [
+                      ["document", "Document"],
+                      ["photo", "Photo"],
+                      ["nb", "Noir et blanc"],
+                      ["identite", "Pièce d'identité"],
+                    ])
+                      ChoiceChip(
+                        label: Text(entree[1]),
+                        selected: mode == entree[0],
+                        onSelected: (_) =>
+                            setSheetState(() => mode = entree[0]),
+                      ),
+                  ],
                 ),
-              ),
-              SwitchListTile(
-                value: blanchir,
-                onChanged: (v) => setSheetState(() => blanchir = v),
-                secondary: const Icon(Icons.auto_fix_high),
-                title: const Text("Blanchir le fond"),
-                subtitle: const Text(
-                    "Le papier devient blanc et l'encre franche, comme un "
-                    "vrai scan. Les couleurs sont conservées."),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                leading: const Icon(Icons.photo_camera),
-                title: const Text("Prendre une photo"),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _scannerDocument(ImageSource.camera, blanchir);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.photo_library),
-                title: const Text("Choisir une photo déjà prise"),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _scannerDocument(ImageSource.gallery, blanchir);
-                },
-              ),
-              const SizedBox(height: 8),
-            ],
+                const SizedBox(height: 10),
+                Text(
+                  descriptions[mode]!,
+                  style: TextStyle(
+                      fontSize: 13, color: Colors.black.withOpacity(0.6)),
+                ),
+                const SizedBox(height: 8),
+                const Divider(height: 1),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.photo_camera),
+                  title: Text(mode == "identite"
+                      ? "Photographier le recto"
+                      : "Prendre une photo"),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    if (mode == "identite") {
+                      _scannerIdentite(ImageSource.camera);
+                    } else {
+                      _scannerPage(ImageSource.camera, mode);
+                    }
+                  },
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.photo_library),
+                  title: const Text("Choisir une photo déjà prise"),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    if (mode == "identite") {
+                      _scannerIdentite(ImageSource.gallery);
+                    } else {
+                      _scannerPage(ImageSource.gallery, mode);
+                    }
+                  },
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -4143,6 +4351,9 @@ class _AccueilState extends State<Accueil> {
           case "scanner":
             _scanner();
             break;
+          case "image":
+            _exporterImage();
+            break;
           case "fermer":
             _fermerDocument();
             break;
@@ -4187,9 +4398,19 @@ class _AccueilState extends State<Accueil> {
             contentPadding: EdgeInsets.zero,
             leading: Icon(Icons.document_scanner),
             title: Text("Scanner un document"),
-            subtitle: Text("Appareil photo ou photo existante"),
+            subtitle: Text("Document, photo, noir et blanc, pièce d'identité"),
           ),
         ),
+        if (document != null)
+          const PopupMenuItem(
+            value: "image",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.image_outlined),
+              title: Text("Envoyer la page en image"),
+              subtitle: Text("Pour un message, plus simple qu'un PDF"),
+            ),
+          ),
         const PopupMenuItem(
           value: "ouvrir",
           child: ListTile(
