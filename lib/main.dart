@@ -173,23 +173,25 @@ class _CadreLigne extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
     if (selectionne) {
-      canvas.drawRect(rect, Paint()..color = Colors.blue.withOpacity(0.10));
+      canvas.drawRect(rect, Paint()..color = Colors.blue.withOpacity(0.08));
       canvas.drawRect(
         rect,
         Paint()
           ..color = Colors.blue
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 2,
+          ..strokeWidth = 1.6,
       );
       return;
     }
 
+    // Assez visible pour dire « ceci est modifiable », assez pâle pour ne
+    // pas concurrencer le document : c'est le document qu'on vient lire.
     final pinceau = Paint()
-      ..color = Colors.blueGrey.withOpacity(0.5)
+      ..color = Colors.blueGrey.withOpacity(0.32)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1;
-    const tiret = 4.0;
-    const trou = 3.0;
+    const tiret = 3.0;
+    const trou = 4.0;
     for (var x = 0.0; x < size.width; x += tiret + trou) {
       final fin = (x + tiret) > size.width ? size.width : x + tiret;
       canvas.drawLine(Offset(x, 0), Offset(fin, 0), pinceau);
@@ -428,6 +430,20 @@ class _AccueilState extends State<Accueil> {
   static const double _dpiApercu = 150.0;
 
   bool _occupe = false;
+
+  /// Les outils du bord droit sont repliés par défaut derrière un seul
+  /// bouton : en colonne, ils recouvraient le bord droit de la page.
+  bool outilsOuverts = false;
+
+  /// Referme l'éventail des outils après avoir lancé l'un d'eux : on a
+  /// choisi, la page peut redevenir dégagée.
+  VoidCallback? _outil(VoidCallback? action) {
+    if (action == null) return null;
+    return () {
+      setState(() => outilsOuverts = false);
+      action();
+    };
+  }
 
   final TransformationController _transformation = TransformationController();
 
@@ -3536,10 +3552,13 @@ class _AccueilState extends State<Accueil> {
   /// côte à côte au-dessus de la sélection.
   Widget _boutonMenu(IconData icone, String infobulle, VoidCallback? action) {
     return IconButton(
-      icon: Icon(icone, size: 22),
-      color: Colors.white,
-      disabledColor: Colors.white38,
+      icon: Icon(icone, size: 19),
+      color: Colors.white.withOpacity(0.92),
+      disabledColor: Colors.white30,
       tooltip: infobulle,
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 44, height: 44),
       onPressed: action,
     );
   }
@@ -4029,7 +4048,12 @@ class _AccueilState extends State<Accueil> {
             padding: const EdgeInsets.all(8),
             child: Text(
               statut,
-              style: const TextStyle(fontWeight: FontWeight.bold),
+              // Une indication, pas une alarme : le document reste la seule
+              // chose en gras à l'écran.
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.black.withOpacity(0.62),
+              ),
             ),
           ),
           // Un trait qui avance pendant que la page est refaite : sans lui,
@@ -4428,7 +4452,12 @@ class _AccueilState extends State<Accueil> {
             padding: const EdgeInsets.all(8),
             child: Text(
               statut,
-              style: const TextStyle(fontWeight: FontWeight.bold),
+              // Une indication, pas une alarme : le document reste la seule
+              // chose en gras à l'écran.
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.black.withOpacity(0.62),
+              ),
             ),
           ),
           // Un trait qui avance pendant que la page est refaite : sans lui,
@@ -4907,7 +4936,11 @@ class _AccueilState extends State<Accueil> {
                             !modeRemplissage &&
                             !modeNavigation &&
                             !enCollage &&
-                            !enAjoutTexte)
+                            !enAjoutTexte &&
+                            // Pendant qu'on fait glisser la sélection, la
+                            // barre disparaît : elle suivrait le doigt en
+                            // masquant justement l'endroit visé.
+                            !groupeEnDeplacement)
                           Positioned.fill(
                             child: AnimatedBuilder(
                               animation: _transformation,
@@ -4935,8 +4968,8 @@ class _AccueilState extends State<Accueil> {
                                 final estSignature =
                                     mot.traitsSignature != null;
                                 final nbBoutons = estSignature ? 4 : 5;
-                                final largeurMenu = 48.0 * nbBoutons + 8;
-                                const hauteurMenu = 52.0;
+                                final largeurMenu = 44.0 * nbBoutons + 10;
+                                const hauteurMenu = 44.0;
                                 var gauche = coin.dx;
                                 if (gauche + largeurMenu >
                                     constraints.maxWidth) {
@@ -4961,10 +4994,13 @@ class _AccueilState extends State<Accueil> {
                                       width: largeurMenu,
                                       height: hauteurMenu,
                                       child: Material(
-                                        color: const Color(0xFF2C2C2E),
+                                        // Pastille arrondie, presque noire :
+                                        // elle se pose sur la page sans y
+                                        // faire un bloc.
+                                        color: const Color(0xF01C1C1E),
                                         borderRadius:
-                                            BorderRadius.circular(10),
-                                        elevation: 8,
+                                            BorderRadius.circular(22),
+                                        elevation: 4,
                                         clipBehavior: Clip.antiAlias,
                                         child: Row(
                                           mainAxisAlignment:
@@ -5029,95 +5065,137 @@ class _AccueilState extends State<Accueil> {
           ),
         ],
       ),
+      // Les outils se replient derrière un seul bouton. En colonne, les six
+      // recouvraient tout le bord droit de la page — sur un document dont le
+      // contenu va jusqu'au bord, ils mangeaient le cachet et la signature.
       floatingActionButton: mots.isEmpty
           ? null
           : Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                FloatingActionButton.small(
-                  heroTag: "ajoutTexte",
-                  tooltip: enAjoutTexte
-                      ? "Touchez la page pour écrire à cet endroit"
-                      : "Ajouter du texte n'importe où",
-                  backgroundColor:
-                      enAjoutTexte ? Theme.of(context).colorScheme.primary : null,
-                  foregroundColor: enAjoutTexte
-                      ? Theme.of(context).colorScheme.onPrimary
-                      : null,
-                  onPressed: _occupe
-                      ? null
-                      : () => setState(() {
-                            enAjoutTexte = !enAjoutTexte;
-                            if (enAjoutTexte) enCollage = false;
-                            statut = enAjoutTexte
-                                ? "Touchez la page pour écrire à cet endroit"
-                                : "Ajout de texte annulé";
-                          }),
-                  child: const Icon(Icons.add),
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.bottomCenter,
+                  child: !outilsOuverts
+                      ? const SizedBox(width: 40)
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            FloatingActionButton.small(
+                              heroTag: "ajoutTexte",
+                              elevation: 2,
+                              tooltip: enAjoutTexte
+                                  ? "Touchez la page pour écrire à cet endroit"
+                                  : "Ajouter du texte n'importe où",
+                              backgroundColor: enAjoutTexte
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                              foregroundColor: enAjoutTexte
+                                  ? Theme.of(context).colorScheme.onPrimary
+                                  : null,
+                              onPressed: _outil(_occupe
+                                  ? null
+                                  : () => setState(() {
+                                        enAjoutTexte = !enAjoutTexte;
+                                        if (enAjoutTexte) enCollage = false;
+                                        statut = enAjoutTexte
+                                            ? "Touchez la page pour écrire à cet endroit"
+                                            : "Ajout de texte annulé";
+                                      })),
+                              child: const Icon(Icons.add),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "mode",
+                              elevation: 2,
+                              tooltip: modeNavigation
+                                  ? "Mode navigation : doigt = déplacer la page"
+                                  : "Mode édition : doigt = sélectionner une ligne",
+                              backgroundColor: modeNavigation
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                              foregroundColor: modeNavigation
+                                  ? Theme.of(context).colorScheme.onPrimary
+                                  : null,
+                              onPressed: _outil(() => setState(() {
+                                    modeNavigation = !modeNavigation;
+                                    statut = modeNavigation
+                                        ? "Mode navigation : faites glisser la page"
+                                        : "Mode édition : touchez une ligne";
+                                  })),
+                              child: Icon(modeNavigation
+                                  ? Icons.pan_tool
+                                  : Icons.touch_app),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "signature",
+                              elevation: 2,
+                              tooltip:
+                                  "Signature (mes signatures / en tracer une)",
+                              onPressed:
+                                  _outil(_occupe ? null : _choisirSignature),
+                              child: const Icon(Icons.draw),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "remplir",
+                              elevation: 2,
+                              tooltip: modeRemplissage
+                                  ? "Quitter le remplissage du formulaire"
+                                  : "Remplir le formulaire du PDF",
+                              backgroundColor: modeRemplissage
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                              foregroundColor: modeRemplissage
+                                  ? Theme.of(context).colorScheme.onPrimary
+                                  : null,
+                              onPressed:
+                                  _outil(_occupe ? null : _basculerRemplissage),
+                              child: const Icon(Icons.edit_note),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "recentrer",
+                              elevation: 2,
+                              tooltip: "Recentrer / réinitialiser le zoom",
+                              onPressed: _outil(() =>
+                                  _transformation.value = Matrix4.identity()),
+                              child: const Icon(Icons.zoom_out_map),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "aplatir",
+                              elevation: 2,
+                              tooltip:
+                                  "Rédaction définitive (avant de partager)",
+                              onPressed: _outil(
+                                  _occupe ? null : _confirmerAplatissement),
+                              child: const Icon(Icons.security),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "nettoyer",
+                              elevation: 2,
+                              tooltip: "Retirer tous les cadres vides",
+                              onPressed: _outil(
+                                  _occupe ? null : _nettoyerReperesVides),
+                              child: const Icon(Icons.clear_all),
+                            ),
+                            const SizedBox(height: 10),
+                          ],
+                        ),
                 ),
-                const SizedBox(height: 8),
                 FloatingActionButton.small(
-                  heroTag: "mode",
-                  tooltip: modeNavigation
-                      ? "Mode navigation : doigt = déplacer la page"
-                      : "Mode édition : doigt = sélectionner une ligne",
-                  backgroundColor: modeNavigation
-                      ? Theme.of(context).colorScheme.primary
-                      : null,
-                  foregroundColor: modeNavigation
-                      ? Theme.of(context).colorScheme.onPrimary
-                      : null,
-                  onPressed: () => setState(() {
-                    modeNavigation = !modeNavigation;
-                    statut = modeNavigation
-                        ? "Mode navigation : faites glisser la page"
-                        : "Mode édition : touchez une ligne";
-                  }),
+                  heroTag: "outils",
+                  elevation: 2,
+                  tooltip: outilsOuverts ? "Fermer les outils" : "Outils",
+                  onPressed: () =>
+                      setState(() => outilsOuverts = !outilsOuverts),
                   child: Icon(
-                      modeNavigation ? Icons.pan_tool : Icons.touch_app),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: "signature",
-                  tooltip: "Signature (mes signatures / en tracer une)",
-                  onPressed: _occupe ? null : _choisirSignature,
-                  child: const Icon(Icons.draw),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: "remplir",
-                  tooltip: modeRemplissage
-                      ? "Quitter le remplissage du formulaire"
-                      : "Remplir le formulaire du PDF",
-                  backgroundColor: modeRemplissage
-                      ? Theme.of(context).colorScheme.primary
-                      : null,
-                  foregroundColor: modeRemplissage
-                      ? Theme.of(context).colorScheme.onPrimary
-                      : null,
-                  onPressed: _occupe ? null : _basculerRemplissage,
-                  child: const Icon(Icons.edit_note),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: "recentrer",
-                  tooltip: "Recentrer / réinitialiser le zoom",
-                  onPressed: () => _transformation.value = Matrix4.identity(),
-                  child: const Icon(Icons.zoom_out_map),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: "aplatir",
-                  tooltip: "Rédaction définitive (avant de partager)",
-                  onPressed: _occupe ? null : _confirmerAplatissement,
-                  child: const Icon(Icons.security),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: "nettoyer",
-                  tooltip: "Retirer tous les cadres vides",
-                  onPressed: _occupe ? null : _nettoyerReperesVides,
-                  child: const Icon(Icons.clear_all),
+                      outilsOuverts ? Icons.close : Icons.more_horiz),
                 ),
               ],
             ),
