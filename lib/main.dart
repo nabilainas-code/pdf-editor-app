@@ -560,6 +560,13 @@ class _AccueilState extends State<Accueil> {
   /// Outil de tracé au doigt actif : « stylo » pour écrire à la main,
   /// « gomme » pour effacer au passage. Rien à sélectionner, aucun cadre à
   /// poser puis à retirer : on touche la page, ça agit.
+  /// Mode « tampon / signature » : un cadre posé pour entourer un cachet,
+  /// une signature ou un logo, l'ajuster tranquillement, puis le détacher.
+  /// Ce cadre est vide — l'ajuster ne réécrit rien dans la page, donc rien
+  /// ne peut se mélanger à ce qu'il recouvre.
+  bool modeTampon = false;
+  MotDetecte? cadreTampon;
+
   String? outilTrace;
   final List<Offset> traceEnCours = [];
   double epaisseurStylo = 2;
@@ -1571,6 +1578,59 @@ class _AccueilState extends State<Accueil> {
         statut = "Taille modifiée";
       });
       return;
+    }
+
+    // Étirer largement le cadre d'une ligne de texte, c'est presque
+    // toujours avoir voulu entourer autre chose — un cachet, une signature.
+    // Or ici la ligne serait réécrite à la taille du cadre, en travers de ce
+    // qu'il recouvre. Plutôt que de laisser faire ce dégât en silence, on
+    // demande, et on propose l'outil qui convient.
+    if (mot.texte.isNotEmpty &&
+        mot.zone.width > 0 &&
+        mot.zone.height > 0 &&
+        nouvelle.width / mot.zone.width > 1.8 &&
+        nouvelle.height / mot.zone.height > 1.8) {
+      final choix = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("Agrandir ce texte, ou entourer un tampon ?"),
+          content: const Text(
+              "Ce cadre est celui d'une ligne de texte : l'agrandir "
+              "réécrira cette ligne en grand, par-dessus ce qui se trouve "
+              "dessous.\n\nPour attraper un cachet, une signature ou un "
+              "logo, c'est un cadre à part qu'il faut."),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Annuler"),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, "texte"),
+              child: const Text("Agrandir le texte"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, "tampon"),
+              child: const Text("Entourer un tampon"),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || choix == null) return;
+      if (choix == "tampon") {
+        // La ligne n'est pas touchée : on pose à sa place le cadre vide, à
+        // la taille que le doigt venait de dessiner.
+        final cadre = MotDetecte("", nouvelle);
+        setState(() {
+          mots = [...mots, cadre];
+          selection
+            ..clear()
+            ..add(cadre);
+          cadreTampon = cadre;
+          modeTampon = true;
+          statut = "Ajustez le cadre autour du tampon, puis « Détacher »";
+        });
+        return;
+      }
     }
 
     // Un repère vide n'a rien dans la page : son cadre seul change.
@@ -4224,6 +4284,73 @@ class _AccueilState extends State<Accueil> {
   /// en semer un, et il fallait ensuite le retrouver et le retirer. Pour les
   /// petites retouches — un point, un trait, une lettre isolée — la gomme au
   /// doigt fait le travail sans rien laisser derrière elle.
+  /// Pose un cadre fait pour entourer un tampon, une signature ou un logo.
+  ///
+  /// Étirer le cadre d'une *ligne de texte* réécrit cette ligne à la taille
+  /// du cadre : en essayant d'englober un cachet avec, on obtenait le texte
+  /// de la ligne étalé en grand par-dessus le cachet, et tout se mélangeait.
+  /// Ce cadre-ci ne contient rien : on l'ajuste autant qu'on veut sans que
+  /// la page bouge d'un pixel, et « Détacher » emporte alors ce qui est
+  /// dessous.
+  void _outilTampon() {
+    if (document == null || _occupe) return;
+    final centre = _centreVisible();
+    var largeur = taillePage.width / 3;
+    if (largeur < 60) largeur = 60;
+    var hauteur = largeur * 0.55;
+    var gauche = centre.dx - largeur / 2;
+    var haut = centre.dy - hauteur / 2;
+    if (gauche < 0) gauche = 0;
+    if (haut < 0) haut = 0;
+    if (gauche + largeur > taillePage.width) {
+      gauche = taillePage.width - largeur;
+    }
+    if (haut + hauteur > taillePage.height) {
+      haut = taillePage.height - hauteur;
+    }
+    final cadre = MotDetecte("", Rect.fromLTWH(gauche, haut, largeur, hauteur));
+    setState(() {
+      mots = [...mots, cadre];
+      selection
+        ..clear()
+        ..add(cadre);
+      cadreTampon = cadre;
+      modeTampon = true;
+      enAjoutTexte = false;
+      enCollage = false;
+      outilTrace = null;
+      statut = "Ajustez le cadre autour du tampon, puis « Détacher »";
+    });
+  }
+
+  /// Termine le mode tampon : détache ce que le cadre entoure.
+  Future<void> _detacherLeTampon() async {
+    final cadre = cadreTampon;
+    if (cadre == null) {
+      setState(() => modeTampon = false);
+      return;
+    }
+    await _decouperCadre(cadre);
+    if (!mounted) return;
+    setState(() {
+      modeTampon = false;
+      cadreTampon = null;
+    });
+  }
+
+  void _annulerLeTampon() {
+    final cadre = cadreTampon;
+    setState(() {
+      modeTampon = false;
+      cadreTampon = null;
+      if (cadre != null) {
+        mots = mots.where((m) => m != cadre).toList();
+        selection.remove(cadre);
+      }
+      statut = "Cadre retiré (le PDF n'a pas changé)";
+    });
+  }
+
   void _poserCadre() {
     final centre = _centreVisible();
     _ajouterZoneEffacee(centre.dx, centre.dy);
@@ -5927,6 +6054,17 @@ class _AccueilState extends State<Accueil> {
                                               // l'écriture en gardant ce qui
                                               // vient d'être tapé.
                                               _validerEditionDirecte();
+                                            } else if (modeTampon &&
+                                                cadreTampon != null) {
+                                              // En mode tampon, le cadre est
+                                              // le seul objet en cours : le
+                                              // perdre d'un appui à côté
+                                              // laisserait le bouton
+                                              // « Détacher » sans rien à
+                                              // détacher.
+                                              setState(() => selection
+                                                ..clear()
+                                                ..add(cadreTampon!));
                                             } else if (selection.isNotEmpty) {
                                               // Un appui sur le blanc de la
                                               // page efface toute sélection.
@@ -6586,6 +6724,25 @@ class _AccueilState extends State<Accueil> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
+                // En mode tampon, l'action à faire ensuite est nommée en
+                // clair : on ajuste le cadre, on appuie, c'est détaché.
+                if (modeTampon) ...[
+                  FloatingActionButton.extended(
+                    heroTag: "detacherTampon",
+                    onPressed: _occupe ? null : _detacherLeTampon,
+                    icon: const Icon(Icons.content_cut),
+                    label: const Text("Détacher"),
+                  ),
+                  const SizedBox(height: 8),
+                  FloatingActionButton.small(
+                    heroTag: "annulerTampon",
+                    elevation: 2,
+                    tooltip: "Retirer ce cadre sans rien détacher",
+                    onPressed: _occupe ? null : _annulerLeTampon,
+                    child: const Icon(Icons.close),
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 AnimatedSize(
                   duration: const Duration(milliseconds: 180),
                   curve: Curves.easeOutCubic,
@@ -6640,6 +6797,22 @@ class _AccueilState extends State<Accueil> {
                               child: Icon(modeNavigation
                                   ? Icons.pan_tool
                                   : Icons.touch_app),
+                            ),
+                            const SizedBox(height: 8),
+                            FloatingActionButton.small(
+                              heroTag: "tampon",
+                              elevation: 2,
+                              tooltip: "Tampon ou signature : entourer, "
+                                  "puis détacher",
+                              backgroundColor: modeTampon
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                              foregroundColor: modeTampon
+                                  ? Theme.of(context).colorScheme.onPrimary
+                                  : null,
+                              onPressed:
+                                  _outil(_occupe ? null : _outilTampon),
+                              child: const Icon(Icons.approval),
                             ),
                             const SizedBox(height: 8),
                             FloatingActionButton.small(
