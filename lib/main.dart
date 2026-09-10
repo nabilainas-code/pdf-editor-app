@@ -6629,11 +6629,19 @@ class _AccueilState extends State<Accueil> {
                                 // derrière « … ».
                                 final estSignature =
                                     mot.estFlottant;
+                                // Le cadre à détacher est vide : écrire
+                                // dedans, l'agrandir d'un cran ou le copier
+                                // n'a aucun sens tant qu'il n'a rien
+                                // emporté. Il n'affiche donc que ce qu'on
+                                // peut vraiment en faire.
+                                final estCadreTampon =
+                                    modeTampon && mot == cadreTampon;
                                 // Copier était rangé derrière « … » alors
                                 // que c'est un geste courant : le voici au
                                 // premier rang, pour le texte comme pour un
                                 // tampon détaché.
-                                final nbBoutons = estSignature ? 5 : 6;
+                                final nbBoutons =
+                                    estCadreTampon ? 2 : (estSignature ? 5 : 6);
                                 final largeurMenu = 44.0 * nbBoutons + 10;
                                 const hauteurMenu = 44.0;
                                 var gauche = coin.dx;
@@ -6672,7 +6680,24 @@ class _AccueilState extends State<Accueil> {
                                           mainAxisAlignment:
                                               MainAxisAlignment.spaceEvenly,
                                           children: [
-                                            if (!estSignature)
+                                            if (estCadreTampon)
+                                              _boutonMenu(
+                                                Icons.content_cut,
+                                                "Détacher",
+                                                _occupe
+                                                    ? null
+                                                    : _detacherLeTampon,
+                                              ),
+                                            if (estCadreTampon)
+                                              _boutonMenu(
+                                                Icons.close,
+                                                "Retirer ce cadre",
+                                                _occupe
+                                                    ? null
+                                                    : _annulerLeTampon,
+                                              ),
+                                            if (!estSignature &&
+                                                !estCadreTampon)
                                               _boutonMenu(
                                                 Icons.edit,
                                                 "Écrire",
@@ -6681,48 +6706,53 @@ class _AccueilState extends State<Accueil> {
                                                     : () =>
                                                         _ecrireSurLaLigne(mot),
                                               ),
-                                            _boutonMenu(
-                                              Icons.text_decrease,
-                                              "Réduire",
-                                              _occupe
-                                                  ? null
-                                                  : () =>
-                                                      _redimensionnerDUnCran(
-                                                          mot, 0.8),
-                                            ),
-                                            _boutonMenu(
-                                              Icons.text_increase,
-                                              "Agrandir",
-                                              _occupe
-                                                  ? null
-                                                  : () =>
-                                                      _redimensionnerDUnCran(
-                                                          mot, 1.25),
-                                            ),
-                                            _boutonMenu(
-                                              Icons.content_copy,
-                                              "Copier",
-                                              _occupe
-                                                  ? null
-                                                  : () =>
-                                                      _copierPourPoser(mot),
-                                            ),
-                                            _boutonMenu(
-                                              Icons.delete_outline,
-                                              "Supprimer",
-                                              _occupe
-                                                  ? null
-                                                  : () =>
-                                                      _supprimerObjet(mot),
-                                            ),
-                                            _boutonMenu(
-                                              Icons.more_horiz,
-                                              "Plus d'actions",
-                                              _occupe
-                                                  ? null
-                                                  : () =>
-                                                      _plusDActions(mot),
-                                            ),
+                                            if (!estCadreTampon)
+                                              _boutonMenu(
+                                                Icons.text_decrease,
+                                                "Réduire",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _redimensionnerDUnCran(
+                                                            mot, 0.8),
+                                              ),
+                                            if (!estCadreTampon)
+                                              _boutonMenu(
+                                                Icons.text_increase,
+                                                "Agrandir",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _redimensionnerDUnCran(
+                                                            mot, 1.25),
+                                              ),
+                                            if (!estCadreTampon)
+                                              _boutonMenu(
+                                                Icons.content_copy,
+                                                "Copier",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _copierPourPoser(mot),
+                                              ),
+                                            if (!estCadreTampon)
+                                              _boutonMenu(
+                                                Icons.delete_outline,
+                                                "Supprimer",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _supprimerObjet(mot),
+                                              ),
+                                            if (!estCadreTampon)
+                                              _boutonMenu(
+                                                Icons.more_horiz,
+                                                "Plus d'actions",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _plusDActions(mot),
+                                              ),
                                           ],
                                         ),
                                       ),
