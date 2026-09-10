@@ -1580,57 +1580,32 @@ class _AccueilState extends State<Accueil> {
       return;
     }
 
-    // Étirer largement le cadre d'une ligne de texte, c'est presque
-    // toujours avoir voulu entourer autre chose — un cachet, une signature.
-    // Or ici la ligne serait réécrite à la taille du cadre, en travers de ce
-    // qu'il recouvre. Plutôt que de laisser faire ce dégât en silence, on
-    // demande, et on propose l'outil qui convient.
+    // Étirer largement le cadre d'une ligne de texte, c'est vouloir
+    // entourer autre chose : un cachet, une signature, un logo. Ce n'est
+    // jamais vouloir cette ligne écrite en grand en travers de la page —
+    // or c'est ce qui se passait, et il ne restait qu'à tout annuler.
+    //
+    // Le geste ne réécrit donc plus rien : il pose à la place un cadre
+    // vide, à la taille qui vient d'être dessinée, prêt à détacher ce
+    // qu'il recouvre. La ligne, elle, n'est pas touchée. Pour agrandir un
+    // texte, ce sont A+ et A− qui sont faits pour ça.
     if (mot.texte.isNotEmpty &&
         mot.zone.width > 0 &&
         mot.zone.height > 0 &&
         nouvelle.width / mot.zone.width > 1.8 &&
         nouvelle.height / mot.zone.height > 1.8) {
-      final choix = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text("Agrandir ce texte, ou entourer un tampon ?"),
-          content: const Text(
-              "Ce cadre est celui d'une ligne de texte : l'agrandir "
-              "réécrira cette ligne en grand, par-dessus ce qui se trouve "
-              "dessous.\n\nPour attraper un cachet, une signature ou un "
-              "logo, c'est un cadre à part qu'il faut."),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Annuler"),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, "texte"),
-              child: const Text("Agrandir le texte"),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, "tampon"),
-              child: const Text("Entourer un tampon"),
-            ),
-          ],
-        ),
-      );
-      if (!mounted || choix == null) return;
-      if (choix == "tampon") {
-        // La ligne n'est pas touchée : on pose à sa place le cadre vide, à
-        // la taille que le doigt venait de dessiner.
-        final cadre = MotDetecte("", nouvelle);
-        setState(() {
-          mots = [...mots, cadre];
-          selection
-            ..clear()
-            ..add(cadre);
-          cadreTampon = cadre;
-          modeTampon = true;
-          statut = "Ajustez le cadre autour du tampon, puis « Détacher »";
-        });
-        return;
-      }
+      final cadre = MotDetecte("", nouvelle);
+      setState(() {
+        mots = [...mots, cadre];
+        selection
+          ..clear()
+          ..add(cadre);
+        cadreTampon = cadre;
+        modeTampon = true;
+        statut = "Cadre posé, la ligne n'a pas bougé — ajustez, "
+            "puis « Détacher »";
+      });
+      return;
     }
 
     // Un repère vide n'a rien dans la page : son cadre seul change.
@@ -4323,6 +4298,47 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  /// Entoure d'un seul cadre tout ce qui est sélectionné, pour l'emporter
+  /// d'un bloc.
+  ///
+  /// Un cachet n'est pas une ligne de texte : la reconnaissance y voit
+  /// plusieurs lignes, plus un trait de signature qu'elle ne voit pas du
+  /// tout. Les choisir toutes et les déplacer emportait les lignes une à
+  /// une en laissant le reste sur place — le cachet finissait déchiré, et
+  /// ce qu'il traversait abîmé. Un cadre unique autour de l'ensemble, puis
+  /// « Détacher », en fait un seul morceau qui se déplace d'une pièce.
+  void _encadrerLaSelection() {
+    if (selection.isEmpty || document == null || _occupe) return;
+    var bloc = selection.first.zone;
+    for (final m in selection) {
+      bloc = bloc.expandToInclude(m.zone);
+    }
+    // Un peu de marge : les cadres de lignes serrent le texte au plus juste,
+    // et le tour d'un cachet dépasse toujours un peu de ses lettres.
+    bloc = bloc.inflate(6);
+    final gauche = bloc.left < 0 ? 0.0 : bloc.left;
+    final haut = bloc.top < 0 ? 0.0 : bloc.top;
+    final droite =
+        bloc.right > taillePage.width ? taillePage.width : bloc.right;
+    final bas =
+        bloc.bottom > taillePage.height ? taillePage.height : bloc.bottom;
+    if (droite - gauche < 12 || bas - haut < 12) return;
+
+    final cadre = MotDetecte("", Rect.fromLTRB(gauche, haut, droite, bas));
+    setState(() {
+      mots = [...mots, cadre];
+      selection
+        ..clear()
+        ..add(cadre);
+      cadreTampon = cadre;
+      modeTampon = true;
+      enAjoutTexte = false;
+      enCollage = false;
+      outilTrace = null;
+      statut = "Ajustez le cadre autour de l'élément, puis « Détacher »";
+    });
+  }
+
   /// Termine le mode tampon : détache ce que le cadre entoure.
   Future<void> _detacherLeTampon() async {
     final cadre = cadreTampon;
@@ -5857,6 +5873,14 @@ class _AccueilState extends State<Accueil> {
                                 .any((m) => m.texte.isNotEmpty || m.estFlottant)
                             ? _copier
                             : null,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.approval, size: 20),
+                        tooltip: selection.length > 1
+                            ? "Entourer les ${selection.length} éléments d'un "
+                                "seul cadre, pour les détacher d'un bloc"
+                            : "Entourer pour détacher (tampon, signature)",
+                        onPressed: _occupe ? null : _encadrerLaSelection,
                       ),
                       IconButton(
                         icon: const Icon(Icons.cleaning_services, size: 20),
