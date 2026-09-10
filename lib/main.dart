@@ -86,6 +86,17 @@ class MotDetecte {
   List<List<Offset>>? traitsSignature;
   double ratioSignature;
 
+  /// Morceau de page découpé et gardé à part : le cachet d'une attestation,
+  /// une signature scannée, un logo. Comme une signature tracée, il flotte
+  /// au-dessus de la page jusqu'à l'enregistrement — on le déplace et on le
+  /// redimensionne sans jamais rien abîmer dessous.
+  Uint8List? imageFlottante;
+
+  /// Vrai pour ce qui flotte au-dessus de la page plutôt que d'y être
+  /// écrit : une signature tracée, un morceau découpé, un tampon. Tout cela
+  /// se déplace, se redimensionne et se retire de la même façon.
+  bool get estFlottant => traitsSignature != null || imageFlottante != null;
+
   /// Vrai pour une ligne trouvée par reconnaissance de caractères sur une
   /// page scannée. On ne connaît alors ni sa police ni sa taille réelles :
   /// la déplacer se fait en photographiant ses pixels. Une ligne venue du
@@ -114,6 +125,7 @@ class MotDetecte {
       this.couleurTexte,
       this.tailleAuto,
       this.traitsSignature,
+      this.imageFlottante,
       this.ratioSignature = 0.4,
       this.depuisOcr = false,
       this.pixelsSource,
@@ -648,7 +660,7 @@ class _AccueilState extends State<Accueil> {
     const marge = 20.0;
     final choisies = <MotDetecte>{depart};
     for (final m in mots) {
-      if (m.texte.isEmpty || m.traitsSignature != null) continue;
+      if (m.texte.isEmpty || m.estFlottant) continue;
       final milieu = m.zone.center.dy;
       if (milieu < haut || milieu > bas) continue;
       if (m.zone.left > depart.zone.right + marge) continue;
@@ -908,7 +920,7 @@ class _AccueilState extends State<Accueil> {
     MotDetecte? cible;
     var meilleurEcart = double.infinity;
     for (final m in mots) {
-      if (identical(m, depart) || m.traitsSignature != null) continue;
+      if (identical(m, depart) || m.estFlottant) continue;
       final ecart = m.zone.center.dy - depart.zone.center.dy;
       if (sens < 0 && ecart >= -0.5) continue;
       if (sens > 0 && ecart <= 0.5) continue;
@@ -1498,20 +1510,20 @@ class _AccueilState extends State<Accueil> {
     var haut = demande.top < 0 ? 0.0 : demande.top;
     var largeur = demande.width < mini ? mini : demande.width;
     var hauteur = demande.height < mini ? mini : demande.height;
-    final traits = mot.traitsSignature;
-    if (traits != null) {
-      // Une signature garde ses proportions : la largeur commande.
+    final traits = mot.estFlottant;
+    if (traits) {
+      // Un objet flottant garde ses proportions : la largeur commande.
       hauteur = largeur * mot.ratioSignature;
     }
     if (gauche + largeur > taillePage.width) {
       largeur = taillePage.width - gauche;
-      if (traits != null) hauteur = largeur * mot.ratioSignature;
+      if (traits) hauteur = largeur * mot.ratioSignature;
     }
     if (haut + hauteur > taillePage.height) {
       hauteur = taillePage.height - haut;
       // Une signature garde ses proportions même contre le bord : sans ça,
       // le cadre s'écrasait et le tracé en débordait.
-      if (traits != null && mot.ratioSignature > 0) {
+      if (traits && mot.ratioSignature > 0) {
         largeur = hauteur / mot.ratioSignature;
       }
     }
@@ -1531,13 +1543,13 @@ class _AccueilState extends State<Accueil> {
     // pose, il fallait repeindre l'ancienne place à chaque geste, et ce coup
     // de blanc emportait tout ce qui se trouvait entre les deux tailles —
     // titres et débuts de lignes du document disparaissaient pour de bon.
-    if (traits != null) {
+    if (traits) {
       final avant = await _etatActuel(doc);
       setState(() {
         historique.add(avant);
         futur.clear();
         mot.zone = nouvelle;
-        statut = "Signature redimensionnée";
+        statut = "Taille modifiée";
       });
       return;
     }
@@ -3379,6 +3391,7 @@ class _AccueilState extends State<Accueil> {
             couleurTexte: m.couleurTexte,
             tailleAuto: m.tailleAuto,
             traitsSignature: m.traitsSignature,
+            imageFlottante: m.imageFlottante,
             ratioSignature: m.ratioSignature,
             depuisOcr: m.depuisOcr,
             pixelsSource: m.pixelsSource,
@@ -3405,6 +3418,7 @@ class _AccueilState extends State<Accueil> {
               couleurTexte: m.couleurTexte,
               tailleAuto: m.tailleAuto,
               traitsSignature: m.traitsSignature,
+              imageFlottante: m.imageFlottante,
               ratioSignature: m.ratioSignature,
               depuisOcr: m.depuisOcr,
               pixelsSource: m.pixelsSource,
@@ -3524,8 +3538,8 @@ class _AccueilState extends State<Accueil> {
         imageDeFond = pngOctets;
         imageDecodee = img.decodePng(pngOctets);
         echelleOcr = dpi / 72.0;
-        mots = mots.where((m) => m.traitsSignature == null).toList();
-        selection.removeWhere((m) => m.traitsSignature != null);
+        mots = mots.where((m) => !m.estFlottant).toList();
+        selection.removeWhere((m) => m.estFlottant);
         for (final m in mots) {
           m.redessine = false;
         }
@@ -3942,9 +3956,8 @@ class _AccueilState extends State<Accueil> {
   /// et s'arrête au bord de la page.
   Future<void> _deplacerSignature(
       MotDetecte mot, double dx, double dy) async {
-    final traits = mot.traitsSignature;
     final doc = document;
-    if (traits == null || doc == null || _occupe) return;
+    if (!mot.estFlottant || doc == null || _occupe) return;
 
     final ancienne = mot.zone;
     var gauche = ancienne.left + dx;
@@ -3988,7 +4001,7 @@ class _AccueilState extends State<Accueil> {
     // refait plutôt que de la photographier. Elle a donc son propre
     // déplacement, bien plus simple — et surtout qui aboutit.
     if (lignesPrincipales.length == 1 &&
-        lignesPrincipales.first.traitsSignature != null) {
+        lignesPrincipales.first.estFlottant) {
       return _deplacerSignature(lignesPrincipales.first, dx, dy);
     }
     // Chaque ligne emmène avec elle ce qui est sur sa rangée : un tiret ou
@@ -4237,9 +4250,9 @@ class _AccueilState extends State<Accueil> {
     // Une signature n'est pas écrite dans la page : la gomme n'effacerait
     // que le document en dessous, ce que personne ne demande en visant une
     // signature. C'est la corbeille qui la retire.
-    if (mot.traitsSignature != null) {
+    if (mot.estFlottant) {
       setState(() => statut =
-          "La gomme efface la page, pas la signature — utilisez la corbeille");
+          "La gomme efface la page, pas cet objet — utilisez la corbeille");
       return;
     }
 
@@ -4473,14 +4486,20 @@ class _AccueilState extends State<Accueil> {
   /// reste vierge de leur encre, si bien qu'après un enregistrement on peut
   /// encore les déplacer, les redimensionner ou les retirer.
   Future<List<int>> _octetsAvecSignatures(PdfDocument doc) async {
-    final signatures = mots.where((m) => m.traitsSignature != null).toList();
+    final flottants = mots.where((m) => m.estFlottant).toList();
     final octets = await doc.save();
-    if (signatures.isEmpty) return octets;
+    if (flottants.isEmpty) return octets;
     final copie = PdfDocument(inputBytes: Uint8List.fromList(octets));
     try {
       final page = copie.pages[0];
-      for (final signature in signatures) {
-        _tracerSignature(page, signature.traitsSignature!, signature.zone);
+      for (final objet in flottants) {
+        final traits = objet.traitsSignature;
+        final image = objet.imageFlottante;
+        if (traits != null) {
+          _tracerSignature(page, traits, objet.zone);
+        } else if (image != null) {
+          page.graphics.drawImage(PdfBitmap(image), objet.zone);
+        }
       }
       return await copie.save();
     } finally {
@@ -4541,7 +4560,7 @@ class _AccueilState extends State<Accueil> {
 
     // Une signature n'est pas encore écrite dans la page : la retirer de la
     // liste suffit, sans coup de blanc là où elle se trouvait.
-    if (mot.traitsSignature != null) {
+    if (mot.estFlottant) {
       final avant = await _etatActuel(doc);
       setState(() {
         historique.add(avant);
@@ -4584,12 +4603,70 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Détache du document ce qui se trouve dans le cadre : un cachet, une
+  /// signature scannée, un logo. Ses pixels sont photographiés, sa place est
+  /// effacée, et il devient un objet qui flotte au-dessus de la page —
+  /// déplaçable au doigt, redimensionnable par ses coins, supprimable, et
+  /// écrit dans le fichier seulement à l'enregistrement.
+  ///
+  /// C'est ce qui manquait pour bouger un tampon : jusqu'ici un cadre vide
+  /// ne servait qu'à effacer, et rien ne permettait d'emporter avec soi ce
+  /// qui était imprimé dessous.
+  Future<void> _decouperCadre(MotDetecte mot) async {
+    final doc = document;
+    if (doc == null || _occupe) return;
+    if (mot.estFlottant) {
+      setState(() => statut = "Cet objet est déjà détaché : tirez-le au doigt");
+      return;
+    }
+    if (mot.zone.width < 6 || mot.zone.height < 6) {
+      setState(() => statut = "Cadre trop petit pour être détaché");
+      return;
+    }
+
+    setState(() => _occupe = true);
+    final avant = await _etatActuel(doc);
+    try {
+      final zone = _aligner(mot.zone);
+      final image = _capturerZone(zone);
+      if (image == null) {
+        setState(() => statut =
+            "Impossible de découper ici (image de la page indisponible)");
+        return;
+      }
+
+      historique.add(avant);
+      futur.clear();
+      _effacerRect(doc.pages[0], zone, mot);
+
+      setState(() {
+        mot.texte = "";
+        mot.redessine = false;
+        mot.zone = zone;
+        mot.imageFlottante = image;
+        mot.ratioSignature =
+            zone.width <= 0 ? 1 : zone.height / zone.width;
+        selection
+          ..clear()
+          ..add(mot);
+        statut = "Détaché — tirez-le où vous voulez, les coins pour la taille";
+      });
+
+      if (imageDeFond != null) await _rafraichirApercuOcr(doc);
+    } catch (e) {
+      historique.removeLast();
+      await _restaurerEtat(avant);
+      setState(() => statut = "Découpe annulée (rien n'a été perdu) : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
   /// Repose la même signature un peu plus loin : signer à deux endroits
   /// d'un document ne doit pas obliger à ressortir le répertoire.
   Future<void> _dupliquerSignature(MotDetecte mot) async {
-    final traits = mot.traitsSignature;
     final doc = document;
-    if (traits == null || doc == null || _occupe) return;
+    if (!mot.estFlottant || doc == null || _occupe) return;
 
     const decalage = 16.0;
     var gauche = mot.zone.left + decalage;
@@ -4603,7 +4680,8 @@ class _AccueilState extends State<Accueil> {
     final copie = MotDetecte(
       "",
       Rect.fromLTWH(gauche, haut, mot.zone.width, mot.zone.height),
-      traitsSignature: traits,
+      traitsSignature: mot.traitsSignature,
+      imageFlottante: mot.imageFlottante,
       ratioSignature: mot.ratioSignature,
     );
 
@@ -4913,7 +4991,7 @@ class _AccueilState extends State<Accueil> {
         // Une signature n'est pas écrite dans la page tant qu'on n'a pas
         // enregistré, et un cadre vide n'a rien sous lui : dans les deux
         // cas il n'y a rien à effacer, seulement un cadre à retirer.
-        if (mot.traitsSignature == null && mot.texte.isNotEmpty) {
+        if (!mot.estFlottant && mot.texte.isNotEmpty) {
           _effacerRect(page, _rectEffacement(mot), mot);
         }
       }
@@ -4937,7 +5015,7 @@ class _AccueilState extends State<Accueil> {
   /// Actions moins courantes, rangées derrière « … » pour garder la barre
   /// principale courte.
   Future<void> _plusDActions(MotDetecte mot) async {
-    final estSignature = mot.traitsSignature != null;
+    final estSignature = mot.estFlottant;
     await showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -4978,7 +5056,7 @@ class _AccueilState extends State<Accueil> {
                   _effacerZone(mot);
                 },
               ),
-            if (mot.traitsSignature == null)
+            if (!mot.estFlottant)
               ListTile(
                 leading: const Icon(Icons.tune),
                 title: const Text("Mettre en forme"),
@@ -4986,6 +5064,17 @@ class _AccueilState extends State<Accueil> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _modifierMot(mot);
+                },
+              ),
+            if (!estSignature)
+              ListTile(
+                leading: const Icon(Icons.content_cut),
+                title: const Text("Détacher ce qui est dans le cadre"),
+                subtitle: const Text(
+                    "Tampon, signature, logo : pour le déplacer ou le retirer"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _decouperCadre(mot);
                 },
               ),
             if (!estSignature)
@@ -5562,7 +5651,7 @@ class _AccueilState extends State<Accueil> {
                         tooltip: "Effacer ici (gomme)",
                         onPressed: _occupe ||
                                 selection.length != 1 ||
-                                selection.first.traitsSignature != null
+                                selection.first.estFlottant
                             ? null
                             : () => _effacerZone(selection.first),
                       ),
@@ -5852,7 +5941,7 @@ class _AccueilState extends State<Accueil> {
                                     onTap: _occupe
                                         ? null
                                         : () {
-                                            if (mot.traitsSignature != null) {
+                                            if (mot.estFlottant) {
                                               setState(() => selection
                                                 ..clear()
                                                 ..add(mot));
@@ -5961,7 +6050,10 @@ class _AccueilState extends State<Accueil> {
                                       // Seul un document sans image de page
                                       // (texte vectoriel, non scanné) fait
                                       // afficher le texte par le cadre.
-                                      child: mot.traitsSignature != null
+                                      child: mot.imageFlottante != null
+                                          ? Image.memory(mot.imageFlottante!,
+                                              fit: BoxFit.fill)
+                                          : mot.traitsSignature != null
                                           ? CustomPaint(
                                               painter: _PeintreSignaturePosee(
                                                   mot.traitsSignature!),
@@ -6245,7 +6337,7 @@ class _AccueilState extends State<Accueil> {
                                 // courants d'un seul coup d'œil, le reste
                                 // derrière « … ».
                                 final estSignature =
-                                    mot.traitsSignature != null;
+                                    mot.estFlottant;
                                 final nbBoutons = estSignature ? 4 : 5;
                                 final largeurMenu = 44.0 * nbBoutons + 10;
                                 const hauteurMenu = 44.0;
