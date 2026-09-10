@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:camera/camera.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,6 +12,124 @@ import 'package:path_provider/path_provider.dart';
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
+
+/// Seuil qui sépare au mieux deux populations de clarté dans une image :
+/// ici le papier, clair, et ce qu'il y a autour — table, sol, ombre.
+/// (Méthode d'Otsu : le seuil qui écarte le plus les deux moyennes.)
+int seuilOtsu(List<int> histogramme, int total) {
+  if (total <= 0) return 128;
+  var sommeTotale = 0.0;
+  for (var v = 0; v < 256; v++) {
+    sommeTotale += v * histogramme[v];
+  }
+  var sommeBasse = 0.0;
+  var poidsBas = 0;
+  var meilleure = -1.0;
+  var seuil = 128;
+  for (var v = 0; v < 256; v++) {
+    poidsBas += histogramme[v];
+    if (poidsBas == 0) continue;
+    final poidsHaut = total - poidsBas;
+    if (poidsHaut <= 0) break;
+    sommeBasse += v * histogramme[v];
+    final moyenneBasse = sommeBasse / poidsBas;
+    final moyenneHaute = (sommeTotale - sommeBasse) / poidsHaut;
+    final ecart = moyenneHaute - moyenneBasse;
+    final variance = poidsBas * poidsHaut * ecart * ecart;
+    if (variance > meilleure) {
+      meilleure = variance;
+      seuil = v;
+    }
+  }
+  return seuil;
+}
+
+/// Cherche la plage claire — la feuille, la carte — dans une image de
+/// clarté de [la] par [ha] points. Rend son rectangle, en points de cette
+/// image, ou null quand rien ne se dégage nettement.
+///
+/// Une feuille photographiée sur une table, c'est une plage claire au
+/// milieu de plus sombre. On sépare les deux, puis on garde la plus longue
+/// bande de lignes — et de colonnes — où le clair domine.
+///
+/// Sert deux fois : sur la photo prise, et sur chaque image du viseur.
+Rect? cadreClair(List<int> clarte, int la, int ha) {
+  if (la < 20 || ha < 20 || clarte.length < la * ha) return null;
+
+  final histogramme = List<int>.filled(256, 0);
+  for (var i = 0; i < la * ha; i++) {
+    histogramme[clarte[i]]++;
+  }
+  final seuil = seuilOtsu(histogramme, la * ha);
+
+  // Un fond aussi clair que le papier : rien ne distingue les bords.
+  var clairs = 0;
+  for (var i = 0; i < la * ha; i++) {
+    if (clarte[i] >= seuil) clairs++;
+  }
+  final partClaire = clairs / (la * ha);
+  if (partClaire > 0.92 || partClaire < 0.08) return null;
+
+  List<int> plusLongueBande(List<double> parts, double minimum) {
+    // Longueur initiale négative : une bande d'une seule ligne compte déjà
+    // comme mieux que rien.
+    var meilleurDebut = -1, meilleureFin = -2;
+    var debut = -1;
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] >= minimum) {
+        if (debut < 0) debut = i;
+        if (i - debut > meilleureFin - meilleurDebut) {
+          meilleurDebut = debut;
+          meilleureFin = i;
+        }
+      } else {
+        debut = -1;
+      }
+    }
+    return [meilleurDebut, meilleureFin];
+  }
+
+  final partLignes = <double>[];
+  for (var y = 0; y < ha; y++) {
+    var n = 0;
+    for (var x = 0; x < la; x++) {
+      if (clarte[y * la + x] >= seuil) n++;
+    }
+    partLignes.add(n / la);
+  }
+  final partColonnes = <double>[];
+  for (var x = 0; x < la; x++) {
+    var n = 0;
+    for (var y = 0; y < ha; y++) {
+      if (clarte[y * la + x] >= seuil) n++;
+    }
+    partColonnes.add(n / ha);
+  }
+
+  final bandeY = plusLongueBande(partLignes, 0.5);
+  final bandeX = plusLongueBande(partColonnes, 0.5);
+  if (bandeY[0] < 0 || bandeX[0] < 0) return null;
+
+  final hauteurTrouvee = bandeY[1] - bandeY[0] + 1;
+  final largeurTrouvee = bandeX[1] - bandeX[0] + 1;
+  // Trop petit : ce n'est pas le document mais un reflet. Trop grand : il
+  // n'y avait rien à retirer.
+  if (hauteurTrouvee < ha * 0.25 || largeurTrouvee < la * 0.25) return null;
+  if (hauteurTrouvee > ha * 0.97 && largeurTrouvee > la * 0.97) return null;
+
+  // Une marge, pour ne pas raboter le bord de la feuille lui-même.
+  final marge = la * 0.012;
+  var gauche = bandeX[0] - marge;
+  var haut = bandeY[0] - marge;
+  var droite = bandeX[1] + 1 + marge;
+  var bas = bandeY[1] + 1 + marge;
+  if (gauche < 0) gauche = 0;
+  if (haut < 0) haut = 0;
+  if (droite > la) droite = la.toDouble();
+  if (bas > ha) bas = ha.toDouble();
+  if (droite - gauche < 10 || bas - haut < 10) return null;
+  return Rect.fromLTRB(gauche, haut, droite, bas);
+}
 
 const _channel = MethodChannel("com.nabilainas.pdfeditor/open_pdf");
 
@@ -1861,53 +1980,7 @@ class _AccueilState extends State<Accueil> {
   /// l'application a fait quelque chose ou si elle a renoncé.
   bool cadrageAutoTrouve = false;
 
-  /// Seuil qui sépare au mieux deux populations de clarté dans une image :
-  /// ici le papier, clair, et ce qu'il y a autour — table, sol, ombre.
-  /// (Méthode d'Otsu : le seuil qui écarte le plus les deux moyennes.)
-  int _seuilOtsu(List<int> histogramme, int total) {
-    if (total <= 0) return 128;
-    var sommeTotale = 0.0;
-    for (var v = 0; v < 256; v++) {
-      sommeTotale += v * histogramme[v];
-    }
-    var sommeBasse = 0.0;
-    var poidsBas = 0;
-    var meilleure = -1.0;
-    var seuil = 128;
-    for (var v = 0; v < 256; v++) {
-      poidsBas += histogramme[v];
-      if (poidsBas == 0) continue;
-      final poidsHaut = total - poidsBas;
-      if (poidsHaut <= 0) break;
-      sommeBasse += v * histogramme[v];
-      final moyenneBasse = sommeBasse / poidsBas;
-      final moyenneHaute = (sommeTotale - sommeBasse) / poidsHaut;
-      final ecart = moyenneHaute - moyenneBasse;
-      final variance = poidsBas * poidsHaut * ecart * ecart;
-      if (variance > meilleure) {
-        meilleure = variance;
-        seuil = v;
-      }
-    }
-    return seuil;
-  }
-
-  /// Cherche les bords du document dans la photo et le recadre dessus.
-  ///
-  /// Une feuille ou une carte photographiée sur une table, c'est une plage
-  /// claire au milieu de quelque chose de plus sombre. On sépare les deux,
-  /// puis on garde la plus longue bande de lignes — et de colonnes — où le
-  /// clair domine : c'est le document. Le reste, la table, le bord du
-  /// bureau, la main qui tient la carte, part au recadrage.
-  ///
-  /// Prudence assumée : si les bords ne se dégagent pas nettement (fond
-  /// clair lui aussi, document coupé par le cadre de la photo, plage
-  /// trouvée invraisemblable), la photo est **rendue entière**. Mieux vaut
-  /// un scan à recadrer à la main qu'un scan amputé.
-  ///
-  /// Ce qui n'est pas fait, et qu'il faut savoir : la perspective n'est pas
-  /// redressée. Un document photographié de biais reste de biais ; seul son
-  /// entourage est retiré.
+  /// Cherche les bords du document dans la photo, en pixels de la photo.
   Rect? _bordsDocument(img.Image source) {
     if (source.width < 60 || source.height < 60) return null;
 
@@ -1921,94 +1994,25 @@ class _AccueilState extends State<Accueil> {
     if (la < 40 || ha < 40) return null;
     final petite = img.copyResize(source, width: la, height: ha);
 
-    final histogramme = List<int>.filled(256, 0);
-    final clarte = List<int>.filled(la * ha, 0);
+    final clarte = Uint8List(la * ha);
     for (var y = 0; y < ha; y++) {
       for (var x = 0; x < la; x++) {
-        final p = petite.getPixel(x, y);
-        final v = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b)
-            .round()
-            .clamp(0, 255);
-        clarte[y * la + x] = v;
-        histogramme[v]++;
+        final pixel = petite.getPixel(x, y);
+        clarte[y * la + x] =
+            (0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b)
+                .round()
+                .clamp(0, 255);
       }
     }
-    final seuil = _seuilOtsu(histogramme, la * ha);
 
-    // Un fond aussi clair que le papier : rien ne distingue les bords, on
-    // ne touche pas à la photo.
-    var clairs = 0;
-    for (var i = 0; i < clarte.length; i++) {
-      if (clarte[i] >= seuil) clairs++;
-    }
-    final partClaire = clairs / clarte.length;
-    if (partClaire > 0.92 || partClaire < 0.08) return null;
-
-    List<int> plusLongueBande(List<double> parts, double minimum) {
-      // Longueur initiale négative : une bande d'une seule ligne compte
-      // déjà comme mieux que rien.
-      var meilleurDebut = -1, meilleureFin = -2;
-      var debut = -1;
-      for (var i = 0; i < parts.length; i++) {
-        if (parts[i] >= minimum) {
-          if (debut < 0) debut = i;
-          if (i - debut > meilleureFin - meilleurDebut) {
-            meilleurDebut = debut;
-            meilleureFin = i;
-          }
-        } else {
-          debut = -1;
-        }
-      }
-      return [meilleurDebut, meilleureFin];
-    }
-
-    final partLignes = <double>[];
-    for (var y = 0; y < ha; y++) {
-      var n = 0;
-      for (var x = 0; x < la; x++) {
-        if (clarte[y * la + x] >= seuil) n++;
-      }
-      partLignes.add(n / la);
-    }
-    final partColonnes = <double>[];
-    for (var x = 0; x < la; x++) {
-      var n = 0;
-      for (var y = 0; y < ha; y++) {
-        if (clarte[y * la + x] >= seuil) n++;
-      }
-      partColonnes.add(n / ha);
-    }
-
-    final bandeY = plusLongueBande(partLignes, 0.5);
-    final bandeX = plusLongueBande(partColonnes, 0.5);
-    if (bandeY[0] < 0 || bandeX[0] < 0) return null;
-
-    final hauteurTrouvee = bandeY[1] - bandeY[0] + 1;
-    final largeurTrouvee = bandeX[1] - bandeX[0] + 1;
-    // Trop petit : ce n'est pas le document mais un reflet. Trop grand :
-    // il n'y avait rien à retirer, autant ne pas y toucher.
-    if (hauteurTrouvee < ha * 0.25 || largeurTrouvee < la * 0.25) {
-      return null;
-    }
-    if (hauteurTrouvee > ha * 0.97 && largeurTrouvee > la * 0.97) {
-      return null;
-    }
-
-    // Une marge, pour ne pas raboter le bord de la feuille lui-même.
-    final marge = (la * 0.012).round();
-    var gauche = ((bandeX[0] - marge) * reduction).round();
-    var haut = ((bandeY[0] - marge) * reduction).round();
-    var droite = ((bandeX[1] + 1 + marge) * reduction).round();
-    var bas = ((bandeY[1] + 1 + marge) * reduction).round();
-    if (gauche < 0) gauche = 0;
-    if (haut < 0) haut = 0;
-    if (droite > source.width) droite = source.width;
-    if (bas > source.height) bas = source.height;
-    if (droite - gauche < 40 || bas - haut < 40) return null;
-
-    return Rect.fromLTRB(gauche.toDouble(), haut.toDouble(),
-        droite.toDouble(), bas.toDouble());
+    final trouve = cadreClair(clarte, la, ha);
+    if (trouve == null) return null;
+    return Rect.fromLTRB(
+      trouve.left * reduction,
+      trouve.top * reduction,
+      trouve.right * reduction,
+      trouve.bottom * reduction,
+    );
   }
 
   /// Recadre la photo sur les bords trouvés. Rend la photo entière quand
@@ -2281,29 +2285,74 @@ class _AccueilState extends State<Accueil> {
   /// mode. Renvoie null si l'utilisateur a renoncé ou si la photo est
   /// illisible.
   Future<img.Image?> _photoTraitee(ImageSource source, String mode) async {
-    XFile? photo;
-    try {
-      photo = await ImagePicker().pickImage(
-        source: source,
-        // Assez fin pour que le texte reste lisible et reconnaissable
-        // (environ 210 points par pouce sur une A4), assez sobre pour que
-        // le traitement ne fige pas l'application.
-        maxWidth: 1800,
-        imageQuality: 92,
+    Uint8List? brut;
+    // Cadre vu dans le viseur au moment du déclenchement, en proportions
+    // de l'image : il évite de refaire la recherche des bords sur la photo,
+    // et surtout il correspond à ce qu'on avait sous les yeux.
+    Rect? cadreDuViseur;
+
+    // Le viseur de l'application, pour l'appareil photo et pour tout ce
+    // qui n'est pas une simple photo souvenir : c'est là qu'on voit le
+    // cadre du document avant d'appuyer.
+    var passeParLeViseur = false;
+    if (source == ImageSource.camera && mode != "photo") {
+      passeParLeViseur = true;
+      final prise = await Navigator.of(context).push<PriseDeVue>(
+        MaterialPageRoute(
+          builder: (_) => EcranViseur(
+            titre: mode == "identite"
+                ? "Cadrez la pièce d'identité"
+                : "Cadrez le document",
+          ),
+        ),
       );
-    } catch (e) {
-      if (mounted) {
-        setState(() => statut = "Appareil photo indisponible : $e");
+      // Refermé sans photo : on renonce, on ne rouvre pas un autre
+      // appareil photo dans son dos.
+      if (prise == null) return null;
+      cadreDuViseur = prise.cadre;
+      try {
+        brut = await File(prise.chemin).readAsBytes();
+      } catch (e) {
+        if (mounted) {
+          setState(() => statut = "Photo illisible : $e");
+        }
+        return null;
       }
-      return null;
     }
-    if (photo == null) return null;
-    final octets = await photo.readAsBytes();
+
+    if (!passeParLeViseur) {
+      XFile? photo;
+      try {
+        photo = await ImagePicker().pickImage(
+          source: source,
+          // Assez fin pour que le texte reste lisible et reconnaissable
+          // (environ 210 points par pouce sur une A4), assez sobre pour que
+          // le traitement ne fige pas l'application.
+          maxWidth: 1800,
+          imageQuality: 92,
+        );
+      } catch (e) {
+        if (mounted) {
+          setState(() => statut = "Appareil photo indisponible : $e");
+        }
+        return null;
+      }
+      if (photo == null) return null;
+      brut = await photo.readAsBytes();
+    }
+    if (brut == null) return null;
+    final octets = brut;
     final decodee = img.decodeImage(octets);
     if (decodee == null) return null;
     // Une photo porte son orientation dans ses métadonnées : sans ça, un
     // document pris en tenant le téléphone de travers arrivait couché.
-    final droite = img.bakeOrientation(decodee);
+    var droite = img.bakeOrientation(decodee);
+    // La photo du viseur arrive en pleine résolution : la ramener à la
+    // finesse d'un scan évite de faire attendre le téléphone sur chaque
+    // traitement, pour une lisibilité identique.
+    if (droite.width > 1800) {
+      droite = img.copyResize(droite, width: 1800);
+    }
 
     // Le mode « photo » garde l'image entière : c'est le cadre de la photo
     // qu'on voulait, il n'y a rien à découper ni à vérifier.
@@ -2312,7 +2361,17 @@ class _AccueilState extends State<Accueil> {
       return _traiterScan(droite, mode);
     }
 
-    final bords = _bordsDocument(droite);
+    // Le cadre du viseur est déjà en proportions : il suffit de le
+    // ramener aux dimensions de la photo. Sans viseur, on cherche les
+    // bords sur la photo elle-même.
+    final bords = cadreDuViseur != null
+        ? Rect.fromLTRB(
+            cadreDuViseur.left * droite.width,
+            cadreDuViseur.top * droite.height,
+            cadreDuViseur.right * droite.width,
+            cadreDuViseur.bottom * droite.height,
+          )
+        : _bordsDocument(droite);
     if (!mounted) return null;
     final retenu = await _verifierCadrage(droite, bords);
     // Renoncé : on ne rend rien plutôt que d'imposer un cadrage.
@@ -7732,6 +7791,275 @@ class _AccueilState extends State<Accueil> {
                 ),
               ],
             ),
+    );
+  }
+}
+
+
+/// Ce que rapporte le viseur de l'application : le fichier photo, et le
+/// cadre du document tel qu'il était vu au moment du déclenchement, en
+/// proportions de l'image (0 à 1).
+class PriseDeVue {
+  final String chemin;
+  final Rect? cadre;
+  const PriseDeVue(this.chemin, this.cadre);
+}
+
+/// Viseur maison, avec le cadre du document dessiné en direct dessus.
+///
+/// L'appareil photo du téléphone, appelé par l'application, s'ouvre en
+/// mode photo ordinaire : aucun cadre, aucune indication. On ne savait
+/// donc pas, au moment de déclencher, si le document allait être bien pris
+/// — et le recadrage ne se voyait qu'après coup, une fois la photo faite.
+///
+/// Ici l'image du viseur est analysée en continu, et le cadre trouvé est
+/// tracé par-dessus. On voit avant d'appuyer.
+class EcranViseur extends StatefulWidget {
+  final String titre;
+  const EcranViseur({super.key, required this.titre});
+
+  @override
+  State<EcranViseur> createState() => _EcranViseurState();
+}
+
+class _EcranViseurState extends State<EcranViseur> {
+  CameraController? _appareil;
+  String? _erreur;
+  Rect? _cadre;
+  bool _analyse = false;
+  bool _prise = false;
+  DateTime _derniere = DateTime.fromMillisecondsSinceEpoch(0);
+
+  @override
+  void initState() {
+    super.initState();
+    _demarrer();
+  }
+
+  Future<void> _demarrer() async {
+    try {
+      final appareils = await availableCameras();
+      if (appareils.isEmpty) {
+        setState(() => _erreur = "Aucun appareil photo trouvé");
+        return;
+      }
+      final arriere = appareils.firstWhere(
+        (a) => a.lensDirection == CameraLensDirection.back,
+        orElse: () => appareils.first,
+      );
+      final controleur = CameraController(
+        arriere,
+        ResolutionPreset.high,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+      await controleur.initialize();
+      if (!mounted) {
+        await controleur.dispose();
+        return;
+      }
+      setState(() => _appareil = controleur);
+      await controleur.startImageStream(_regarder);
+    } catch (e) {
+      if (mounted) setState(() => _erreur = "$e");
+    }
+  }
+
+  /// Analyse une image du viseur. La couche de luminance (« Y ») est
+  /// donnée telle quelle par l'appareil : c'est exactement ce qu'il nous
+  /// faut, sans conversion de couleurs.
+  void _regarder(CameraImage image) {
+    if (_analyse || _prise) return;
+    // Quatre fois par seconde : assez pour que le cadre suive le geste,
+    // assez peu pour ne pas chauffer le téléphone.
+    final maintenant = DateTime.now();
+    if (maintenant.difference(_derniere).inMilliseconds < 250) return;
+    _derniere = maintenant;
+    _analyse = true;
+    try {
+      final plan = image.planes.first;
+      final pas = (image.width / 160).ceil().clamp(1, 16);
+      final la = (image.width / pas).floor();
+      final ha = (image.height / pas).floor();
+      if (la < 20 || ha < 20) return;
+      final clarte = Uint8List(la * ha);
+      for (var y = 0; y < ha; y++) {
+        final ligne = (y * pas) * plan.bytesPerRow;
+        for (var x = 0; x < la; x++) {
+          final i = ligne + x * pas;
+          clarte[y * la + x] = i < plan.bytes.length ? plan.bytes[i] : 0;
+        }
+      }
+      final trouve = cadreClair(clarte, la, ha);
+      final normalise = trouve == null
+          ? null
+          : _tourner(
+              Rect.fromLTRB(trouve.left / la, trouve.top / ha,
+                  trouve.right / la, trouve.bottom / ha),
+              _appareil?.description.sensorOrientation ?? 0,
+            );
+      if (mounted && normalise != _cadre) {
+        setState(() => _cadre = normalise);
+      }
+    } catch (_) {
+      // Une image mal formée ne doit pas faire tomber le viseur.
+    } finally {
+      _analyse = false;
+    }
+  }
+
+  /// L'image du capteur n'est pas dans le sens de l'écran : elle arrive
+  /// couchée, et l'aperçu la redresse. Le cadre doit suivre la même
+  /// rotation, sinon il se retrouve à angle droit de ce qu'il désigne.
+  Rect _tourner(Rect r, int degres) {
+    switch (degres % 360) {
+      case 90:
+        return Rect.fromLTRB(1 - r.bottom, r.left, 1 - r.top, r.right);
+      case 180:
+        return Rect.fromLTRB(1 - r.right, 1 - r.bottom, 1 - r.left, 1 - r.top);
+      case 270:
+        return Rect.fromLTRB(r.top, 1 - r.right, r.bottom, 1 - r.left);
+      default:
+        return r;
+    }
+  }
+
+  Future<void> _declencher() async {
+    final appareil = _appareil;
+    if (appareil == null || _prise) return;
+    setState(() => _prise = true);
+    try {
+      await appareil.stopImageStream();
+      final fichier = await appareil.takePicture();
+      if (!mounted) return;
+      Navigator.pop(context, PriseDeVue(fichier.path, _cadre));
+    } catch (e) {
+      if (mounted) setState(() {
+        _prise = false;
+        _erreur = "$e";
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _appareil?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final appareil = _appareil;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+              child: Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    tooltip: "Renoncer",
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                  Expanded(
+                    child: Text(
+                      widget.titre,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                  const SizedBox(width: 48),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _erreur != null
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text(
+                          "Viseur indisponible : $_erreur",
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                      ),
+                    )
+                  : appareil == null || !appareil.value.isInitialized
+                      ? const Center(child: CircularProgressIndicator())
+                      : Center(
+                          child: AspectRatio(
+                            aspectRatio: 1 / appareil.value.aspectRatio,
+                            child: LayoutBuilder(
+                              builder: (context, contraintes) {
+                                final cadre = _cadre;
+                                return Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    CameraPreview(appareil),
+                                    if (cadre != null)
+                                      Positioned(
+                                        left: cadre.left *
+                                            contraintes.maxWidth,
+                                        top: cadre.top *
+                                            contraintes.maxHeight,
+                                        width: cadre.width *
+                                            contraintes.maxWidth,
+                                        height: cadre.height *
+                                            contraintes.maxHeight,
+                                        child: IgnorePointer(
+                                          child: Container(
+                                            decoration: BoxDecoration(
+                                              border: Border.all(
+                                                color:
+                                                    const Color(0xFFFFC107),
+                                                width: 3,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Text(
+                _cadre != null
+                    ? "Document repéré — vous pouvez prendre la photo"
+                    : "Posez le document sur un fond plus sombre",
+                style: TextStyle(
+                  color: _cadre != null
+                      ? const Color(0xFFFFC107)
+                      : Colors.white54,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 18, top: 4),
+              child: GestureDetector(
+                onTap: _prise ? null : _declencher,
+                child: Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _prise ? Colors.white38 : Colors.white,
+                    border: Border.all(color: Colors.white70, width: 4),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

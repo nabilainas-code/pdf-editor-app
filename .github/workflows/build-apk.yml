@@ -27,7 +27,7 @@ jobs:
 
       - name: Autoriser l'accès à internet et l'ouverture de PDF
         run: |
-          sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />' temp_app/android/app/src/main/AndroidManifest.xml
+          sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />' temp_app/android/app/src/main/AndroidManifest.xml
           cat > /tmp/fix_manifest.py << 'PYEOF'
           path = 'temp_app/android/app/src/main/AndroidManifest.xml'
           content = open(path).read()
