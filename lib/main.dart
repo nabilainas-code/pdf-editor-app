@@ -1827,6 +1827,163 @@ class _AccueilState extends State<Accueil> {
   /// entre ce niveau et un noir franc. Le traitement s'applique aux trois
   /// couches séparément : un tampon bleu ou un logo en couleur garde sa
   /// teinte, là où un passage en noir et blanc les aurait effacés.
+  /// Vrai quand la dernière photo a été recadrée toute seule sur les bords
+  /// du document. Sert à le dire à l'écran : sans retour, on ne sait pas si
+  /// l'application a fait quelque chose ou si elle a renoncé.
+  bool cadrageAutoTrouve = false;
+
+  /// Seuil qui sépare au mieux deux populations de clarté dans une image :
+  /// ici le papier, clair, et ce qu'il y a autour — table, sol, ombre.
+  /// (Méthode d'Otsu : le seuil qui écarte le plus les deux moyennes.)
+  int _seuilOtsu(List<int> histogramme, int total) {
+    if (total <= 0) return 128;
+    var sommeTotale = 0.0;
+    for (var v = 0; v < 256; v++) {
+      sommeTotale += v * histogramme[v];
+    }
+    var sommeBasse = 0.0;
+    var poidsBas = 0;
+    var meilleure = -1.0;
+    var seuil = 128;
+    for (var v = 0; v < 256; v++) {
+      poidsBas += histogramme[v];
+      if (poidsBas == 0) continue;
+      final poidsHaut = total - poidsBas;
+      if (poidsHaut <= 0) break;
+      sommeBasse += v * histogramme[v];
+      final moyenneBasse = sommeBasse / poidsBas;
+      final moyenneHaute = (sommeTotale - sommeBasse) / poidsHaut;
+      final ecart = moyenneHaute - moyenneBasse;
+      final variance = poidsBas * poidsHaut * ecart * ecart;
+      if (variance > meilleure) {
+        meilleure = variance;
+        seuil = v;
+      }
+    }
+    return seuil;
+  }
+
+  /// Cherche les bords du document dans la photo et le recadre dessus.
+  ///
+  /// Une feuille ou une carte photographiée sur une table, c'est une plage
+  /// claire au milieu de quelque chose de plus sombre. On sépare les deux,
+  /// puis on garde la plus longue bande de lignes — et de colonnes — où le
+  /// clair domine : c'est le document. Le reste, la table, le bord du
+  /// bureau, la main qui tient la carte, part au recadrage.
+  ///
+  /// Prudence assumée : si les bords ne se dégagent pas nettement (fond
+  /// clair lui aussi, document coupé par le cadre de la photo, plage
+  /// trouvée invraisemblable), la photo est **rendue entière**. Mieux vaut
+  /// un scan à recadrer à la main qu'un scan amputé.
+  ///
+  /// Ce qui n'est pas fait, et qu'il faut savoir : la perspective n'est pas
+  /// redressée. Un document photographié de biais reste de biais ; seul son
+  /// entourage est retiré.
+  img.Image _cadrerDocument(img.Image source) {
+    cadrageAutoTrouve = false;
+    if (source.width < 60 || source.height < 60) return source;
+
+    // Analyse sur une image réduite : les bords d'une feuille se voient
+    // aussi bien, et le calcul reste instantané sur un téléphone.
+    const largeurAnalyse = 480;
+    final reduction =
+        source.width > largeurAnalyse ? source.width / largeurAnalyse : 1.0;
+    final la = (source.width / reduction).round();
+    final ha = (source.height / reduction).round();
+    if (la < 40 || ha < 40) return source;
+    final petite = img.copyResize(source, width: la, height: ha);
+
+    final histogramme = List<int>.filled(256, 0);
+    final clarte = List<int>.filled(la * ha, 0);
+    for (var y = 0; y < ha; y++) {
+      for (var x = 0; x < la; x++) {
+        final p = petite.getPixel(x, y);
+        final v = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b)
+            .round()
+            .clamp(0, 255);
+        clarte[y * la + x] = v;
+        histogramme[v]++;
+      }
+    }
+    final seuil = _seuilOtsu(histogramme, la * ha);
+
+    // Un fond aussi clair que le papier : rien ne distingue les bords, on
+    // ne touche pas à la photo.
+    var clairs = 0;
+    for (var i = 0; i < clarte.length; i++) {
+      if (clarte[i] >= seuil) clairs++;
+    }
+    final partClaire = clairs / clarte.length;
+    if (partClaire > 0.92 || partClaire < 0.08) return source;
+
+    List<int> plusLongueBande(List<double> parts, double minimum) {
+      // Longueur initiale négative : une bande d'une seule ligne compte
+      // déjà comme mieux que rien.
+      var meilleurDebut = -1, meilleureFin = -2;
+      var debut = -1;
+      for (var i = 0; i < parts.length; i++) {
+        if (parts[i] >= minimum) {
+          if (debut < 0) debut = i;
+          if (i - debut > meilleureFin - meilleurDebut) {
+            meilleurDebut = debut;
+            meilleureFin = i;
+          }
+        } else {
+          debut = -1;
+        }
+      }
+      return [meilleurDebut, meilleureFin];
+    }
+
+    final partLignes = <double>[];
+    for (var y = 0; y < ha; y++) {
+      var n = 0;
+      for (var x = 0; x < la; x++) {
+        if (clarte[y * la + x] >= seuil) n++;
+      }
+      partLignes.add(n / la);
+    }
+    final partColonnes = <double>[];
+    for (var x = 0; x < la; x++) {
+      var n = 0;
+      for (var y = 0; y < ha; y++) {
+        if (clarte[y * la + x] >= seuil) n++;
+      }
+      partColonnes.add(n / ha);
+    }
+
+    final bandeY = plusLongueBande(partLignes, 0.5);
+    final bandeX = plusLongueBande(partColonnes, 0.5);
+    if (bandeY[0] < 0 || bandeX[0] < 0) return source;
+
+    final hauteurTrouvee = bandeY[1] - bandeY[0] + 1;
+    final largeurTrouvee = bandeX[1] - bandeX[0] + 1;
+    // Trop petit : ce n'est pas le document mais un reflet. Trop grand :
+    // il n'y avait rien à retirer, autant ne pas y toucher.
+    if (hauteurTrouvee < ha * 0.25 || largeurTrouvee < la * 0.25) {
+      return source;
+    }
+    if (hauteurTrouvee > ha * 0.97 && largeurTrouvee > la * 0.97) {
+      return source;
+    }
+
+    // Une marge, pour ne pas raboter le bord de la feuille lui-même.
+    final marge = (la * 0.012).round();
+    var gauche = ((bandeX[0] - marge) * reduction).round();
+    var haut = ((bandeY[0] - marge) * reduction).round();
+    var droite = ((bandeX[1] + 1 + marge) * reduction).round();
+    var bas = ((bandeY[1] + 1 + marge) * reduction).round();
+    if (gauche < 0) gauche = 0;
+    if (haut < 0) haut = 0;
+    if (droite > source.width) droite = source.width;
+    if (bas > source.height) bas = source.height;
+    if (droite - gauche < 40 || bas - haut < 40) return source;
+
+    cadrageAutoTrouve = true;
+    return img.copyCrop(source,
+        x: gauche, y: haut, width: droite - gauche, height: bas - haut);
+  }
+
   img.Image _rehausserScan(img.Image source, {bool noirEtBlanc = false}) {
     final histogramme = List<int>.filled(256, 0);
     var total = 0;
@@ -1889,13 +2046,19 @@ class _AccueilState extends State<Accueil> {
 
   /// Applique à une photo le traitement du mode choisi.
   img.Image _traiterScan(img.Image source, String mode) {
+    // Une photo est gardée telle quelle, cadre compris : c'est l'image
+    // entière qu'on voulait. Un document ou une pièce d'identité, non — on
+    // veut la feuille, pas la table sur laquelle elle est posée.
+    if (mode == "photo") {
+      cadrageAutoTrouve = false;
+      return source;
+    }
+    final cadree = _cadrerDocument(source);
     switch (mode) {
-      case "photo":
-        return source;
       case "nb":
-        return _rehausserScan(source, noirEtBlanc: true);
+        return _rehausserScan(cadree, noirEtBlanc: true);
       default:
-        return _rehausserScan(source);
+        return _rehausserScan(cadree);
     }
   }
 
@@ -2092,8 +2255,15 @@ class _AccueilState extends State<Accueil> {
       _occupe = true;
       statut = "Traitement de la photo...";
     });
+    final cadre = cadrageAutoTrouve;
     try {
       await _ouvrirDepuisImages([image], mode);
+      if (mounted && mode != "photo") {
+        setState(() => statut = cadre
+            ? "Document détecté et recadré sur ses bords"
+            : "Bords non trouvés : photo gardée entière (recadrez à la main "
+                "si besoin)");
+      }
     } catch (e) {
       setState(() => statut = "Scan impossible : $e");
     } finally {
@@ -4503,6 +4673,26 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  /// Efface de la page ce que le cadre entoure, et retire le cadre.
+  ///
+  /// C'est le geste attendu sur un point resté seul, une virgule de trop,
+  /// un trait parasite : on l'entoure, on appuie sur la corbeille, il n'y
+  /// est plus. La croix, elle, ne fait que ranger le cadre sans rien
+  /// toucher — les deux étaient trop proches pour n'en avoir qu'une.
+  Future<void> _supprimerLeCadre(MotDetecte cadre) async {
+    if (_occupe) return;
+    await _effacerZone(cadre);
+    if (!mounted) return;
+    setState(() {
+      mots = mots.where((m) => m != cadre).toList();
+      selection.remove(cadre);
+      if (cadreTampon == cadre) {
+        cadreTampon = null;
+        modeTampon = false;
+      }
+    });
+  }
+
   /// Termine le mode tampon : détache ce que le cadre entoure.
   Future<void> _detacherLeTampon() async {
     final cadre = cadreTampon;
@@ -5924,19 +6114,6 @@ class _AccueilState extends State<Accueil> {
                         focusNode: _sansFocus,
                         onPressed: _occupe ? null : _appliquerGras,
                       ),
-                      // Coller au premier rang, dès qu'il y a quelque chose
-                      // à coller : rangé dans le menu, il fallait deviner
-                      // qu'il s'y trouvait. Sans focus, comme le gras : le
-                      // champ garde son curseur, sinon le texte se collerait
-                      // à un endroit qu'on n'a pas choisi.
-                      if (presseCollable)
-                        IconButton.filledTonal(
-                          icon: const Icon(Icons.content_paste, size: 20),
-                          tooltip: "Coller à l'endroit du curseur",
-                          focusNode: _sansFocus,
-                          onPressed:
-                              _occupe ? null : () => _actionTexte("coller"),
-                        ),
                       // Un seul bouton pour toutes les actions de texte : la
                       // barre est déjà pleine, et les quatre tiennent dans un
                       // menu sans rien en chasser.
@@ -6820,6 +6997,84 @@ class _AccueilState extends State<Accueil> {
                             ),
                           ),
                         ),
+                        // Coller se fait là où l'on tape. En haut de
+                        // l'écran, le bouton obligeait à quitter des yeux la
+                        // ligne qu'on écrit pour aller le chercher : il est
+                        // posé juste au-dessus d'elle, dans la même pastille
+                        // sombre que le reste.
+                        if (motEnEditionDirecte != null &&
+                            presseCollable &&
+                            !modeNavigation)
+                          Positioned.fill(
+                            child: AnimatedBuilder(
+                              animation: _transformation,
+                              builder: (context, _) {
+                                final ligne = motEnEditionDirecte!;
+                                final matrice = _transformation.value;
+                                final zoom = matrice.getMaxScaleOnAxis();
+                                final decalage = matrice.getTranslation();
+                                const largeur = 48.0;
+                                const hauteur = 44.0;
+                                var gauche =
+                                    ligne.zone.left * echelle * zoom +
+                                        decalage.x;
+                                if (gauche + largeur > constraints.maxWidth) {
+                                  gauche = constraints.maxWidth - largeur;
+                                }
+                                if (gauche < 4) gauche = 4;
+                                var haut = ligne.zone.top * echelle * zoom +
+                                    decalage.y -
+                                    hauteur -
+                                    6;
+                                if (haut < 4) {
+                                  haut = ligne.zone.bottom * echelle * zoom +
+                                      decalage.y +
+                                      6;
+                                }
+                                if (haut >
+                                    constraints.maxHeight - hauteur - 4) {
+                                  haut = constraints.maxHeight - hauteur - 4;
+                                }
+                                if (haut < 4) haut = 4;
+                                return Stack(
+                                  children: [
+                                    Positioned(
+                                      left: gauche,
+                                      top: haut,
+                                      width: largeur,
+                                      height: hauteur,
+                                      child: Material(
+                                        color: const Color(0xF01C1C1E),
+                                        borderRadius:
+                                            BorderRadius.circular(22),
+                                        clipBehavior: Clip.antiAlias,
+                                        elevation: 4,
+                                        // Sans focus, comme le gras : le
+                                        // champ garde son curseur, sinon le
+                                        // texte se collerait à un endroit
+                                        // qu'on n'a pas choisi.
+                                        child: IconButton(
+                                          icon: const Icon(
+                                              Icons.content_paste, size: 19),
+                                          color:
+                                              Colors.white.withOpacity(0.92),
+                                          disabledColor: Colors.white30,
+                                          tooltip: "Coller ici",
+                                          focusNode: _sansFocus,
+                                          visualDensity:
+                                              VisualDensity.compact,
+                                          padding: EdgeInsets.zero,
+                                          onPressed: _occupe
+                                              ? null
+                                              : () => _actionTexte("coller"),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
+                          ),
                         // Menu posé à côté de la ligne sélectionnée, plutôt
                         // qu'en haut de l'écran : les actions sont là où est
                         // le doigt, comme dans les visionneuses PDF
@@ -6875,7 +7130,7 @@ class _AccueilState extends State<Accueil> {
                                 // premier rang, pour le texte comme pour un
                                 // tampon détaché.
                                 final nbBoutons =
-                                    estCadreTampon ? 2 : (estSignature ? 5 : 6);
+                                    estCadreTampon ? 3 : (estSignature ? 5 : 6);
                                 final largeurMenu = 44.0 * nbBoutons + 10;
                                 const hauteurMenu = 44.0;
                                 var gauche = coin.dx;
@@ -6921,6 +7176,16 @@ class _AccueilState extends State<Accueil> {
                                                 _occupe
                                                     ? null
                                                     : _detacherLeTampon,
+                                              ),
+                                            if (estCadreTampon)
+                                              _boutonMenu(
+                                                Icons.delete_outline,
+                                                "Supprimer ce qui est dans le "
+                                                    "cadre",
+                                                _occupe
+                                                    ? null
+                                                    : () =>
+                                                        _supprimerLeCadre(mot),
                                               ),
                                             if (estCadreTampon)
                                               _boutonMenu(
