@@ -5847,6 +5847,19 @@ class _AccueilState extends State<Accueil> {
                                                 details.localPosition.dy /
                                                     echelle,
                                               );
+                                            } else if (motEnEditionDirecte !=
+                                                null) {
+                                              // Un appui sur le papier referme
+                                              // l'écriture en gardant ce qui
+                                              // vient d'être tapé.
+                                              _validerEditionDirecte();
+                                            } else if (selection.isNotEmpty) {
+                                              // Un appui sur le blanc de la
+                                              // page efface toute sélection.
+                                              setState(() {
+                                                selection.clear();
+                                                statut = "Sélection effacée";
+                                              });
                                             }
                                           },
                                     child: imageDeFond != null
