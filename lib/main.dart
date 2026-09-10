@@ -755,11 +755,6 @@ class _AccueilState extends State<Accueil> {
       // message « repère posé ») ne pouvait qu'embrouiller.
       enAjoutTexte = false;
       enCollage = false;
-      // Écrire prend toute la place : le cadre bleu d'une ligne choisie
-      // ailleurs n'a plus de sens ici. Deux surlignages de nature
-      // différente à l'écran — l'un sur une ligne, l'autre dans le texte —
-      // ne disaient plus lequel des deux allait recevoir l'action.
-      selection.clear();
       motEnEditionDirecte = mot;
       selectionMemorisee = null;
       texteDeLaSelection = "";
