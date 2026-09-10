@@ -145,19 +145,43 @@ const _channel = MethodChannel("com.nabilainas.pdfeditor/open_pdf");
 /// ce qui était sélectionné dans le texte et ce qui l'était sur la page.
 const Color _brunSelection = Color(0xFF8B5A3C);
 
-void main() => runApp(MaterialApp(
-      home: const Accueil(),
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.blueGrey,
-        scaffoldBackgroundColor: Colors.white,
-        textSelectionTheme: const TextSelectionThemeData(
-          cursorColor: _brunSelection,
-          selectionColor: Color(0x668B5A3C),
-          selectionHandleColor: _brunSelection,
+/// Sombre ou clair. Retenu ici plutôt que dans l'écran : le choix vaut
+/// pour toute l'application, y compris les écrans qui s'ouvrent par-dessus
+/// (viseur, vérification du cadrage).
+final ValueNotifier<ThemeMode> modeAffichage =
+    ValueNotifier<ThemeMode>(ThemeMode.dark);
+
+const _selectionTexte = TextSelectionThemeData(
+  cursorColor: _brunSelection,
+  selectionColor: Color(0x668B5A3C),
+  selectionHandleColor: _brunSelection,
+);
+
+void main() => runApp(
+      ValueListenableBuilder<ThemeMode>(
+        valueListenable: modeAffichage,
+        builder: (context, mode, _) => MaterialApp(
+          home: const Accueil(),
+          themeMode: mode,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorSchemeSeed: Colors.blueGrey,
+            scaffoldBackgroundColor: Colors.white,
+            textSelectionTheme: _selectionTexte,
+          ),
+          // Le document, lui, reste sur son papier blanc : c'est une feuille
+          // qu'on regarde, pas une interface. Seul ce qui entoure la page —
+          // barres, menus, fonds d'écran — passe au sombre.
+          darkTheme: ThemeData(
+            useMaterial3: true,
+            brightness: Brightness.dark,
+            colorSchemeSeed: Colors.blueGrey,
+            scaffoldBackgroundColor: const Color(0xFF121212),
+            textSelectionTheme: _selectionTexte,
+          ),
         ),
       ),
-    ));
+    );
 
 class MotDetecte {
   String texte;
@@ -717,6 +741,13 @@ class _AccueilState extends State<Accueil> {
   bool collerVisible = false;
   Timer? _minuteurColler;
 
+  /// Ce qu'on a déjà collé. Tant que le presse-papiers contient encore la
+  /// même chose, le bouton ne se propose plus : collé une fois, on n'en a
+  /// plus besoin, et le voir revenir à chaque fois qu'on vient écrire sur
+  /// une ligne était une gêne, pas un service. Il revient dès qu'on copie
+  /// quelque chose de nouveau.
+  String? _dejaColle;
+
   void _montrerColler() {
     if (!presseCollable) return;
     _minuteurColler?.cancel();
@@ -965,11 +996,13 @@ class _AccueilState extends State<Accueil> {
   Future<void> _releverPressePapier() async {
     var collable = false;
     try {
-      collable = await Clipboard.hasStrings();
+      final donnees = await Clipboard.getData(Clipboard.kTextPlain);
+      final texte = donnees?.text ?? '';
+      collable = texte.isNotEmpty && texte != _dejaColle;
     } catch (_) {
       // Certaines versions d'Android refusent la question : on retombe
       // alors sur ce que l'application elle-même a copié.
-      collable = lignesCopiees.isNotEmpty;
+      collable = lignesCopiees.isNotEmpty && _dejaColle == null;
     }
     if (!mounted) return;
     if (collable != presseCollable) {
@@ -1022,6 +1055,10 @@ class _AccueilState extends State<Accueil> {
       }
       final nouveau = texte.replaceRange(etendue.start, etendue.end, aColler);
       setState(() {
+        // Ce texte-là est posé : le bouton n'a plus de raison de se montrer
+        // tant qu'on n'a pas copié autre chose.
+        _dejaColle = donnees?.text;
+        presseCollable = false;
         controleurDirect.value = TextEditingValue(
           text: nouveau,
           selection:
@@ -1041,6 +1078,9 @@ class _AccueilState extends State<Accueil> {
       return;
     }
     await Clipboard.setData(ClipboardData(text: morceau));
+
+    // On vient de copier : le bouton redevient utile.
+    _dejaColle = null;
 
     if (choix == "couper") {
       setState(() {
@@ -2717,7 +2757,7 @@ class _AccueilState extends State<Accueil> {
                 Text(
                   descriptions[mode]!,
                   style: TextStyle(
-                      fontSize: 13, color: Colors.black.withOpacity(0.6)),
+                      fontSize: 13, color: Theme.of(context).colorScheme.onSurfaceVariant),
                 ),
                 const SizedBox(height: 8),
                 const Divider(height: 1),
@@ -5249,7 +5289,11 @@ class _AccueilState extends State<Accueil> {
     // presse-papiers du téléphone de ce qui s'y trouvait.
     final texte =
         choisies.where((m) => m.texte.isNotEmpty).map((m) => m.texte).join('\n');
-    if (texte.isNotEmpty) Clipboard.setData(ClipboardData(text: texte));
+    if (texte.isNotEmpty) {
+      Clipboard.setData(ClipboardData(text: texte));
+      // Nouveau texte copié : le bouton « Coller » redevient utile.
+      _dejaColle = null;
+    }
   }
 
   /// Copie cet objet puis attend l'endroit où le poser : le geste complet en
@@ -5810,6 +5854,11 @@ class _AccueilState extends State<Accueil> {
           case "fermer":
             _fermerDocument();
             break;
+          case "affichage":
+            modeAffichage.value = modeAffichage.value == ThemeMode.dark
+                ? ThemeMode.light
+                : ThemeMode.dark;
+            break;
           case "quitter":
             SystemNavigator.pop();
             break;
@@ -5852,6 +5901,20 @@ class _AccueilState extends State<Accueil> {
             leading: Icon(Icons.document_scanner),
             title: Text("Scanner un document"),
             subtitle: Text("Document, photo, noir et blanc, pièce d'identité"),
+          ),
+        ),
+        // Le document garde son papier blanc dans les deux cas : c'est une
+        // feuille qu'on regarde. Seul ce qui l'entoure change.
+        PopupMenuItem(
+          value: "affichage",
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(modeAffichage.value == ThemeMode.dark
+                ? Icons.light_mode
+                : Icons.dark_mode),
+            title: Text(modeAffichage.value == ThemeMode.dark
+                ? "Passer en clair"
+                : "Passer en sombre"),
           ),
         ),
         if (document != null)
@@ -6081,7 +6144,7 @@ class _AccueilState extends State<Accueil> {
                       description,
                       style: TextStyle(
                           fontSize: 13,
-                          color: Colors.black.withOpacity(0.6),
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                           height: 1.25),
                     ),
                   ],
@@ -6111,7 +6174,9 @@ class _AccueilState extends State<Accueil> {
         child: Text(
           "Version $versionApp",
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 11, color: Colors.black.withOpacity(0.4)),
+          style: TextStyle(
+              fontSize: 11,
+              color: Theme.of(context).colorScheme.onSurfaceVariant),
         ),
       ),
       body: SafeArea(
@@ -6123,7 +6188,7 @@ class _AccueilState extends State<Accueil> {
               child: Text(
                 "Que voulez-vous faire ?",
                 style: TextStyle(
-                    fontSize: 15, color: Colors.black.withOpacity(0.6)),
+                    fontSize: 15, color: Theme.of(context).colorScheme.onSurfaceVariant),
               ),
             ),
             _carteService(
@@ -6162,7 +6227,8 @@ class _AccueilState extends State<Accueil> {
                 statut,
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                    fontSize: 12, color: Colors.black.withOpacity(0.45)),
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant),
               ),
             ),
           ],
@@ -6200,7 +6266,7 @@ class _AccueilState extends State<Accueil> {
               // chose en gras à l'écran.
               style: TextStyle(
                 fontSize: 13,
-                color: Colors.black.withOpacity(0.62),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),
           ),
@@ -6689,7 +6755,7 @@ class _AccueilState extends State<Accueil> {
               // chose en gras à l'écran.
               style: TextStyle(
                 fontSize: 13,
-                color: Colors.black.withOpacity(0.62),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),
           ),
