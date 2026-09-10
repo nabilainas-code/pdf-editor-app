@@ -2309,14 +2309,20 @@ class _AccueilState extends State<Accueil> {
       // Refermé sans photo : on renonce, on ne rouvre pas un autre
       // appareil photo dans son dos.
       if (prise == null) return null;
-      cadreDuViseur = prise.cadre;
-      try {
-        brut = await File(prise.chemin).readAsBytes();
-      } catch (e) {
-        if (mounted) {
-          setState(() => statut = "Photo illisible : $e");
+      // Viseur impossible sur ce modèle : on repasse par l'appareil photo
+      // du téléphone, et le cadrage se vérifiera après la photo.
+      if (prise.secours) {
+        passeParLeViseur = false;
+      } else {
+        cadreDuViseur = prise.cadre;
+        try {
+          brut = await File(prise.chemin).readAsBytes();
+        } catch (e) {
+          if (mounted) {
+            setState(() => statut = "Photo illisible : $e");
+          }
+          return null;
         }
-        return null;
       }
     }
 
@@ -7802,7 +7808,14 @@ class _AccueilState extends State<Accueil> {
 class PriseDeVue {
   final String chemin;
   final Rect? cadre;
-  const PriseDeVue(this.chemin, this.cadre);
+
+  /// Vrai quand le viseur n'a pas pu servir sur cet appareil et qu'il
+  /// renvoie vers l'appareil photo du téléphone. Tous les modèles ne
+  /// donnent pas accès à leur caméra de la même façon : mieux vaut un scan
+  /// sans cadre en direct que pas de scan du tout.
+  final bool secours;
+
+  const PriseDeVue(this.chemin, this.cadre, {this.secours = false});
 }
 
 /// Viseur maison, avec le cadre du document dessiné en direct dessus.
@@ -7825,6 +7838,11 @@ class EcranViseur extends StatefulWidget {
 class _EcranViseurState extends State<EcranViseur> {
   CameraController? _appareil;
   String? _erreur;
+  int _sens = 0;
+
+  /// Vrai quand l'appareil ne sait pas fournir le flux d'images : le
+  /// viseur marche, mais sans le cadre tracé en direct.
+  bool _sansCadreDirect = false;
   Rect? _cadre;
   bool _analyse = false;
   bool _prise = false;
@@ -7847,19 +7865,46 @@ class _EcranViseurState extends State<EcranViseur> {
         (a) => a.lensDirection == CameraLensDirection.back,
         orElse: () => appareils.first,
       );
-      final controleur = CameraController(
-        arriere,
+      // Tous les appareils n'acceptent pas la même finesse d'aperçu : on
+      // descend d'un cran plutôt que d'abandonner. Un téléphone d'entrée de
+      // gamme ou une tablette ancienne refusent souvent « high ».
+      CameraController? controleur;
+      for (final finesse in [
         ResolutionPreset.high,
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
-      );
-      await controleur.initialize();
+        ResolutionPreset.medium,
+        ResolutionPreset.low,
+      ]) {
+        final essai = CameraController(
+          arriere,
+          finesse,
+          enableAudio: false,
+          imageFormatGroup: ImageFormatGroup.yuv420,
+        );
+        try {
+          await essai.initialize();
+          controleur = essai;
+          break;
+        } catch (_) {
+          await essai.dispose();
+        }
+      }
+      if (controleur == null) {
+        if (mounted) setState(() => _erreur = "aperçu refusé par l'appareil");
+        return;
+      }
+      _sens = arriere.sensorOrientation;
       if (!mounted) {
         await controleur.dispose();
         return;
       }
       setState(() => _appareil = controleur);
-      await controleur.startImageStream(_regarder);
+      try {
+        await controleur.startImageStream(_regarder);
+      } catch (_) {
+        // Sans flux d'images, pas de cadre en direct — mais l'appareil
+        // photo, lui, fonctionne : on garde le viseur, sans le cadre.
+        if (mounted) setState(() => _sansCadreDirect = true);
+      }
     } catch (e) {
       if (mounted) setState(() => _erreur = "$e");
     }
@@ -7877,7 +7922,13 @@ class _EcranViseurState extends State<EcranViseur> {
     _derniere = maintenant;
     _analyse = true;
     try {
+      if (image.planes.isEmpty || image.width < 40 || image.height < 40) {
+        return;
+      }
       final plan = image.planes.first;
+      // Le pas entre deux points d'une même ligne n'est pas toujours 1 :
+      // certains appareils entrelacent la luminance.
+      final ecart = plan.bytesPerPixel ?? 1;
       final pas = (image.width / 160).ceil().clamp(1, 16);
       final la = (image.width / pas).floor();
       final ha = (image.height / pas).floor();
@@ -7886,7 +7937,7 @@ class _EcranViseurState extends State<EcranViseur> {
       for (var y = 0; y < ha; y++) {
         final ligne = (y * pas) * plan.bytesPerRow;
         for (var x = 0; x < la; x++) {
-          final i = ligne + x * pas;
+          final i = ligne + x * pas * ecart;
           clarte[y * la + x] = i < plan.bytes.length ? plan.bytes[i] : 0;
         }
       }
@@ -7896,7 +7947,7 @@ class _EcranViseurState extends State<EcranViseur> {
           : _tourner(
               Rect.fromLTRB(trouve.left / la, trouve.top / ha,
                   trouve.right / la, trouve.bottom / ha),
-              _appareil?.description.sensorOrientation ?? 0,
+              _rotationUtile,
             );
       if (mounted && normalise != _cadre) {
         setState(() => _cadre = normalise);
@@ -7908,9 +7959,22 @@ class _EcranViseurState extends State<EcranViseur> {
     }
   }
 
-  /// L'image du capteur n'est pas dans le sens de l'écran : elle arrive
-  /// couchée, et l'aperçu la redresse. Le cadre doit suivre la même
-  /// rotation, sinon il se retrouve à angle droit de ce qu'il désigne.
+  /// De combien l'aperçu redresse l'image du capteur, sur cet appareil et
+  /// dans le sens où l'écran est tenu.
+  ///
+  /// Le capteur n'est pas monté de la même façon d'un modèle à l'autre :
+  /// 90° sur la plupart des téléphones, 0° ou 270° sur beaucoup de
+  /// tablettes, dont l'appareil photo est prévu pour le mode paysage. Et
+  /// l'écran lui-même peut être tenu dans un sens ou dans l'autre. Sans
+  /// tenir compte des deux, le cadre se retrouve à angle droit de ce qu'il
+  /// désigne — juste sur un appareil, faux sur le suivant.
+  int get _rotationUtile {
+    final enPaysage =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
+    return ((enPaysage ? _sens - 90 : _sens) + 360) % 360;
+  }
+
+  /// Applique cette rotation à un rectangle donné en proportions.
   Rect _tourner(Rect r, int degres) {
     switch (degres % 360) {
       case 90:
@@ -7929,7 +7993,9 @@ class _EcranViseurState extends State<EcranViseur> {
     if (appareil == null || _prise) return;
     setState(() => _prise = true);
     try {
-      await appareil.stopImageStream();
+      if (appareil.value.isStreamingImages) {
+        await appareil.stopImageStream();
+      }
       final fichier = await appareil.takePicture();
       if (!mounted) return;
       Navigator.pop(context, PriseDeVue(fichier.path, _cadre));
@@ -7980,10 +8046,27 @@ class _EcranViseurState extends State<EcranViseur> {
                   ? Center(
                       child: Padding(
                         padding: const EdgeInsets.all(24),
-                        child: Text(
-                          "Viseur indisponible : $_erreur",
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: Colors.white70),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              "Viseur indisponible sur cet appareil :\n"
+                              "$_erreur",
+                              textAlign: TextAlign.center,
+                              style:
+                                  const TextStyle(color: Colors.white70),
+                            ),
+                            const SizedBox(height: 16),
+                            FilledButton.icon(
+                              onPressed: () => Navigator.pop(
+                                context,
+                                const PriseDeVue("", null, secours: true),
+                              ),
+                              icon: const Icon(Icons.photo_camera),
+                              label: const Text(
+                                  "Utiliser l'appareil photo du téléphone"),
+                            ),
+                          ],
                         ),
                       ),
                     )
@@ -7991,7 +8074,21 @@ class _EcranViseurState extends State<EcranViseur> {
                       ? const Center(child: CircularProgressIndicator())
                       : Center(
                           child: AspectRatio(
-                            aspectRatio: 1 / appareil.value.aspectRatio,
+                            // L'aperçu est donné dans le sens du capteur,
+                            // toujours en paysage. Tenu droit, il faut donc
+                            // renverser le rapport ; tenu en paysage — une
+                            // tablette posée sur son socle —, le garder.
+                            aspectRatio: () {
+                              // Un rapport nul ou absurde — vu sur
+                              // quelques modèles au premier affichage —
+                              // ferait s'effondrer la mise en page.
+                              final r = appareil.value.aspectRatio;
+                              if (r <= 0 || !r.isFinite) return 3 / 4;
+                              return MediaQuery.orientationOf(context) ==
+                                      Orientation.landscape
+                                  ? r
+                                  : 1 / r;
+                            }(),
                             child: LayoutBuilder(
                               builder: (context, contraintes) {
                                 final cadre = _cadre;
@@ -8031,11 +8128,14 @@ class _EcranViseurState extends State<EcranViseur> {
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 6),
               child: Text(
-                _cadre != null
-                    ? "Document repéré — vous pouvez prendre la photo"
-                    : "Posez le document sur un fond plus sombre",
+                _sansCadreDirect
+                    ? "Cadre en direct indisponible ici — le cadrage se "
+                        "vérifie après la photo"
+                    : _cadre != null
+                        ? "Document repéré — vous pouvez prendre la photo"
+                        : "Posez le document sur un fond plus sombre",
                 style: TextStyle(
-                  color: _cadre != null
+                  color: (_cadre != null && !_sansCadreDirect)
                       ? const Color(0xFFFFC107)
                       : Colors.white54,
                   fontSize: 13,
