@@ -1536,7 +1536,13 @@ class _AccueilState extends State<Accueil> {
   ///    police suivant l'agrandissement ;
   ///  - un simple repère (vide) : rien n'est écrit dans la page, seul son
   ///    cadre change.
-  Future<void> _redimensionnerZone(MotDetecte mot, Rect demande) async {
+  /// [depuisPoignee] : le geste vient d'une poignée de coin, tirée au doigt.
+  /// C'est le seul cas où un cadre trop grand veut dire « j'entoure quelque
+  /// chose » plutôt que « j'agrandis ce texte ». A+ et A−, eux, demandent
+  /// explicitement un texte plus grand : ils ne doivent jamais se
+  /// transformer en cadre à détacher.
+  Future<void> _redimensionnerZone(MotDetecte mot, Rect demande,
+      {bool depuisPoignee = false}) async {
     final doc = document;
     if (doc == null || _occupe) return;
 
@@ -1620,7 +1626,9 @@ class _AccueilState extends State<Accueil> {
         recouvreUneAutre(nouvelle) &&
         !recouvreUneAutre(mot.zone);
 
-    if (mot.texte.isNotEmpty && (beaucoupPlusGrand || chevaucheMaintenant)) {
+    if (depuisPoignee &&
+        mot.texte.isNotEmpty &&
+        (beaucoupPlusGrand || chevaucheMaintenant)) {
       final cadre = MotDetecte("", nouvelle);
       setState(() {
         mots = [...mots, cadre];
@@ -1642,6 +1650,27 @@ class _AccueilState extends State<Accueil> {
         statut = "Cadre redimensionné";
       });
       return;
+    }
+
+    // Un texte agrandi prend plus de place : sans rien faire, il se posait
+    // par-dessus la ligne d'en dessous, les deux écritures mêlées. Les
+    // lignes qu'il vient recouvrir s'écartent donc d'abord, de proche en
+    // proche — la mécanique du déplacement, avec son annulation complète
+    // si quoi que ce soit échoue.
+    final surplus = nouvelle.height - mot.zone.height;
+    if (surplus > 0.5) {
+      final genees = mots
+          .where((m) =>
+              m != mot &&
+              m.texte.isNotEmpty &&
+              !m.estFlottant &&
+              m.zone.overlaps(nouvelle.inflate(1)) &&
+              !m.zone.overlaps(mot.zone.inflate(1)))
+          .toList();
+      if (genees.isNotEmpty) {
+        await _deplacerGroupe(genees, 0, surplus);
+        if (!mounted) return;
+      }
     }
 
     setState(() => _occupe = true);
@@ -6598,7 +6627,8 @@ class _AccueilState extends State<Accueil> {
                                           });
                                           if (vise != null) {
                                             await _redimensionnerZone(
-                                                mot, vise);
+                                                mot, vise,
+                                                depuisPoignee: true);
                                           }
                                         },
                                         child: Center(
