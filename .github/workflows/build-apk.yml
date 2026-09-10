@@ -140,8 +140,16 @@ jobs:
         working-directory: temp_app
         run: flutter build apk --release
 
+      # Toutes les compilations produisaient un « app-release.apk » : dans
+      # le dossier Téléchargements du téléphone, impossible de dire lequel
+      # était lequel. Chaque APK porte maintenant son numéro de build.
+      - name: Nommer l'APK avec le numéro de build
+        run: |
+          mv temp_app/build/app/outputs/flutter-apk/app-release.apk \
+             temp_app/build/app/outputs/flutter-apk/editeur-pdf-${{ github.run_number }}.apk
+
       - name: Publier l'APK
         uses: actions/upload-artifact@v4
         with:
-          name: application-pdf-apk
-          path: temp_app/build/app/outputs/flutter-apk/app-release.apk
+          name: application-pdf-apk-${{ github.run_number }}
+          path: temp_app/build/app/outputs/flutter-apk/editeur-pdf-${{ github.run_number }}.apk
