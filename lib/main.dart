@@ -92,6 +92,16 @@ class MotDetecte {
   /// redimensionne sans jamais rien abîmer dessous.
   Uint8List? imageFlottante;
 
+  /// Taille qu'avait le cadre la première fois qu'on y a touché.
+  ///
+  /// Sert à reconnaître qu'on est en train de l'étirer bien au-delà de la
+  /// ligne qu'il contient. La comparer à la taille *courante* ne suffisait
+  /// pas : en tirant le coin par petits coups, chaque coup restait modeste
+  /// et passait, alors que le cadre finissait dix fois trop grand. Mesurée
+  /// depuis l'origine, la dérive se voit quel que soit le nombre de coups.
+  Rect? _zoneOrigine;
+  Rect get zoneOrigine => _zoneOrigine ??= zone;
+
   /// Vrai pour ce qui flotte au-dessus de la page plutôt que d'y être
   /// écrit : une signature tracée, un morceau découpé, un tampon. Tout cela
   /// se déplace, se redimensionne et se retire de la même façon.
@@ -1589,11 +1599,12 @@ class _AccueilState extends State<Accueil> {
     // vide, à la taille qui vient d'être dessinée, prêt à détacher ce
     // qu'il recouvre. La ligne, elle, n'est pas touchée. Pour agrandir un
     // texte, ce sont A+ et A− qui sont faits pour ça.
+    final origine = mot.zoneOrigine;
     if (mot.texte.isNotEmpty &&
-        mot.zone.width > 0 &&
-        mot.zone.height > 0 &&
-        nouvelle.width / mot.zone.width > 1.8 &&
-        nouvelle.height / mot.zone.height > 1.8) {
+        origine.width > 0 &&
+        origine.height > 0 &&
+        nouvelle.width / origine.width > 1.8 &&
+        nouvelle.height / origine.height > 1.8) {
       final cadre = MotDetecte("", nouvelle);
       setState(() {
         mots = [...mots, cadre];
