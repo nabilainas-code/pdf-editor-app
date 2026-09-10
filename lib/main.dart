@@ -131,6 +131,13 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
   return Rect.fromLTRB(gauche, haut, droite, bas);
 }
 
+/// Numéro de la compilation, remplacé au moment de fabriquer l'APK.
+///
+/// Sans lui, impossible de savoir laquelle des versions est installée :
+/// on cherchait une correction dans une version qui ne l'avait pas encore,
+/// et on corrigeait à l'aveugle des choses déjà réglées.
+const String versionApp = "dev";
+
 const _channel = MethodChannel("com.nabilainas.pdfeditor/open_pdf");
 
 /// Couleur de la sélection de texte et de ses poignées. Le bleu par défaut
@@ -6097,6 +6104,16 @@ class _AccueilState extends State<Accueil> {
         title: const Text("Mon éditeur PDF"),
         actions: [_menuGeneral(context)],
       ),
+      // Le numéro de version, discret mais lisible : c'est lui qui dit si
+      // la correction attendue est bien dans l'application qu'on tient.
+      bottomNavigationBar: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Text(
+          "Version $versionApp",
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 11, color: Colors.black.withOpacity(0.4)),
+        ),
+      ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
@@ -6268,7 +6285,11 @@ class _AccueilState extends State<Accueil> {
             tooltip: "Rétablir",
             onPressed: (futur.isEmpty || _occupe) ? null : _retablir,
           ),
-          IconButton(
+          // Elle ne s'affiche que lorsqu'il y a quelque chose à coller.
+          // Postée en permanence dans la barre, grise et inerte, elle
+          // occupait une place et laissait croire à un bouton en panne.
+          if (lignesCopiees.isNotEmpty)
+            IconButton(
             icon: Icon(
               Icons.content_paste,
               color: enCollage ? Theme.of(context).colorScheme.primary : null,

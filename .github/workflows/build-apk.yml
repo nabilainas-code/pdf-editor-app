@@ -132,6 +132,14 @@ jobs:
           -dontwarn com.google.mlkit.vision.text.korean.**
           EOF
 
+      # Le numéro de compilation est inscrit dans l'application : sans lui,
+      # impossible de savoir depuis le téléphone quelle version est
+      # installée, ni si la correction attendue s'y trouve.
+      - name: Inscrire le numéro de version dans l'application
+        run: |
+          sed -i 's/const String versionApp = "dev";/const String versionApp = "${{ github.run_number }}";/' temp_app/lib/main.dart
+          grep -n 'const String versionApp' temp_app/lib/main.dart
+
       - name: Installer les dépendances
         working-directory: temp_app
         run: flutter pub get
