@@ -454,6 +454,44 @@ class _AccueilState extends State<Accueil> {
   /// au lieu de passer par la boîte « Modifier la ligne » qui masque la page.
   MotDetecte? motEnEditionDirecte;
   final TextEditingController controleurDirect = TextEditingController();
+
+  /// Dernier surlignage vu dans le champ d'écriture, et le texte qu'il
+  /// visait. Appuyer sur un bouton de la barre fait perdre le focus au
+  /// champ, et Android replie alors la sélection sur un simple curseur : le
+  /// gras, le copier et le couper ne voyaient plus rien de surligné et
+  /// portaient sur toute la ligne. On garde donc ce que l'on a vu tant que
+  /// le texte n'a pas changé.
+  TextSelection? selectionMemorisee;
+  String texteDeLaSelection = "";
+
+  /// Un bouton qui ne prend pas le focus : le champ d'écriture le garde, et
+  /// le surlignage survit à l'appui.
+  final FocusNode _sansFocus =
+      FocusNode(canRequestFocus: false, skipTraversal: true);
+
+  void _memoriserSelection() {
+    final etendue = controleurDirect.selection;
+    if (etendue.isValid && !etendue.isCollapsed) {
+      selectionMemorisee = etendue;
+      texteDeLaSelection = controleurDirect.text;
+    }
+  }
+
+  /// Ce qui est surligné, en se rabattant sur le dernier surlignage connu
+  /// quand le champ vient de perdre le focus.
+  TextSelection _selectionCourante() {
+    final texte = controleurDirect.text;
+    final etendue = controleurDirect.selection;
+    if (etendue.isValid && !etendue.isCollapsed) return etendue;
+    final memoire = selectionMemorisee;
+    if (memoire != null &&
+        texteDeLaSelection == texte &&
+        memoire.start >= 0 &&
+        memoire.end <= texte.length) {
+      return memoire;
+    }
+    return etendue;
+  }
   final FocusNode focusDirect = FocusNode();
   bool grasDirect = false;
   double? tailleDirecte;
@@ -668,12 +706,15 @@ class _AccueilState extends State<Accueil> {
   @override
   void initState() {
     super.initState();
+    controleurDirect.addListener(_memoriserSelection);
     _chargerPolices();
     _init();
   }
 
   @override
   void dispose() {
+    controleurDirect.removeListener(_memoriserSelection);
+    _sansFocus.dispose();
     _transformation.dispose();
     controleurDirect.dispose();
     focusDirect.dispose();
@@ -697,6 +738,8 @@ class _AccueilState extends State<Accueil> {
       enAjoutTexte = false;
       enCollage = false;
       motEnEditionDirecte = mot;
+      selectionMemorisee = null;
+      texteDeLaSelection = "";
       controleurDirect.text = mot.texte;
       controleurDirect.selection =
           TextSelection.collapsed(offset: mot.texte.length);
@@ -724,7 +767,7 @@ class _AccueilState extends State<Accueil> {
   /// attend quand on n'a rien surligné.
   Future<void> _actionTexte(String choix) async {
     final texte = controleurDirect.text;
-    var etendue = controleurDirect.selection;
+    var etendue = _selectionCourante();
     if (!etendue.isValid) {
       etendue = TextSelection.collapsed(offset: texte.length);
     }
@@ -899,7 +942,7 @@ class _AccueilState extends State<Accueil> {
     final mot = motEnEditionDirecte;
     if (mot == null || _occupe) return;
     final texte = controleurDirect.text;
-    final etendue = controleurDirect.selection;
+    final etendue = _selectionCourante();
     final surTout = !etendue.isValid ||
         etendue.isCollapsed ||
         (etendue.start <= 0 && etendue.end >= texte.length);
@@ -5355,6 +5398,9 @@ class _AccueilState extends State<Accueil> {
                         icon: const Icon(Icons.format_bold, size: 20),
                         tooltip: "Gras (le texte surligné, sinon la ligne)",
                         isSelected: grasDirect,
+                        // Sans focus : le champ garde le sien, et le
+                        // surlignage n'est pas replié par l'appui.
+                        focusNode: _sansFocus,
                         onPressed: _occupe ? null : _appliquerGras,
                       ),
                       // Un seul bouton pour toutes les actions de texte : la
