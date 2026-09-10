@@ -1600,11 +1600,27 @@ class _AccueilState extends State<Accueil> {
     // qu'il recouvre. La ligne, elle, n'est pas touchée. Pour agrandir un
     // texte, ce sont A+ et A− qui sont faits pour ça.
     final origine = mot.zoneOrigine;
-    if (mot.texte.isNotEmpty &&
-        origine.width > 0 &&
+    final beaucoupPlusGrand = origine.width > 0 &&
         origine.height > 0 &&
         nouvelle.width / origine.width > 1.8 &&
-        nouvelle.height / origine.height > 1.8) {
+        nouvelle.height / origine.height > 1.8;
+
+    // L'autre signe, plus sûr encore que la taille : le cadre agrandi vient
+    // recouvrir d'autres lignes. Réécrire la ligne dedans, ce serait
+    // l'écrire par-dessus ses voisines — deux écritures l'une sur l'autre,
+    // illisibles. Personne n'a jamais demandé ça ; ce qu'on voulait, c'est
+    // entourer ce qui est là. Un cadre qui empiétait déjà sur sa voisine
+    // avant le geste ne compte pas : les cadres de lignes se touchent
+    // souvent d'eux-mêmes.
+    final grandit = nouvelle.width > mot.zone.width + 1 ||
+        nouvelle.height > mot.zone.height + 1;
+    bool recouvreUneAutre(Rect cadre) => mots.any((m) =>
+        m != mot && m.texte.isNotEmpty && m.zone.overlaps(cadre.deflate(2)));
+    final chevaucheMaintenant = grandit &&
+        recouvreUneAutre(nouvelle) &&
+        !recouvreUneAutre(mot.zone);
+
+    if (mot.texte.isNotEmpty && (beaucoupPlusGrand || chevaucheMaintenant)) {
       final cadre = MotDetecte("", nouvelle);
       setState(() {
         mots = [...mots, cadre];
