@@ -6256,12 +6256,23 @@ class _AccueilState extends State<Accueil> {
                                     // poignées trop fines se laissaient
                                     // difficilement attraper.
                                     const rayon = 15.0;
+                                    // Posées pile sur le coin, les pastilles
+                                    // mordaient sur le contenu : sur une
+                                    // ligne fine, celles de gauche se
+                                    // rejoignaient et cachaient la première
+                                    // lettre. On les repousse vers
+                                    // l'extérieur du cadre — la ligne reste
+                                    // lisible pendant qu'on la retaille, et
+                                    // la surface à attraper ne change pas.
+                                    const ecart = 9.0;
                                     final x =
                                         (coin.x < 0 ? rect.left : rect.right) *
-                                            echelle;
+                                                echelle +
+                                            (coin.x < 0 ? -ecart : ecart);
                                     final y =
                                         (coin.y < 0 ? rect.top : rect.bottom) *
-                                            echelle;
+                                                echelle +
+                                            (coin.y < 0 ? -ecart : ecart);
                                     return Positioned(
                                       left: x - rayon,
                                       top: y - rayon,
@@ -6309,8 +6320,8 @@ class _AccueilState extends State<Accueil> {
                                         },
                                         child: Center(
                                           child: Container(
-                                            width: rayon * 1.4,
-                                            height: rayon * 1.4,
+                                            width: rayon * 1.1,
+                                            height: rayon * 1.1,
                                             decoration: BoxDecoration(
                                               shape: BoxShape.circle,
                                               color: Colors.white,
@@ -6456,7 +6467,11 @@ class _AccueilState extends State<Accueil> {
                                 // derrière « … ».
                                 final estSignature =
                                     mot.estFlottant;
-                                final nbBoutons = estSignature ? 4 : 5;
+                                // Copier était rangé derrière « … » alors
+                                // que c'est un geste courant : le voici au
+                                // premier rang, pour le texte comme pour un
+                                // tampon détaché.
+                                final nbBoutons = estSignature ? 5 : 6;
                                 final largeurMenu = 44.0 * nbBoutons + 10;
                                 const hauteurMenu = 44.0;
                                 var gauche = coin.dx;
@@ -6521,6 +6536,14 @@ class _AccueilState extends State<Accueil> {
                                                   : () =>
                                                       _redimensionnerDUnCran(
                                                           mot, 1.25),
+                                            ),
+                                            _boutonMenu(
+                                              Icons.content_copy,
+                                              "Copier",
+                                              _occupe
+                                                  ? null
+                                                  : () =>
+                                                      _copierPourPoser(mot),
                                             ),
                                             _boutonMenu(
                                               Icons.delete_outline,
