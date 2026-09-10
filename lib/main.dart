@@ -345,6 +345,16 @@ class _LigneCopiee {
   /// exactement la police du scan, qu'on ne saurait pas reproduire.
   final Uint8List? image;
 
+  /// Un objet détaché — tampon, logo découpé, signature — n'est pas du
+  /// texte : c'est un morceau qui flotte au-dessus de la page. Le copier
+  /// garde ses pixels (ou son tracé) et son rapport de forme, pour le
+  /// reposer flottant lui aussi, libre de bouger jusqu'à l'enregistrement.
+  final Uint8List? imageFlottante;
+  final List<List<Offset>>? traits;
+  final double ratio;
+
+  bool get estFlottant => imageFlottante != null || traits != null;
+
   const _LigneCopiee({
     required this.texte,
     required this.decalage,
@@ -356,6 +366,9 @@ class _LigneCopiee {
     required this.tailleManuelle,
     required this.tailleAuto,
     required this.image,
+    this.imageFlottante,
+    this.traits,
+    this.ratio = 0.4,
   });
 }
 
@@ -4319,7 +4332,11 @@ class _AccueilState extends State<Accueil> {
   /// garde sa place dans le bloc, si bien que le collage restitue les
   /// interlignes au lieu d'empiler les lignes au même endroit.
   void _copier() {
-    final choisies = selection.where((m) => m.texte.isNotEmpty).toList()
+    // Un objet détaché n'a pas de texte, et restait donc incopiable : on ne
+    // pouvait le reposer qu'au même endroit, en le dupliquant. Il se copie
+    // maintenant comme le reste, et se colle où le doigt se pose.
+    final choisies =
+        selection.where((m) => m.texte.isNotEmpty || m.estFlottant).toList()
       ..sort((a, b) {
         final vertical = a.zone.top.compareTo(b.zone.top);
         return vertical != 0 ? vertical : a.zone.left.compareTo(b.zone.left);
@@ -4328,9 +4345,13 @@ class _AccueilState extends State<Accueil> {
 
     // Même rectangle que pour un déplacement (marge + tiret/puce embarqués),
     // pour que l'image capturée corresponde exactement à ce qui est copié.
+    // Un objet flottant occupe exactement son cadre : ni marge de ligne, ni
+    // puce à embarquer à sa gauche.
     final rects = <MotDetecte, Rect>{
       for (final m in choisies)
-        m: _aligner(_etendreVersPuce(_rectDeplacement(m))),
+        m: m.estFlottant
+            ? _aligner(m.zone)
+            : _aligner(_etendreVersPuce(_rectDeplacement(m))),
     };
     var bloc = rects[choisies.first]!;
     for (final r in rects.values) {
@@ -4356,24 +4377,49 @@ class _AccueilState extends State<Accueil> {
               // d'une ligne scannée. Une ligne dont on connaît la police est
               // réécrite, ce qui reste net ; une ligne déjà redessinée n'a
               // de toute façon plus ses pixels à jour dans l'image.
-              image: (m.redessine || !m.depuisOcr)
+              image: (m.estFlottant || m.redessine || !m.depuisOcr)
                   ? null
                   : _capturerZone(rects[m]!),
+              imageFlottante: m.imageFlottante,
+              traits: m.traitsSignature == null
+                  ? null
+                  : [
+                      for (final trait in m.traitsSignature!)
+                        List<Offset>.from(trait)
+                    ],
+              ratio: m.ratioSignature,
             )
         ]);
       tailleBlocCopie = bloc.size;
       statut = choisies.length == 1
-          ? "Texte copié : collez-le ici ou dans n'importe quelle autre "
-              "application"
-          : "${choisies.length} lignes copiées : touchez l'endroit où les "
+          ? (choisies.first.estFlottant
+              ? "Élément copié : touchez l'endroit où le poser"
+              : "Texte copié : collez-le ici ou dans n'importe quelle autre "
+                  "application")
+          : "${choisies.length} éléments copiés : touchez l'endroit où les "
               "coller";
     });
 
     // Aussi dans le presse-papiers d'Android : le texte est alors collable
     // partout ailleurs (SMS, mail, autre application), avec le collage
     // habituel du téléphone, et pas seulement dans ce document.
-    Clipboard.setData(
-        ClipboardData(text: choisies.map((m) => m.texte).join('\n')));
+    // Seulement s'il y a du texte : copier un tampon ne doit pas vider le
+    // presse-papiers du téléphone de ce qui s'y trouvait.
+    final texte =
+        choisies.where((m) => m.texte.isNotEmpty).map((m) => m.texte).join('\n');
+    if (texte.isNotEmpty) Clipboard.setData(ClipboardData(text: texte));
+  }
+
+  /// Copie cet objet puis attend l'endroit où le poser : le geste complet en
+  /// une seule commande, depuis son propre menu.
+  void _copierPourPoser(MotDetecte mot) {
+    setState(() {
+      selection
+        ..clear()
+        ..add(mot);
+    });
+    _copier();
+    _activerModeCollage();
   }
 
   void _activerModeCollage() {
@@ -4382,8 +4428,10 @@ class _AccueilState extends State<Accueil> {
       enCollage = true;
       enAjoutTexte = false;
       statut = lignesCopiees.length == 1
-          ? "Touchez l'endroit de la page où coller le texte"
-          : "Touchez l'endroit où coller les ${lignesCopiees.length} lignes";
+          ? (lignesCopiees.first.estFlottant
+              ? "Touchez l'endroit de la page où poser l'élément"
+              : "Touchez l'endroit de la page où coller le texte")
+          : "Touchez l'endroit où coller les ${lignesCopiees.length} éléments";
     });
   }
 
@@ -4413,9 +4461,16 @@ class _AccueilState extends State<Accueil> {
     // texte collé par-dessus au lieu de le remplacer, illisible. On demande
     // un autre endroit plutôt que de produire ce chevauchement. La
     // vérification porte sur tout le bloc, pas sur sa première ligne.
+    // Un objet flottant, lui, est fait pour se poser par-dessus : un tampon
+    // sur un paragraphe, une signature sur une ligne. Le refus ne vise que
+    // le texte collé, qui s'empilerait illisiblement.
+    final zonesTexte = [
+      for (var i = 0; i < lignesCopiees.length; i++)
+        if (!lignesCopiees[i].estFlottant) zones[i]
+    ];
     final surLigneExistante = mots.any((m) =>
         m.texte.isNotEmpty &&
-        zones.any((z) => z.inflate(3).overlaps(m.zone)));
+        zonesTexte.any((z) => z.inflate(3).overlaps(m.zone)));
     if (surLigneExistante) {
       const message =
           "Cet endroit chevauche une ligne existante : touchez un espace "
@@ -4455,6 +4510,18 @@ class _AccueilState extends State<Accueil> {
           // repasser par la photo, pas par une réécriture.
           depuisOcr: ligne.image != null,
         );
+        // Reposé flottant : rien n'est écrit dans la page maintenant. Il
+        // reste libre d'être déplacé, retaillé ou retiré, et n'entre dans le
+        // fichier qu'à l'enregistrement — comme l'original détaché.
+        if (ligne.estFlottant) {
+          posee.imageFlottante = ligne.imageFlottante;
+          posee.traitsSignature = ligne.traits == null
+              ? null
+              : [for (final trait in ligne.traits!) List<Offset>.from(trait)];
+          posee.ratioSignature = ligne.ratio;
+          nouvelles.add(posee);
+          continue;
+        }
         final image = ligne.image;
         if (image != null) {
           page.graphics.drawImage(PdfBitmap(image), zone);
@@ -4471,8 +4538,8 @@ class _AccueilState extends State<Accueil> {
             ..addAll(nouvelles);
         enCollage = false;
         statut = nouvelles.length == 1
-            ? "Texte collé"
-            : "${nouvelles.length} lignes collées";
+            ? (nouvelles.first.estFlottant ? "Élément posé" : "Texte collé")
+            : "${nouvelles.length} éléments collés";
       });
 
       if (imageDeFond != null) {
@@ -5034,8 +5101,19 @@ class _AccueilState extends State<Accueil> {
             // manque, c'est de pouvoir se reposer ailleurs.
             if (estSignature)
               ListTile(
+                leading: const Icon(Icons.content_paste_go),
+                title: const Text("Copier pour poser ailleurs"),
+                subtitle:
+                    const Text("Puis touchez l'endroit voulu sur la page"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _copierPourPoser(mot);
+                },
+              ),
+            if (estSignature)
+              ListTile(
                 leading: const Icon(Icons.content_copy),
-                title: const Text("Dupliquer la signature"),
+                title: const Text("Dupliquer sur place"),
                 subtitle: const Text("Pour signer à un deuxième endroit"),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -5648,7 +5726,8 @@ class _AccueilState extends State<Accueil> {
                         tooltip: selection.length > 1
                             ? "Copier les ${selection.length} lignes"
                             : "Copier cette ligne",
-                        onPressed: selection.any((m) => m.texte.isNotEmpty)
+                        onPressed: selection
+                                .any((m) => m.texte.isNotEmpty || m.estFlottant)
                             ? _copier
                             : null,
                       ),
