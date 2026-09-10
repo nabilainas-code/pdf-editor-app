@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
@@ -582,6 +583,28 @@ class _AccueilState extends State<Accueil> {
   /// que rangé dans un menu qu'il faut penser à ouvrir.
   bool presseCollable = false;
 
+  /// Le bouton « Coller » ne reste pas planté au-dessus de la ligne : il se
+  /// montre au moment où l'on touche la ligne, puis s'efface tout seul —
+  /// comme la bulle de collage du téléphone. Laissé en permanence, il
+  /// masquait le texte et revenait à chaque fois qu'on venait simplement
+  /// écrire, alors qu'on ne voulait pas coller.
+  bool collerVisible = false;
+  Timer? _minuteurColler;
+
+  void _montrerColler() {
+    if (!presseCollable) return;
+    _minuteurColler?.cancel();
+    if (!collerVisible) setState(() => collerVisible = true);
+    _minuteurColler = Timer(const Duration(seconds: 4), () {
+      if (mounted && collerVisible) setState(() => collerVisible = false);
+    });
+  }
+
+  void _cacherColler() {
+    _minuteurColler?.cancel();
+    if (collerVisible) setState(() => collerVisible = false);
+  }
+
   String? outilTrace;
   final List<Offset> traceEnCours = [];
   double epaisseurStylo = 2;
@@ -766,6 +789,7 @@ class _AccueilState extends State<Accueil> {
 
   @override
   void dispose() {
+    _minuteurColler?.cancel();
     controleurDirect.removeListener(_memoriserSelection);
     _sansFocus.dispose();
     _transformation.dispose();
@@ -821,8 +845,13 @@ class _AccueilState extends State<Accueil> {
       // alors sur ce que l'application elle-même a copié.
       collable = lignesCopiees.isNotEmpty;
     }
-    if (!mounted || collable == presseCollable) return;
-    setState(() => presseCollable = collable);
+    if (!mounted) return;
+    if (collable != presseCollable) {
+      setState(() => presseCollable = collable);
+    }
+    // Montré au moment où l'on arrive sur la ligne, le temps de s'en
+    // servir ; ensuite il s'efface et laisse le texte tranquille.
+    if (collable) _montrerColler();
   }
 
   /// Actions de texte pendant l'écriture sur une ligne : tout sélectionner,
@@ -1879,9 +1908,8 @@ class _AccueilState extends State<Accueil> {
   /// Ce qui n'est pas fait, et qu'il faut savoir : la perspective n'est pas
   /// redressée. Un document photographié de biais reste de biais ; seul son
   /// entourage est retiré.
-  img.Image _cadrerDocument(img.Image source) {
-    cadrageAutoTrouve = false;
-    if (source.width < 60 || source.height < 60) return source;
+  Rect? _bordsDocument(img.Image source) {
+    if (source.width < 60 || source.height < 60) return null;
 
     // Analyse sur une image réduite : les bords d'une feuille se voient
     // aussi bien, et le calcul reste instantané sur un téléphone.
@@ -1890,7 +1918,7 @@ class _AccueilState extends State<Accueil> {
         source.width > largeurAnalyse ? source.width / largeurAnalyse : 1.0;
     final la = (source.width / reduction).round();
     final ha = (source.height / reduction).round();
-    if (la < 40 || ha < 40) return source;
+    if (la < 40 || ha < 40) return null;
     final petite = img.copyResize(source, width: la, height: ha);
 
     final histogramme = List<int>.filled(256, 0);
@@ -1914,7 +1942,7 @@ class _AccueilState extends State<Accueil> {
       if (clarte[i] >= seuil) clairs++;
     }
     final partClaire = clairs / clarte.length;
-    if (partClaire > 0.92 || partClaire < 0.08) return source;
+    if (partClaire > 0.92 || partClaire < 0.08) return null;
 
     List<int> plusLongueBande(List<double> parts, double minimum) {
       // Longueur initiale négative : une bande d'une seule ligne compte
@@ -1954,17 +1982,17 @@ class _AccueilState extends State<Accueil> {
 
     final bandeY = plusLongueBande(partLignes, 0.5);
     final bandeX = plusLongueBande(partColonnes, 0.5);
-    if (bandeY[0] < 0 || bandeX[0] < 0) return source;
+    if (bandeY[0] < 0 || bandeX[0] < 0) return null;
 
     final hauteurTrouvee = bandeY[1] - bandeY[0] + 1;
     final largeurTrouvee = bandeX[1] - bandeX[0] + 1;
     // Trop petit : ce n'est pas le document mais un reflet. Trop grand :
     // il n'y avait rien à retirer, autant ne pas y toucher.
     if (hauteurTrouvee < ha * 0.25 || largeurTrouvee < la * 0.25) {
-      return source;
+      return null;
     }
     if (hauteurTrouvee > ha * 0.97 && largeurTrouvee > la * 0.97) {
-      return source;
+      return null;
     }
 
     // Une marge, pour ne pas raboter le bord de la feuille lui-même.
@@ -1977,11 +2005,198 @@ class _AccueilState extends State<Accueil> {
     if (haut < 0) haut = 0;
     if (droite > source.width) droite = source.width;
     if (bas > source.height) bas = source.height;
-    if (droite - gauche < 40 || bas - haut < 40) return source;
+    if (droite - gauche < 40 || bas - haut < 40) return null;
 
-    cadrageAutoTrouve = true;
+    return Rect.fromLTRB(gauche.toDouble(), haut.toDouble(),
+        droite.toDouble(), bas.toDouble());
+  }
+
+  /// Recadre la photo sur les bords trouvés. Rend la photo entière quand
+  /// ils ne se dégagent pas : mieux vaut un scan à recadrer à la main qu'un
+  /// scan amputé.
+  img.Image _cadrerDocument(img.Image source) {
+    final bords = _bordsDocument(source);
+    cadrageAutoTrouve = bords != null;
+    if (bords == null) return source;
     return img.copyCrop(source,
-        x: gauche, y: haut, width: droite - gauche, height: bas - haut);
+        x: bords.left.round(),
+        y: bords.top.round(),
+        width: bords.width.round(),
+        height: bords.height.round());
+  }
+
+  /// Montre la photo avec le cadre trouvé, pour le vérifier et le corriger
+  /// avant d'aller plus loin.
+  ///
+  /// Le cadrage automatique se trompe forcément de temps en temps : fond
+  /// clair, ombre portée, document coupé par la photo. Le lui laisser
+  /// décider seul, en silence, c'était livrer un scan amputé sans que
+  /// personne ait rien vu. Ici le cadre est montré, il se déplace par ses
+  /// quatre coins, et rien n'est fait tant qu'on n'a pas dit oui.
+  ///
+  /// Rend le rectangle retenu, en pixels de la photo — ou null si on
+  /// renonce à cette photo.
+  Future<Rect?> _verifierCadrage(img.Image source, Rect? propose) async {
+    // Une copie réduite pour l'affichage : encoder la photo pleine
+    // résolution à chaque fois ferait attendre pour rien.
+    final apercu = source.width > 1000
+        ? img.copyResize(source, width: 1000)
+        : source;
+    final octets = Uint8List.fromList(img.encodeJpg(apercu, quality: 85));
+    final largeurSource = source.width.toDouble();
+    final hauteurSource = source.height.toDouble();
+    var cadre = propose ??
+        Rect.fromLTRB(largeurSource * 0.06, hauteurSource * 0.06,
+            largeurSource * 0.94, hauteurSource * 0.94);
+    final trouve = propose != null;
+
+    return showDialog<Rect>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog.fullscreen(
+        backgroundColor: Colors.black,
+        child: StatefulBuilder(
+          builder: (ctx, refaire) => SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                  child: Text(
+                    trouve
+                        ? "Bords trouvés — corrigez le cadre si besoin"
+                        : "Bords non trouvés — placez le cadre vous-même",
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                ),
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (ctx, contraintes) {
+                      final parLargeur = contraintes.maxWidth / largeurSource;
+                      final parHauteur =
+                          contraintes.maxHeight / hauteurSource;
+                      final zoom =
+                          parLargeur < parHauteur ? parLargeur : parHauteur;
+                      final large = largeurSource * zoom;
+                      final haute = hauteurSource * zoom;
+                      final ox = (contraintes.maxWidth - large) / 2;
+                      final oy = (contraintes.maxHeight - haute) / 2;
+                      Offset versEcran(double x, double y) =>
+                          Offset(ox + x * zoom, oy + y * zoom);
+
+                      const rayon = 22.0;
+                      Widget poignee(Alignment coin) {
+                        final point = versEcran(
+                          coin.x < 0 ? cadre.left : cadre.right,
+                          coin.y < 0 ? cadre.top : cadre.bottom,
+                        );
+                        return Positioned(
+                          left: point.dx - rayon,
+                          top: point.dy - rayon,
+                          width: rayon * 2,
+                          height: rayon * 2,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onPanUpdate: (details) {
+                              final dx = details.delta.dx / zoom;
+                              final dy = details.delta.dy / zoom;
+                              var g = cadre.left, h = cadre.top;
+                              var d = cadre.right, b = cadre.bottom;
+                              if (coin.x < 0) {
+                                g = (g + dx).clamp(0.0, d - 40);
+                              } else {
+                                d = (d + dx).clamp(g + 40, largeurSource);
+                              }
+                              if (coin.y < 0) {
+                                h = (h + dy).clamp(0.0, b - 40);
+                              } else {
+                                b = (b + dy).clamp(h + 40, hauteurSource);
+                              }
+                              refaire(() =>
+                                  cadre = Rect.fromLTRB(g, h, d, b));
+                            },
+                            child: Center(
+                              child: Container(
+                                width: 20,
+                                height: 20,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Colors.white,
+                                  border: Border.all(
+                                      color: const Color(0xFFFFC107),
+                                      width: 3),
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      }
+
+                      final hautGauche =
+                          versEcran(cadre.left, cadre.top);
+                      final basDroite =
+                          versEcran(cadre.right, cadre.bottom);
+                      return Stack(
+                        children: [
+                          Positioned(
+                            left: ox,
+                            top: oy,
+                            width: large,
+                            height: haute,
+                            child: Image.memory(octets, fit: BoxFit.fill),
+                          ),
+                          Positioned(
+                            left: hautGauche.dx,
+                            top: hautGauche.dy,
+                            width: basDroite.dx - hautGauche.dx,
+                            height: basDroite.dy - hautGauche.dy,
+                            child: IgnorePointer(
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                      color: const Color(0xFFFFC107),
+                                      width: 2),
+                                ),
+                              ),
+                            ),
+                          ),
+                          poignee(Alignment.topLeft),
+                          poignee(Alignment.topRight),
+                          poignee(Alignment.bottomLeft),
+                          poignee(Alignment.bottomRight),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text("Reprendre la photo"),
+                      ),
+                      TextButton(
+                        onPressed: () => refaire(() => cadre = Rect.fromLTRB(
+                            0, 0, largeurSource, hauteurSource)),
+                        child: const Text("Toute la photo"),
+                      ),
+                      FilledButton.icon(
+                        onPressed: () => Navigator.pop(ctx, cadre),
+                        icon: const Icon(Icons.check),
+                        label: const Text("Valider"),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   img.Image _rehausserScan(img.Image source, {bool noirEtBlanc = false}) {
@@ -2088,7 +2303,32 @@ class _AccueilState extends State<Accueil> {
     if (decodee == null) return null;
     // Une photo porte son orientation dans ses métadonnées : sans ça, un
     // document pris en tenant le téléphone de travers arrivait couché.
-    return _traiterScan(img.bakeOrientation(decodee), mode);
+    final droite = img.bakeOrientation(decodee);
+
+    // Le mode « photo » garde l'image entière : c'est le cadre de la photo
+    // qu'on voulait, il n'y a rien à découper ni à vérifier.
+    if (mode == "photo") {
+      cadrageAutoTrouve = false;
+      return _traiterScan(droite, mode);
+    }
+
+    final bords = _bordsDocument(droite);
+    if (!mounted) return null;
+    final retenu = await _verifierCadrage(droite, bords);
+    // Renoncé : on ne rend rien plutôt que d'imposer un cadrage.
+    if (retenu == null) return null;
+    cadrageAutoTrouve = bords != null;
+    final coupee = (retenu.width >= droite.width - 1 &&
+            retenu.height >= droite.height - 1)
+        ? droite
+        : img.copyCrop(droite,
+            x: retenu.left.round(),
+            y: retenu.top.round(),
+            width: retenu.width.round(),
+            height: retenu.height.round());
+    return mode == "nb"
+        ? _rehausserScan(coupee, noirEtBlanc: true)
+        : _rehausserScan(coupee);
   }
 
   /// Rectangle où poser une image dans un emplacement, en gardant ses
@@ -6589,7 +6829,16 @@ class _AccueilState extends State<Accueil> {
                                               // la frappe : sans ça, la fin
                                               // du texte sortirait du cadre
                                               // détecté et serait coupée.
-                                              onChanged: (_) => setState(() {}),
+                                              onChanged: (_) {
+                                                // On tape : on n'est plus en
+                                                // train de vouloir coller.
+                                                _cacherColler();
+                                                setState(() {});
+                                              },
+                                              // Un appui dans la ligne le
+                                              // rappelle, là où le doigt
+                                              // vient de se poser.
+                                              onTap: _montrerColler,
                                               // Entrée = ligne suivante, comme
                                               // dans un traitement de texte ;
                                               // le ✓ de la barre termine.
@@ -7004,6 +7253,7 @@ class _AccueilState extends State<Accueil> {
                         // sombre que le reste.
                         if (motEnEditionDirecte != null &&
                             presseCollable &&
+                            collerVisible &&
                             !modeNavigation)
                           Positioned.fill(
                             child: AnimatedBuilder(
@@ -7066,7 +7316,10 @@ class _AccueilState extends State<Accueil> {
                                           padding: EdgeInsets.zero,
                                           onPressed: _occupe
                                               ? null
-                                              : () => _actionTexte("coller"),
+                                              : () {
+                                                  _cacherColler();
+                                                  _actionTexte("coller");
+                                                },
                                         ),
                                       ),
                                     ),
