@@ -643,6 +643,12 @@ class _AccueilState extends State<Accueil> {
   /// des lignes au lieu de déplacer la sélection.
   MotDetecte? balayageDepart;
 
+  /// Un balayage n'est engagé qu'une fois le doigt vraiment parti. Le
+  /// moindre tremblement en touchant une ligne était pris pour un
+  /// glissement, et vidait la sélection qu'on venait de composer.
+  bool balayageEngage = false;
+  double distanceBalayage = 0;
+
   /// Étend la sélection à toutes les lignes comprises entre celle d'où est
   /// parti le doigt et la hauteur qu'il a atteinte. Choisir plusieurs lignes
   /// demandait jusqu'ici un double-appui sur chacune : pour un paragraphe
@@ -5987,17 +5993,31 @@ class _AccueilState extends State<Accueil> {
                                         });
                                         return;
                                       }
-                                      setState(() {
-                                        balayageDepart = mot;
-                                        selection
-                                          ..clear()
-                                          ..add(mot);
-                                        statut = "Glissez pour prendre les "
-                                            "lignes voisines";
-                                      });
+                                      // Rien n'est encore touché à la
+                                      // sélection : un appui qui tremble un
+                                      // peu ne doit pas défaire ce qu'on
+                                      // vient de composer.
+                                      balayageDepart = mot;
+                                      balayageEngage = false;
+                                      distanceBalayage = 0;
                                     },
                                     onPanUpdate: (details) {
                                       if (balayageDepart != null) {
+                                        if (!balayageEngage) {
+                                          distanceBalayage +=
+                                              details.delta.distance;
+                                          // Douze points d'écran : au-delà,
+                                          // c'est un geste, pas un appui.
+                                          if (distanceBalayage < 12) return;
+                                          balayageEngage = true;
+                                          setState(() {
+                                            selection
+                                              ..clear()
+                                              ..add(mot);
+                                            statut = "Glissez pour prendre "
+                                                "les lignes voisines";
+                                          });
+                                        }
                                         final rect =
                                             _rectAffichage(mot, echelle);
                                         _etendreBalayage(rect.top +
@@ -6013,8 +6033,14 @@ class _AccueilState extends State<Accueil> {
                                     },
                                     onPanEnd: (_) async {
                                       if (balayageDepart != null) {
+                                        final engage = balayageEngage;
+                                        balayageDepart = null;
+                                        balayageEngage = false;
+                                        // Doigt à peine bougé : on n'a rien
+                                        // balayé, donc rien à annoncer et
+                                        // surtout rien à défaire.
+                                        if (!engage) return;
                                         setState(() {
-                                          balayageDepart = null;
                                           statut = selection.length > 1
                                               ? "${selection.length} lignes "
                                                   "choisies"
