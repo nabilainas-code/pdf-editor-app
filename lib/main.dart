@@ -3257,6 +3257,92 @@ class _AccueilState extends State<Accueil> {
     return Rect.fromLTWH(x / e, y / e, largeur / e, hauteur / e);
   }
 
+  /// Repousse les bords de [zone] tant que de l'encre les touche.
+  ///
+  /// Un trait de signature déborde toujours un peu du cadre qu'on trace au
+  /// doigt : sa queue, ses boucles. Le cadre emportait alors le cachet et
+  /// laissait ce bout de trait sur la page, orphelin. Les bords s'écartent
+  /// donc de ce qu'il faut pour que rien ne reste coupé — de quelques
+  /// millimètres au plus, pour ne pas se mettre à avaler la page si le
+  /// cadre touche un paragraphe ou un filet.
+  Rect _etendreSurEncre(Rect zone) {
+    final image = imageDecodee;
+    final e = echelleOcr;
+    if (image == null || e <= 0) return zone;
+
+    var x0 = (zone.left * e).round().clamp(0, image.width - 1);
+    var y0 = (zone.top * e).round().clamp(0, image.height - 1);
+    var x1 = (zone.right * e).round().clamp(x0 + 1, image.width);
+    var y1 = (zone.bottom * e).round().clamp(y0 + 1, image.height);
+
+    double clarte(int x, int y) {
+      final pixel = image.getPixel(x, y);
+      return (pixel.r * 0.299 + pixel.g * 0.587 + pixel.b * 0.114).toDouble();
+    }
+
+    // La couleur du papier, relevée sur le tour du cadre : sans elle, rien
+    // ne dit ce qui est de l'encre.
+    var somme = 0.0;
+    var nombre = 0;
+    for (var x = x0; x < x1; x += 2) {
+      somme += clarte(x, y0) + clarte(x, y1 - 1);
+      nombre += 2;
+    }
+    for (var y = y0; y < y1; y += 2) {
+      somme += clarte(x0, y) + clarte(x1 - 1, y);
+      nombre += 2;
+    }
+    if (nombre == 0) return zone;
+    final papier = somme / nombre;
+    // Fond sombre (bandeau, photo) : on ne saurait pas distinguer l'encre
+    // du fond, mieux vaut ne pas y toucher.
+    if (papier < 160) return zone;
+    final seuil = papier - 45;
+
+    bool encreSurLigne(int y) {
+      for (var x = x0; x < x1; x++) {
+        if (clarte(x, y) < seuil) return true;
+      }
+      return false;
+    }
+
+    bool encreSurColonne(int x) {
+      for (var y = y0; y < y1; y++) {
+        if (clarte(x, y) < seuil) return true;
+      }
+      return false;
+    }
+
+    // Quelques millimètres, pas davantage : de quoi rattraper la queue d'un
+    // paraphe, jamais de quoi emporter le paragraphe d'à côté.
+    final marge = (18.0 * e).round();
+    final basX0 = x0 - marge, basY0 = y0 - marge;
+    final hautX1 = x1 + marge, hautY1 = y1 + marge;
+    const pas = 2;
+    for (var tour = 0; tour < 40; tour++) {
+      var bouge = false;
+      if (y0 > 0 && y0 > basY0 && encreSurLigne(y0)) {
+        y0 = (y0 - pas).clamp(0, y0);
+        bouge = true;
+      }
+      if (y1 < image.height && y1 < hautY1 && encreSurLigne(y1 - 1)) {
+        y1 = (y1 + pas).clamp(y1, image.height);
+        bouge = true;
+      }
+      if (x0 > 0 && x0 > basX0 && encreSurColonne(x0)) {
+        x0 = (x0 - pas).clamp(0, x0);
+        bouge = true;
+      }
+      if (x1 < image.width && x1 < hautX1 && encreSurColonne(x1 - 1)) {
+        x1 = (x1 + pas).clamp(x1, image.width);
+        bouge = true;
+      }
+      if (!bouge) break;
+    }
+
+    return Rect.fromLTRB(x0 / e, y0 / e, x1 / e, y1 / e);
+  }
+
   Uint8List? _capturerZone(Rect zone) {
     final image = imageDecodee;
     if (image == null) return null;
@@ -4843,7 +4929,12 @@ class _AccueilState extends State<Accueil> {
     setState(() => _occupe = true);
     final avant = await _etatActuel(doc);
     try {
-      final zone = _aligner(mot.zone);
+      // Les bords s'écartent de ce qui les touche : un trait qui dépasse
+      // du cadre partait sinon en deux morceaux, l'un emporté, l'autre
+      // resté sur la page.
+      final zone = _aligner(_etendreSurEncre(mot.zone));
+      final etendu = zone.width > mot.zone.width + 1 ||
+          zone.height > mot.zone.height + 1;
       final image = _capturerZone(zone);
       if (image == null) {
         setState(() => statut =
@@ -4865,7 +4956,10 @@ class _AccueilState extends State<Accueil> {
         selection
           ..clear()
           ..add(mot);
-        statut = "Détaché — tirez-le où vous voulez, les coins pour la taille";
+        statut = etendu
+            ? "Détaché (cadre élargi pour ne rien couper) — tirez-le où "
+                "vous voulez"
+            : "Détaché — tirez-le où vous voulez, les coins pour la taille";
       });
 
       if (imageDeFond != null) await _rafraichirApercuOcr(doc);
