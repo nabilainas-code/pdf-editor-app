@@ -577,6 +577,11 @@ class _AccueilState extends State<Accueil> {
   bool modeTampon = false;
   MotDetecte? cadreTampon;
 
+  /// Vrai quand il y a quelque chose à coller. Relevé à l'ouverture de
+  /// l'écriture, pour que le bouton « Coller » soit là tout de suite plutôt
+  /// que rangé dans un menu qu'il faut penser à ouvrir.
+  bool presseCollable = false;
+
   String? outilTrace;
   final List<Offset> traceEnCours = [];
   double epaisseurStylo = 2;
@@ -801,6 +806,23 @@ class _AccueilState extends State<Accueil> {
     // ligne, un geste de pincement/glisser (comme pour naviguer la page)
     // la ramène en vue.
     focusDirect.requestFocus();
+    _releverPressePapier();
+  }
+
+  /// Y a-t-il quelque chose à coller ? La réponse vient du système et se
+  /// fait attendre : on la demande à l'ouverture de l'écriture, pour que le
+  /// bouton soit déjà là quand le doigt arrive dessus.
+  Future<void> _releverPressePapier() async {
+    var collable = false;
+    try {
+      collable = await Clipboard.hasStrings();
+    } catch (_) {
+      // Certaines versions d'Android refusent la question : on retombe
+      // alors sur ce que l'application elle-même a copié.
+      collable = lignesCopiees.isNotEmpty;
+    }
+    if (!mounted || collable == presseCollable) return;
+    setState(() => presseCollable = collable);
   }
 
   /// Actions de texte pendant l'écriture sur une ligne : tout sélectionner,
@@ -4509,6 +4531,39 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  /// Entoure d'un cadre ce qui se trouve sous le doigt : un point, une
+  /// virgule, un trait, une lettre restée seule — tout ce que la
+  /// reconnaissance de texte ne voit pas comme une ligne et qu'on ne
+  /// pouvait donc ni choisir, ni copier, ni retirer.
+  ///
+  /// Le cadre part minuscule à l'endroit touché, puis s'écarte tant qu'il
+  /// touche de l'encre : il épouse ainsi le signe, quelle que soit sa
+  /// taille, sans qu'on ait à le viser au pixel près.
+  void _encadrerSousLeDoigt(double xPage, double yPage) {
+    if (document == null || _occupe) return;
+    const graine = 10.0;
+    final depart = Rect.fromCenter(
+      center: Offset(xPage, yPage),
+      width: graine,
+      height: graine,
+    );
+    final zone = _aligner(_etendreSurEncre(depart));
+    final cadre = MotDetecte("", zone);
+    setState(() {
+      mots = [...mots, cadre];
+      selection
+        ..clear()
+        ..add(cadre);
+      cadreTampon = cadre;
+      modeTampon = true;
+      enAjoutTexte = false;
+      enCollage = false;
+      statut = zone.width > graine + 1 || zone.height > graine + 1
+          ? "Entouré — « Détacher » pour l'emporter, la gomme pour l'effacer"
+          : "Rien trouvé ici — étirez le cadre par ses coins";
+    });
+  }
+
   void _poserCadre() {
     final centre = _centreVisible();
     _ajouterZoneEffacee(centre.dx, centre.dy);
@@ -5869,6 +5924,19 @@ class _AccueilState extends State<Accueil> {
                         focusNode: _sansFocus,
                         onPressed: _occupe ? null : _appliquerGras,
                       ),
+                      // Coller au premier rang, dès qu'il y a quelque chose
+                      // à coller : rangé dans le menu, il fallait deviner
+                      // qu'il s'y trouvait. Sans focus, comme le gras : le
+                      // champ garde son curseur, sinon le texte se collerait
+                      // à un endroit qu'on n'a pas choisi.
+                      if (presseCollable)
+                        IconButton.filledTonal(
+                          icon: const Icon(Icons.content_paste, size: 20),
+                          tooltip: "Coller à l'endroit du curseur",
+                          focusNode: _sansFocus,
+                          onPressed:
+                              _occupe ? null : () => _actionTexte("coller"),
+                        ),
                       // Un seul bouton pour toutes les actions de texte : la
                       // barre est déjà pleine, et les quatre tiennent dans un
                       // menu sans rien en chasser.
@@ -6199,6 +6267,21 @@ class _AccueilState extends State<Accueil> {
                                             await _appliquerTrace(
                                                 points, outil);
                                           },
+                                    // Un appui long entoure ce qu'il y a
+                                    // sous le doigt : un point, une virgule,
+                                    // un trait isolé. Sans ça, tout ce que
+                                    // la reconnaissance ne voit pas comme
+                                    // une ligne restait hors d'atteinte.
+                                    onLongPressStart:
+                                        (modeNavigation || outilTrace != null)
+                                            ? null
+                                            : (details) =>
+                                                _encadrerSousLeDoigt(
+                                                  details.localPosition.dx /
+                                                      echelle,
+                                                  details.localPosition.dy /
+                                                      echelle,
+                                                ),
                                     onTapUp: modeNavigation
                                         ? null
                                         : (details) {
