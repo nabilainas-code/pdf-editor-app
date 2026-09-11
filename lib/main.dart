@@ -211,6 +211,12 @@ class MotDetecte {
   /// le deviner de façon fiable sur des pixels.
   bool italique;
 
+  /// Repère des morceaux nés d'une même ligne coupée pour n'habiller qu'un
+  /// mot. Seuls des morceaux frères se recollent : deux lignes que le
+  /// document a toujours eues côte à côte n'ont aucune raison de fusionner
+  /// parce qu'elles se ressemblent.
+  int? morceauDe;
+
   /// Souligné. Aucune police standard d'un PDF ne porte de soulignement :
   /// c'est un trait qu'on trace sous le texte, à la largeur de ce qui est
   /// écrit.
@@ -288,6 +294,7 @@ class MotDetecte {
       this.alignement = PdfTextAlignment.left,
       this.italique = false,
       this.souligne = false,
+      this.morceauDe,
       this.famille = PdfFontFamily.helvetica,
       this.couleurTexte,
       this.tailleAuto,
@@ -794,6 +801,9 @@ class _AccueilState extends State<Accueil> {
   /// évitent un remplacement massif qu'on n'avait pas voulu.
   bool motEntier = false;
   bool respecterCasse = false;
+
+  /// Numérote les coupes de ligne, pour savoir quels morceaux sont frères.
+  int _prochainMorceau = 1;
 
   String? outilTrace;
   final List<Offset> traceEnCours = [];
@@ -1317,6 +1327,9 @@ class _AccueilState extends State<Accueil> {
       final page = doc.pages[0];
       _effacerRect(page, _rectEffacement(mot), mot);
 
+      // Les trois morceaux se reconnaissent entre eux : c'est ce qui leur
+      // permettra de se recoller quand ils redeviendront semblables.
+      final fratrie = mot.morceauDe ?? _prochainMorceau++;
       final morceaux = <MotDetecte>[];
       var gauche = mot.zone.left;
       for (final part in [
@@ -1344,6 +1357,7 @@ class _AccueilState extends State<Accueil> {
           famille: mot.famille,
           couleurTexte: mot.couleurTexte,
           tailleManuelle: taille,
+          morceauDe: fratrie,
         );
         _ecrire(page, piece, piece.zone);
         morceaux.add(piece);
@@ -1362,6 +1376,10 @@ class _AccueilState extends State<Accueil> {
           ..add(aGarder);
         statut = "Mise en forme appliquée au mot";
       });
+
+      // Si le geste vient de rendre les trois morceaux semblables — retirer
+      // un gras qu'on venait de poser —, la ligne se reforme aussitôt.
+      _recollerVoisines(page, aGarder);
 
       if (imageDeFond != null) await _rafraichirApercuOcr(doc);
     } catch (e) {
@@ -4343,6 +4361,83 @@ class _AccueilState extends State<Accueil> {
     return hauteurMin > 0 && chevauchement > hauteurMin * 0.5;
   }
 
+  /// Deux morceaux de ligne sont-ils habillés pareil ? S'ils le sont, plus
+  /// rien ne justifie qu'ils restent séparés.
+  bool _memeHabillage(MotDetecte a, MotDetecte b) =>
+      a.morceauDe != null &&
+      a.morceauDe == b.morceauDe &&
+      a.gras == b.gras &&
+      a.italique == b.italique &&
+      a.souligne == b.souligne &&
+      a.famille == b.famille &&
+      a.couleurTexte?.r == b.couleurTexte?.r &&
+      a.couleurTexte?.g == b.couleurTexte?.g &&
+      a.couleurTexte?.b == b.couleurTexte?.b &&
+      ((a.tailleManuelle == null && b.tailleManuelle == null) ||
+          (a.tailleManuelle != null &&
+              b.tailleManuelle != null &&
+              (a.tailleManuelle! - b.tailleManuelle!).abs() < 0.05));
+
+  /// Recolle [mot] à ses voisines de rangée quand elles sont habillées de
+  /// la même façon.
+  ///
+  /// Mettre un mot en gras coupe la ligne en trois morceaux posés bout à
+  /// bout : avant, le mot, après. Retirer ensuite ce gras laissait les
+  /// trois morceaux séparés à jamais — identiques, mais impossibles à
+  /// réunir. Chaque jonction ajoutait en plus son petit décalage, d'où une
+  /// lettre mal posée d'un côté ou de l'autre.
+  ///
+  /// Dès que deux morceaux voisins n'ont plus rien qui les distingue, ils
+  /// redeviennent une seule ligne. Ce que le gras a coupé, le retrait du
+  /// gras le recolle.
+  void _recollerVoisines(PdfPage page, MotDetecte mot) {
+    if (mot.texte.isEmpty || mot.estFlottant || mot.boiteLibre) return;
+    var courant = mot;
+    var encore = true;
+    while (encore) {
+      encore = false;
+      for (final voisin in List<MotDetecte>.from(mots)) {
+        if (identical(voisin, courant)) continue;
+        if (voisin.texte.isEmpty || voisin.estFlottant || voisin.boiteLibre) {
+          continue;
+        }
+        if (!_memeRangee(courant.zone, voisin.zone)) continue;
+        if (!_memeHabillage(courant, voisin)) continue;
+
+        // Bout à bout, à un cheveu près : deux lignes éloignées sur la même
+        // rangée sont deux lignes, pas un mot coupé en deux.
+        const jointure = 3.0;
+        final voisinApres =
+            (voisin.zone.left - courant.zone.right).abs() < jointure;
+        final voisinAvant =
+            (courant.zone.left - voisin.zone.right).abs() < jointure;
+        if (!voisinApres && !voisinAvant) continue;
+
+        final gauche = voisinAvant ? voisin : courant;
+        final droite = voisinAvant ? courant : voisin;
+        _effacerRect(page, _rectEffacement(gauche), gauche);
+        _effacerRect(page, _rectEffacement(droite), droite);
+        gauche.texte = gauche.texte + droite.texte;
+        gauche.zone = Rect.fromLTRB(
+          gauche.zone.left,
+          gauche.zone.top < droite.zone.top
+              ? gauche.zone.top
+              : droite.zone.top,
+          droite.zone.right,
+          gauche.zone.bottom > droite.zone.bottom
+              ? gauche.zone.bottom
+              : droite.zone.bottom,
+        );
+        mots = mots.where((m) => !identical(m, droite)).toList();
+        selection.remove(droite);
+        _ecrire(page, gauche, gauche.zone);
+        courant = gauche;
+        encore = true;
+        break;
+      }
+    }
+  }
+
   /// Marge de gauche du document : le bord où commencent ses lignes. Prise
   /// sur le texte lui-même plutôt que fixée d'avance, pour qu'une ligne
   /// alignée à gauche retombe exactement sur ses voisines.
@@ -4450,6 +4545,8 @@ class _AccueilState extends State<Accueil> {
             boiteLibre: m.boiteLibre,
             alignement: m.alignement,
             italique: m.italique,
+            souligne: m.souligne,
+            morceauDe: m.morceauDe,
             famille: m.famille,
             couleurTexte: m.couleurTexte,
             tailleAuto: m.tailleAuto,
@@ -4477,6 +4574,8 @@ class _AccueilState extends State<Accueil> {
               boiteLibre: m.boiteLibre,
               alignement: m.alignement,
               italique: m.italique,
+              souligne: m.souligne,
+              morceauDe: m.morceauDe,
               famille: m.famille,
               couleurTexte: m.couleurTexte,
               tailleAuto: m.tailleAuto,
@@ -5078,6 +5177,9 @@ class _AccueilState extends State<Accueil> {
         _placerSelonAlignement(mot, alignementFinal);
       }
       _ecrire(page, mot, mot.zone);
+      // Un morceau qui redevient semblable à ses voisines n'a plus de
+      // raison d'être un morceau.
+      if (texteNettoye.isNotEmpty) _recollerVoisines(page, mot);
 
       setState(() {
         if (texteNettoye.isEmpty) selection.remove(mot);
