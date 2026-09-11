@@ -211,6 +211,11 @@ class MotDetecte {
   /// le deviner de façon fiable sur des pixels.
   bool italique;
 
+  /// Souligné. Aucune police standard d'un PDF ne porte de soulignement :
+  /// c'est un trait qu'on trace sous le texte, à la largeur de ce qui est
+  /// écrit.
+  bool souligne;
+
   /// Famille de police approchée, déduite du nom de police du PDF : sans
   /// elle, une ligne d'un document en Times revenait en Helvetica dès la
   /// première modification, et la ligne modifiée se voyait au premier coup
@@ -282,6 +287,7 @@ class MotDetecte {
       this.boiteLibre = false,
       this.alignement = PdfTextAlignment.left,
       this.italique = false,
+      this.souligne = false,
       this.famille = PdfFontFamily.helvetica,
       this.couleurTexte,
       this.tailleAuto,
@@ -680,6 +686,8 @@ class _AccueilState extends State<Accueil> {
   }
   final FocusNode focusDirect = FocusNode();
   bool grasDirect = false;
+  bool italiqueDirect = false;
+  bool souligneDirect = false;
   double? tailleDirecte;
 
   /// Champs de formulaire du PDF (AcroForm) et champ en cours de saisie.
@@ -978,6 +986,8 @@ class _AccueilState extends State<Accueil> {
       controleurDirect.selection =
           TextSelection.collapsed(offset: mot.texte.length);
       grasDirect = mot.gras;
+      italiqueDirect = mot.italique;
+      souligneDirect = mot.souligne;
       tailleDirecte = mot.tailleManuelle;
       statut = "Écrivez directement sur la ligne, puis validez";
     });
@@ -1203,7 +1213,10 @@ class _AccueilState extends State<Accueil> {
   /// C'est déjà ainsi que sont représentées les lignes d'un scan mêlant gras
   /// et normal, et le déplacement les emmène ensemble, comme une seule
   /// rangée.
-  Future<void> _appliquerGras() async {
+  /// Applique gras, italique ou souligné — au mot surligné s'il y en a un,
+  /// à toute la ligne sinon. Les trois suivent exactement le même chemin :
+  /// ce qui valait pour le gras vaut pour les deux autres.
+  Future<void> _appliquerStyle(String quoi) async {
     final mot = motEnEditionDirecte;
     if (mot == null || _occupe) return;
     final texte = controleurDirect.text;
@@ -1212,14 +1225,37 @@ class _AccueilState extends State<Accueil> {
         etendue.isCollapsed ||
         (etendue.start <= 0 && etendue.end >= texte.length);
     if (surTout) {
-      setState(() => grasDirect = !grasDirect);
+      setState(() {
+        switch (quoi) {
+          case "italique":
+            italiqueDirect = !italiqueDirect;
+            break;
+          case "souligne":
+            souligneDirect = !souligneDirect;
+            break;
+          default:
+            grasDirect = !grasDirect;
+        }
+      });
       return;
     }
-    await _scinderPourGras(mot, texte, etendue.start, etendue.end, !grasDirect);
+    await _scinderPourStyle(
+      mot,
+      texte,
+      etendue.start,
+      etendue.end,
+      gras: quoi == "gras" ? !grasDirect : null,
+      italique: quoi == "italique" ? !italiqueDirect : null,
+      souligne: quoi == "souligne" ? !souligneDirect : null,
+    );
   }
 
-  Future<void> _scinderPourGras(
-      MotDetecte mot, String texte, int debut, int fin, bool gras) async {
+  /// Coupe la ligne en trois pour n'habiller que le morceau surligné : ce
+  /// qui précède, le morceau, ce qui suit. Chacun devient une ligne à part
+  /// entière, posée bout à bout à la place exacte de l'originale.
+  Future<void> _scinderPourStyle(
+      MotDetecte mot, String texte, int debut, int fin,
+      {bool? gras, bool? italique, bool? souligne}) async {
     final doc = document;
     if (doc == null) return;
     final avant = texte.substring(0, debut);
@@ -1243,10 +1279,10 @@ class _AccueilState extends State<Accueil> {
       // plus le même corps.
       final taille = _dessinTexte(mot, mot.zone).police.size;
 
-      double largeurDe(String t, bool g) {
+      double largeurDe(String t, bool g, bool i) {
         if (t.isEmpty) return 0;
-        final gabarit = MotDetecte(t, mot.zone,
-            gras: g, italique: mot.italique, famille: mot.famille);
+        final gabarit =
+            MotDetecte(t, mot.zone, gras: g, italique: i, famille: mot.famille);
         final police = _police(gabarit, taille);
         return police.measureString(_texteSelonPolice(police, t)).width;
       }
@@ -1257,19 +1293,27 @@ class _AccueilState extends State<Accueil> {
       final morceaux = <MotDetecte>[];
       var gauche = mot.zone.left;
       for (final part in [
-        [avant, mot.gras],
-        [milieu, gras],
-        [apres, mot.gras],
+        [avant, mot.gras, mot.italique, mot.souligne],
+        [
+          milieu,
+          gras ?? mot.gras,
+          italique ?? mot.italique,
+          souligne ?? mot.souligne,
+        ],
+        [apres, mot.gras, mot.italique, mot.souligne],
       ]) {
         final contenu = part[0] as String;
         if (contenu.isEmpty) continue;
         final grasPart = part[1] as bool;
-        final largeur = largeurDe(contenu, grasPart);
+        final italiquePart = part[2] as bool;
+        final soulignePart = part[3] as bool;
+        final largeur = largeurDe(contenu, grasPart, italiquePart);
         final piece = MotDetecte(
           contenu,
           Rect.fromLTWH(gauche, mot.zone.top, largeur, mot.zone.height),
           gras: grasPart,
-          italique: mot.italique,
+          italique: italiquePart,
+          souligne: soulignePart,
           famille: mot.famille,
           couleurTexte: mot.couleurTexte,
           tailleManuelle: taille,
@@ -1289,14 +1333,15 @@ class _AccueilState extends State<Accueil> {
         selection
           ..clear()
           ..add(aGarder);
-        statut = gras ? "Mis en gras" : "Gras retiré";
+        statut = "Mise en forme appliquée au mot";
       });
 
       if (imageDeFond != null) await _rafraichirApercuOcr(doc);
     } catch (e) {
       historique.removeLast();
       await _restaurerEtat(etatAvant);
-      setState(() => statut = "Mise en gras annulée (rien n'a été perdu) : $e");
+      setState(
+          () => statut = "Mise en forme annulée (rien n'a été perdu) : $e");
     } finally {
       if (mounted) setState(() => _occupe = false);
     }
@@ -1315,10 +1360,17 @@ class _AccueilState extends State<Accueil> {
     if (mot == null) return;
     final texte = controleurDirect.text;
     final gras = grasDirect;
+    final italique = italiqueDirect;
+    final souligne = souligneDirect;
     final taille = tailleDirecte;
     focusDirect.unfocus();
     setState(() => motEnEditionDirecte = null);
-    await _appliquerModification(mot, texte: texte, gras: gras, taille: taille);
+    await _appliquerModification(mot,
+        texte: texte,
+        gras: gras,
+        italique: italique,
+        souligne: souligne,
+        taille: taille);
   }
 
   /// Supprime la ligne en cours d'écriture, au clavier : plus besoin de
@@ -4153,19 +4205,100 @@ class _AccueilState extends State<Accueil> {
     return hauteurMin > 0 && chevauchement > hauteurMin * 0.5;
   }
 
+  /// Marge de gauche du document : le bord où commencent ses lignes. Prise
+  /// sur le texte lui-même plutôt que fixée d'avance, pour qu'une ligne
+  /// alignée à gauche retombe exactement sur ses voisines.
+  double get _margeGauche {
+    var marge = double.infinity;
+    for (final m in mots) {
+      if (m.texte.isEmpty || m.estFlottant || m.boiteLibre) continue;
+      if (m.zone.left < marge) marge = m.zone.left;
+    }
+    if (!marge.isFinite || marge < 0) return 24;
+    return marge;
+  }
+
+  /// Déplace une ligne du document contre la marge gauche, au milieu, ou
+  /// contre la marge droite.
+  void _placerSelonAlignement(MotDetecte mot, PdfTextAlignment alignement) {
+    final dessin = _dessinTexte(mot, mot.zone);
+    final largeur =
+        dessin.police.measureString(_texteSelonPolice(dessin.police, mot.texte))
+            .width;
+    if (largeur <= 0) return;
+    final marge = _margeGauche;
+    double gauche;
+    switch (alignement) {
+      case PdfTextAlignment.center:
+        gauche = (taillePage.width - largeur) / 2;
+        break;
+      case PdfTextAlignment.right:
+        gauche = taillePage.width - marge - largeur;
+        break;
+      default:
+        gauche = marge;
+    }
+    if (gauche < 0) gauche = 0;
+    if (gauche + largeur > taillePage.width) {
+      gauche = taillePage.width - largeur;
+    }
+    mot.zone = Rect.fromLTWH(
+        gauche, mot.zone.top, mot.zone.width, mot.zone.height);
+  }
+
+  /// La pastille de couleur choisie, pour l'entourer dans la boîte de
+  /// mise en forme. « Celle du document » est représentée par l'absence de
+  /// couleur imposée.
+  bool _memeCouleur(PdfColor? couleur, int? teinte) {
+    if (teinte == null) return couleur == null;
+    if (couleur == null) return false;
+    return couleur.r == ((teinte >> 16) & 0xFF) &&
+        couleur.g == ((teinte >> 8) & 0xFF) &&
+        couleur.b == (teinte & 0xFF);
+  }
+
   void _ecrire(PdfPage page, MotDetecte mot, Rect zone) {
     if (mot.texte.isEmpty) return;
     final dessin = _dessinTexte(mot, zone);
+    final ecrit = _texteSelonPolice(dessin.police, mot.texte);
+    final encre = mot.couleurTexte ?? PdfColor(0, 0, 0);
     page.graphics.drawString(
-      _texteSelonPolice(dessin.police, mot.texte),
+      ecrit,
       dessin.police,
       bounds: dessin.rect,
-      brush: PdfSolidBrush(mot.couleurTexte ?? PdfColor(0, 0, 0)),
+      brush: PdfSolidBrush(encre),
       format: PdfStringFormat(
         alignment: mot.boiteLibre ? mot.alignement : PdfTextAlignment.left,
         lineAlignment: PdfVerticalAlignment.middle,
       ),
     );
+
+    // Le soulignement est un trait tracé sous le texte : aucune police d'un
+    // PDF ne le porte elle-même. Il suit la largeur réellement écrite, et
+    // se cale comme le texte quand la boîte est alignée autrement qu'à
+    // gauche.
+    if (mot.souligne) {
+      final mesure = dessin.police.measureString(ecrit);
+      var depart = dessin.rect.left;
+      if (mot.boiteLibre) {
+        if (mot.alignement == PdfTextAlignment.center) {
+          depart = dessin.rect.center.dx - mesure.width / 2;
+        } else if (mot.alignement == PdfTextAlignment.right) {
+          depart = dessin.rect.right - mesure.width;
+        }
+      }
+      var largeurTrait = mesure.width;
+      if (largeurTrait > dessin.rect.width) largeurTrait = dessin.rect.width;
+      final basDuTexte =
+          dessin.rect.center.dy + dessin.police.size * 0.42;
+      var epaisseur = dessin.police.size * 0.055;
+      if (epaisseur < 0.4) epaisseur = 0.4;
+      page.graphics.drawLine(
+        PdfPen(encre, width: epaisseur),
+        Offset(depart, basDuTexte),
+        Offset(depart + largeurTrait, basDuTexte),
+      );
+    }
     mot.redessine = true;
   }
 
@@ -4406,6 +4539,11 @@ class _AccueilState extends State<Accueil> {
   Future<void> _modifierMot(MotDetecte mot) async {
     final controleur = TextEditingController(text: mot.texte);
     var grasChoisi = mot.gras;
+    var italiqueChoisi = mot.italique;
+    var souligneChoisi = mot.souligne;
+    var familleChoisie = mot.famille;
+    // null = la couleur relevée sur la page, qu'on garde telle quelle.
+    PdfColor? couleurChoisie = mot.couleurTexte;
     // null = taille automatique. Le point de départ quand on touche au
     // réglage est la taille actuellement utilisée (manuelle ou estimée), pour
     // ajuster à partir de ce qui est affiché plutôt que de repartir de zéro.
@@ -4457,6 +4595,26 @@ class _AccueilState extends State<Accueil> {
                     ),
                   ),
                   const Text("Gras", style: TextStyle(fontSize: 13)),
+                  SizedBox(
+                    height: 32,
+                    width: 32,
+                    child: Checkbox(
+                      value: italiqueChoisi,
+                      onChanged: (v) =>
+                          setDialogState(() => italiqueChoisi = v ?? false),
+                    ),
+                  ),
+                  const Text("Italique", style: TextStyle(fontSize: 13)),
+                  SizedBox(
+                    height: 32,
+                    width: 32,
+                    child: Checkbox(
+                      value: souligneChoisi,
+                      onChanged: (v) =>
+                          setDialogState(() => souligneChoisi = v ?? false),
+                    ),
+                  ),
+                  const Text("Souligné", style: TextStyle(fontSize: 13)),
                   const Spacer(),
                   const Text("Taille", style: TextStyle(fontSize: 13)),
                   IconButton(
@@ -4533,8 +4691,84 @@ class _AccueilState extends State<Accueil> {
                   ),
                 ),
               ),
-              if (mot.boiteLibre)
-                Row(
+              // Les trois familles que sait écrire un PDF, doublées par les
+              // polices embarquées : mêmes largeurs de caractères qu'Arial,
+              // Times New Roman et Courier New.
+              Row(
+                children: [
+                  const Text("Police", style: TextStyle(fontSize: 13)),
+                  const Spacer(),
+                  for (final choix in const [
+                    (PdfFontFamily.helvetica, "Arial"),
+                    (PdfFontFamily.timesRoman, "Times"),
+                    (PdfFontFamily.courier, "Courier"),
+                  ])
+                    Padding(
+                      padding: const EdgeInsets.only(left: 4),
+                      child: ChoiceChip(
+                        label: Text(choix.$2,
+                            style: const TextStyle(fontSize: 12)),
+                        selected: familleChoisie == choix.$1,
+                        onSelected: (_) =>
+                            setDialogState(() => familleChoisie = choix.$1),
+                      ),
+                    ),
+                ],
+              ),
+              Row(
+                children: [
+                  const Text("Couleur", style: TextStyle(fontSize: 13)),
+                  const Spacer(),
+                  for (final teinte in const [
+                    (null, Colors.transparent, "Celle du document"),
+                    (0x000000, Colors.black, "Noir"),
+                    (0xC62828, Color(0xFFC62828), "Rouge"),
+                    (0x1565C0, Color(0xFF1565C0), "Bleu"),
+                    (0x2E7D32, Color(0xFF2E7D32), "Vert"),
+                    (0x616161, Color(0xFF616161), "Gris"),
+                  ])
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6),
+                      child: GestureDetector(
+                        onTap: () => setDialogState(() => couleurChoisie =
+                            teinte.$1 == null
+                                ? null
+                                : PdfColor(
+                                    (teinte.$1! >> 16) & 0xFF,
+                                    (teinte.$1! >> 8) & 0xFF,
+                                    teinte.$1! & 0xFF,
+                                  )),
+                        child: Tooltip(
+                          message: teinte.$3,
+                          child: Container(
+                            width: 26,
+                            height: 26,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: teinte.$2,
+                              border: Border.all(
+                                color: _memeCouleur(couleurChoisie, teinte.$1)
+                                    ? Theme.of(ctx).colorScheme.primary
+                                    : Theme.of(ctx).colorScheme.outline,
+                                width: _memeCouleur(couleurChoisie, teinte.$1)
+                                    ? 3
+                                    : 1,
+                              ),
+                            ),
+                            child: teinte.$1 == null
+                                ? const Icon(Icons.format_color_reset, size: 15)
+                                : null,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              // L'alignement vaut pour toute ligne, pas seulement pour les
+              // zones posées à la main : sur une ligne du document, il la
+              // déplace contre la marge gauche, au milieu, ou contre la
+              // marge droite.
+              Row(
                   children: [
                     const Text("Alignement", style: TextStyle(fontSize: 13)),
                     const Spacer(),
@@ -4584,6 +4818,10 @@ class _AccueilState extends State<Accueil> {
               onPressed: () => Navigator.pop(ctx, {
                 "texte": controleur.text,
                 "gras": grasChoisi,
+                "italique": italiqueChoisi,
+                "souligne": souligneChoisi,
+                "famille": familleChoisie,
+                "couleur": couleurChoisie,
                 "taille": tailleChoisie,
                 "alignement": alignementChoisi,
               }),
@@ -4598,6 +4836,11 @@ class _AccueilState extends State<Accueil> {
     if (resultat == null) return;
     final texteNettoye = (resultat["texte"] as String).trim();
     final grasFinal = resultat["gras"] as bool;
+    final italiqueFinal = resultat["italique"] as bool?;
+    final souligneFinal = resultat["souligne"] as bool?;
+    final familleFinale = resultat["famille"] as PdfFontFamily?;
+    final couleurFinale = resultat["couleur"] as PdfColor?;
+    final couleurDonnee = resultat.containsKey("couleur");
     final tailleFinale = resultat["taille"] as double?;
     final alignementFinal =
         resultat["alignement"] as PdfTextAlignment? ?? mot.alignement;
@@ -4613,6 +4856,11 @@ class _AccueilState extends State<Accueil> {
       mot,
       texte: texteNettoye,
       gras: grasFinal,
+      italique: italiqueFinal,
+      souligne: souligneFinal,
+      famille: familleFinale,
+      couleur: couleurFinale,
+      couleurDonnee: couleurDonnee,
       taille: tailleFinale,
       alignement: alignementFinal,
     );
@@ -4626,16 +4874,29 @@ class _AccueilState extends State<Accueil> {
     MotDetecte mot, {
     required String texte,
     required bool gras,
+    bool? italique,
+    bool? souligne,
+    PdfFontFamily? famille,
+    PdfColor? couleur,
+    bool couleurDonnee = false,
     double? taille,
     PdfTextAlignment? alignement,
   }) async {
     final texteNettoye = texte.trim();
     final grasFinal = gras;
+    final italiqueFinal = italique ?? mot.italique;
+    final souligneFinal = souligne ?? mot.souligne;
+    final familleFinale = famille ?? mot.famille;
+    final couleurFinale = couleurDonnee ? couleur : mot.couleurTexte;
     final tailleFinale = taille;
     final alignementFinal = alignement ?? mot.alignement;
 
     if (texteNettoye == mot.texte &&
         grasFinal == mot.gras &&
+        italiqueFinal == mot.italique &&
+        souligneFinal == mot.souligne &&
+        familleFinale == mot.famille &&
+        couleurFinale == mot.couleurTexte &&
         tailleFinale == mot.tailleManuelle &&
         alignementFinal == mot.alignement) {
       return;
@@ -4654,6 +4915,10 @@ class _AccueilState extends State<Accueil> {
       _effacerRect(page, rectEfface, mot);
 
       mot.gras = grasFinal;
+      mot.italique = italiqueFinal;
+      mot.souligne = souligneFinal;
+      mot.famille = familleFinale;
+      mot.couleurTexte = couleurFinale;
       mot.texte = texteNettoye;
       // Son texte a changé : la photo gardée de ses pixels d'origine ne lui
       // correspond plus, elle sera réécrite désormais.
@@ -4661,8 +4926,16 @@ class _AccueilState extends State<Accueil> {
       mot.tailleSource = null;
       mot.decalageSource = null;
       mot.tailleManuelle = tailleFinale;
+      final alignementChange = alignementFinal != mot.alignement;
       mot.alignement = alignementFinal;
       if (texteNettoye.isEmpty) mot.redessine = false;
+      // Une ligne du document n'a pas de boîte où se caler : l'aligner,
+      // c'est la déplacer sur la page — contre la marge de gauche, au
+      // milieu, ou contre la marge de droite. (Une zone posée avec « + »,
+      // elle, garde sa boîte et s'aligne dedans.)
+      if (alignementChange && !mot.boiteLibre && texteNettoye.isNotEmpty) {
+        _placerSelonAlignement(mot, alignementFinal);
+      }
       _ecrire(page, mot, mot.zone);
 
       setState(() {
@@ -6556,7 +6829,25 @@ class _AccueilState extends State<Accueil> {
                         // Sans focus : le champ garde le sien, et le
                         // surlignage n'est pas replié par l'appui.
                         focusNode: _sansFocus,
-                        onPressed: _occupe ? null : _appliquerGras,
+                        onPressed: _occupe ? null : () => _appliquerStyle("gras"),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.format_italic, size: 20),
+                        tooltip:
+                            "Italique (le texte surligné, sinon la ligne)",
+                        isSelected: italiqueDirect,
+                        focusNode: _sansFocus,
+                        onPressed:
+                            _occupe ? null : () => _appliquerStyle("italique"),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.format_underlined, size: 20),
+                        tooltip:
+                            "Souligné (le texte surligné, sinon la ligne)",
+                        isSelected: souligneDirect,
+                        focusNode: _sansFocus,
+                        onPressed:
+                            _occupe ? null : () => _appliquerStyle("souligne"),
                       ),
                       // Un seul bouton pour toutes les actions de texte : la
                       // barre est déjà pleine, et les quatre tiennent dans un
