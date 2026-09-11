@@ -3688,6 +3688,129 @@ class _AccueilState extends State<Accueil> {
     return bloc;
   }
 
+  /// Toutes les rangées de la page, en une seule passe : chaque ligne
+  /// rangée avec ce qui est posé à sa hauteur. Les calculer une fois et
+  /// les relire ensuite évite de refaire le même tri pour chaque cellule —
+  /// sur « Tout remplacer », le faire à chaque ligne aurait figé l'écran
+  /// plusieurs secondes.
+  List<List<MotDetecte>> _toutesLesRangees() {
+    final utiles = mots
+        .where((m) => m.texte.isNotEmpty && !m.estFlottant && !m.boiteLibre)
+        .toList()
+      ..sort((a, b) => a.zone.top.compareTo(b.zone.top));
+    final rangees = <List<MotDetecte>>[];
+    for (final m in utiles) {
+      List<MotDetecte>? cible;
+      for (final rangee in rangees) {
+        if (_memeRangee(rangee.first.zone, m.zone)) {
+          cible = rangee;
+          break;
+        }
+      }
+      if (cible != null) {
+        cible.add(m);
+      } else {
+        rangees.add([m]);
+      }
+    }
+    for (final rangee in rangees) {
+      rangee.sort((a, b) => a.zone.left.compareTo(b.zone.left));
+    }
+    return rangees;
+  }
+
+  /// Les cellules posées à la même hauteur que [mot], de part et d'autre
+  /// des blancs. Sur un tableau, c'est la ligne entière.
+  List<MotDetecte> _rangeeDe(MotDetecte mot) {
+    if (mot.texte.isEmpty || mot.estFlottant || mot.boiteLibre) return [mot];
+    for (final rangee in _toutesLesRangees()) {
+      if (rangee.any((m) => identical(m, mot))) return rangee;
+    }
+    return [mot];
+  }
+
+  /// Les cellules de la même colonne que [mot] : celles qui commencent — ou
+  /// qui finissent — au même endroit, rangée après rangée.
+  ///
+  /// Une rangée qui ne porte qu'une seule cellule n'est pas une ligne de
+  /// tableau : c'est ce qui distingue une colonne d'un simple paragraphe,
+  /// dont les lignes partagent aussi leur bord gauche mais n'ont rien posé
+  /// à côté d'elles.
+  List<MotDetecte> _colonneDe(MotDetecte mot) {
+    if (mot.texte.isEmpty || mot.estFlottant || mot.boiteLibre) return [mot];
+    final rangees = _toutesLesRangees();
+    List<MotDetecte>? sienne;
+    for (final rangee in rangees) {
+      if (rangee.any((m) => identical(m, mot))) {
+        sienne = rangee;
+        break;
+      }
+    }
+    if (sienne == null || sienne.length < 2) return [mot];
+
+    const tolerance = 3.0;
+    final parGauche = <MotDetecte>[];
+    final parDroite = <MotDetecte>[];
+    for (final rangee in rangees) {
+      if (rangee.length < 2) continue;
+      final estLaSienne = identical(rangee, sienne);
+      for (final m in rangee) {
+        // Les autres cellules de sa propre rangée sont dans d'autres
+        // colonnes.
+        if (estLaSienne && !identical(m, mot)) continue;
+        if ((m.zone.left - mot.zone.left).abs() <= tolerance) {
+          parGauche.add(m);
+        }
+        if ((m.zone.right - mot.zone.right).abs() <= tolerance) {
+          parDroite.add(m);
+        }
+      }
+    }
+    final colonne =
+        parGauche.length >= parDroite.length ? parGauche : parDroite;
+    colonne.sort((a, b) => a.zone.top.compareTo(b.zone.top));
+    return colonne.isEmpty ? [mot] : colonne;
+  }
+
+  /// Le bord droit d'une colonne alignée à droite, s'il y en a un.
+  ///
+  /// Une colonne de montants finit toujours au même endroit alors qu'elle
+  /// commence à des endroits différents. Sans ce repère, remplacer
+  /// « 1 250 € » par « 12 500 € » recalait le nombre à gauche, et la
+  /// colonne partait en escalier au premier chiffre corrigé.
+  double? _bordDroiteDeColonne(MotDetecte mot) {
+    final colonne = _colonneDe(mot);
+    if (colonne.length < 3) return null;
+    var droiteMin = double.infinity;
+    var droiteMax = 0.0;
+    var gaucheMin = double.infinity;
+    var gaucheMax = 0.0;
+    for (final m in colonne) {
+      if (m.zone.right < droiteMin) droiteMin = m.zone.right;
+      if (m.zone.right > droiteMax) droiteMax = m.zone.right;
+      if (m.zone.left < gaucheMin) gaucheMin = m.zone.left;
+      if (m.zone.left > gaucheMax) gaucheMax = m.zone.left;
+    }
+    // Les bords droits doivent être francs, les bords gauches clairement
+    // en désordre : sinon c'est une colonne alignée à gauche, qu'il ne faut
+    // surtout pas déplacer.
+    if (droiteMax - droiteMin > 2.5) return null;
+    if (gaucheMax - gaucheMin < 6) return null;
+    return mot.zone.right;
+  }
+
+  /// Bord droit de la cellule voisine à gauche, sur la même rangée : la
+  /// limite que la cellule ne doit pas franchir en s'allongeant.
+  double? _bordVoisineAGauche(MotDetecte mot) {
+    double? bord;
+    for (final m in _rangeeDe(mot)) {
+      if (identical(m, mot)) continue;
+      if (m.zone.right > mot.zone.left) continue;
+      if (bord == null || m.zone.right > bord) bord = m.zone.right;
+    }
+    return bord;
+  }
+
   List<MotDetecte> _fusionnerParRangee(
       List<MotDetecte> brutes, List<double> couloirs) {
     if (brutes.isEmpty) return brutes;
@@ -5688,6 +5811,9 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[pageActive];
+      // Relevé avant de toucher à quoi que ce soit : une cellule d'une
+      // colonne alignée à droite doit garder son bord droit.
+      final bordDroite = mot.boiteLibre ? null : _bordDroiteDeColonne(mot);
       final rectEfface = _rectEffacement(mot);
       _effacerRect(page, rectEfface, mot);
 
@@ -5712,6 +5838,29 @@ class _AccueilState extends State<Accueil> {
       // elle, garde sa boîte et s'aligne dedans.)
       if (alignementChange && !mot.boiteLibre && texteNettoye.isNotEmpty) {
         _placerSelonAlignement(mot, alignementFinal);
+      }
+      // Une colonne de montants finit au même endroit à chaque rangée :
+      // remplacer « 1 250 € » par « 12 500 € » recalait sinon le nombre à
+      // gauche, et la colonne partait en escalier au premier chiffre
+      // corrigé. La cellule s'allonge donc vers la gauche, sans jamais
+      // mordre sur la cellule d'à côté.
+      if (bordDroite != null &&
+          !alignementChange &&
+          texteNettoye.isNotEmpty) {
+        final dessin = _dessinTexte(mot, mot.zone);
+        final largeur = dessin.police
+            .measureString(_texteSelonPolice(dessin.police, mot.texte))
+            .width;
+        if (largeur > 0) {
+          var gauche = bordDroite - largeur;
+          final limite = _bordVoisineAGauche(mot);
+          if (limite != null && gauche < limite + 2) gauche = limite + 2;
+          if (gauche < 0) gauche = 0;
+          if (bordDroite - gauche > 0) {
+            mot.zone = Rect.fromLTWH(
+                gauche, mot.zone.top, bordDroite - gauche, mot.zone.height);
+          }
+        }
       }
       _ecrire(page, mot, mot.zone);
       // Un morceau qui redevient semblable à ses voisines n'a plus de
@@ -7650,6 +7799,8 @@ class _AccueilState extends State<Accueil> {
   Future<void> _plusDActions(MotDetecte mot) async {
     final estSignature = mot.estFlottant;
     final paragraphe = _paragrapheDe(mot);
+    final rangee = _rangeeDe(mot);
+    final colonne = _colonneDe(mot);
     await showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -7685,7 +7836,44 @@ class _AccueilState extends State<Accueil> {
             // serrées les unes sous les autres sont une idée, pas quatre.
             // On les déplace, on les supprime ou on les habille ensemble,
             // au lieu de refaire quatre fois le même geste.
-            if (!estSignature && paragraphe.length > 1)
+            // Dans un tableau, ce sont la rangée et la colonne qui font
+            // sens, pas le paragraphe : on ne propose jamais les deux à la
+            // fois, ce serait une question de plus à se poser.
+            if (!estSignature && rangee.length > 1)
+              ListTile(
+                leading: const Icon(Icons.table_rows),
+                title: Text("Prendre toute la ligne du tableau "
+                    "(${rangee.length} cellules)"),
+                subtitle: const Text(
+                    "Tout ce qui est posé à cette hauteur, d'un bord à l'autre"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() {
+                    selection
+                      ..clear()
+                      ..addAll(rangee);
+                    statut = "Ligne de tableau : ${rangee.length} cellules";
+                  });
+                },
+              ),
+            if (!estSignature && colonne.length > 1)
+              ListTile(
+                leading: const Icon(Icons.view_column),
+                title: Text("Prendre toute la colonne "
+                    "(${colonne.length} cellules)"),
+                subtitle: const Text(
+                    "Les cellules alignées les unes sous les autres"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() {
+                    selection
+                      ..clear()
+                      ..addAll(colonne);
+                    statut = "Colonne : ${colonne.length} cellules";
+                  });
+                },
+              ),
+            if (!estSignature && paragraphe.length > 1 && rangee.length == 1)
               ListTile(
                 leading: const Icon(Icons.notes),
                 title: Text("Prendre tout le paragraphe "
