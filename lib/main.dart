@@ -308,6 +308,33 @@ class MotDetecte {
       this.decalageSource});
 }
 
+/// Copie complète d'une ligne, avec tout ce qui l'habille. Sert à
+/// l'historique (annuler/rétablir) et aux pages qu'on met de côté en
+/// changeant de page : sans copie, l'état gardé et la page vivante
+/// seraient le même objet, et annuler ne ramènerait rien.
+MotDetecte copieDe(MotDetecte m) => MotDetecte(
+      m.texte,
+      m.zone,
+      gras: m.gras,
+      redessine: m.redessine,
+      tailleManuelle: m.tailleManuelle,
+      boiteLibre: m.boiteLibre,
+      alignement: m.alignement,
+      italique: m.italique,
+      souligne: m.souligne,
+      morceauDe: m.morceauDe,
+      famille: m.famille,
+      couleurTexte: m.couleurTexte,
+      tailleAuto: m.tailleAuto,
+      traitsSignature: m.traitsSignature,
+      imageFlottante: m.imageFlottante,
+      ratioSignature: m.ratioSignature,
+      depuisOcr: m.depuisOcr,
+      pixelsSource: m.pixelsSource,
+      tailleSource: m.tailleSource,
+      decalageSource: m.decalageSource,
+    );
+
 class Etat {
   final Uint8List octetsDocument;
   final List<MotDetecte> mots;
@@ -318,7 +345,16 @@ class Etat {
   /// relisait l'ancienne image avec l'échelle de la nouvelle, et les
   /// couleurs et découpes étaient prises au mauvais endroit.
   final double echelleImage;
-  Etat(this.octetsDocument, this.mots, this.image, this.echelleImage);
+
+  /// Lignes des autres pages, et numéro de la page ouverte quand l'état a
+  /// été pris. Annuler une modification faite page 4 alors qu'on regarde la
+  /// page 1 y ramène : sans cela l'annulation serait invisible, et on
+  /// appuierait cinq fois de suite en croyant qu'elle ne marche pas.
+  final Map<int, List<MotDetecte>> motsAutresPages;
+  final int page;
+
+  Etat(this.octetsDocument, this.mots, this.image, this.echelleImage,
+      {this.motsAutresPages = const {}, this.page = 0});
 }
 
 /// Un champ de formulaire du PDF (AcroForm). Il est repéré par sa position
@@ -629,6 +665,33 @@ class _AccueilState extends State<Accueil> {
   bool modeLecture = true;
 
   List<MotDetecte> mots = [];
+
+  /// Page ouverte (0 = la première). Tout ce qui est écrit, effacé, analysé
+  /// ou affiché porte sur elle, et sur elle seule : les autres pages du
+  /// document ne sont jamais touchées.
+  int pageActive = 0;
+
+  /// Nombre de pages du document ouvert.
+  int nbPages = 1;
+
+  /// Lignes détectées, rangées par page. Seule la page ouverte est
+  /// analysée : lancer la reconnaissance de caractères sur les trente pages
+  /// d'un dossier à l'ouverture ferait attendre des minutes pour des pages
+  /// qu'on ne regardera peut-être jamais.
+  final Map<int, List<MotDetecte>> motsParPage = {};
+
+  /// Pages déjà analysées : y revenir ne relance pas l'analyse.
+  final Set<int> pagesAnalysees = {};
+
+  /// Vignettes des pages, calculées à la première ouverture de la bande et
+  /// gardées ensuite.
+  final Map<int, Uint8List> vignettes = {};
+
+  /// Vrai quand le document est ouvert pour signer ou annoter seulement :
+  /// changer de page n'y lance alors aucune reconnaissance de texte, qui
+  /// n'aurait aucune raison d'être.
+  bool modeAnnotationSeule = false;
+
   Size taillePage = const Size(595, 842);
   String statut = "Chargement...";
   /// Sélection courante : un tap ajoute/retire une ligne du groupe (rouge),
@@ -888,7 +951,7 @@ class _AccueilState extends State<Accueil> {
     try {
       historique.add(avant);
       futur.clear();
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
       final epaisseur = outil == "gomme" ? epaisseurGomme : epaisseurStylo;
 
       if (outil == "gomme") {
@@ -1372,7 +1435,7 @@ class _AccueilState extends State<Accueil> {
         return police.measureString(_texteSelonPolice(police, t)).width;
       }
 
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
       _effacerRect(page, _rectEffacement(mot), mot);
 
       // Les trois morceaux se reconnaissent entre eux : c'est ce qui leur
@@ -1584,7 +1647,7 @@ class _AccueilState extends State<Accueil> {
     const dpi = _dpiApercu;
     final octetsDoc = Uint8List.fromList(await doc.save());
     PdfRaster? raster;
-    await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
+    await for (final r in Printing.raster(octetsDoc, pages: [pageActive], dpi: dpi)) {
       raster = r;
       break;
     }
@@ -2047,7 +2110,7 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
 
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
       // On efface l'ancienne place, et elle seule : le nouveau texte est
       // dessiné par-dessus ce qui reste. Effacer aussi la nouvelle place,
       // comme on le faisait, revenait à repeindre tout l'espace entre les
@@ -2939,7 +3002,7 @@ class _AccueilState extends State<Accueil> {
           Uint8List.fromList(await _octetsAvecSignatures(doc));
       PdfRaster? raster;
       await for (final r
-          in Printing.raster(octets, pages: const [0], dpi: 200)) {
+          in Printing.raster(octets, pages: [pageActive], dpi: 200)) {
         raster = r;
         break;
       }
@@ -3108,6 +3171,11 @@ class _AccueilState extends State<Accueil> {
       octetsDocument = null;
       imageOrigine = null;
       modeLecture = true;
+      motsParPage.clear();
+      pagesAnalysees.clear();
+      vignettes.clear();
+      pageActive = 0;
+      nbPages = 1;
       // Occupé pendant le rendu : sans ça, l'accueil (qui s'affiche dès
       // qu'il n'y a pas de page à montrer) réapparaissait le temps du
       // chargement, comme si le document avait été refusé.
@@ -3116,11 +3184,13 @@ class _AccueilState extends State<Accueil> {
     });
     try {
       final doc = PdfDocument(inputBytes: octets);
-      final taille = doc.pages[0].size;
+      nbPages = doc.pages.count;
+      pageActive = 0;
+      final taille = doc.pages[pageActive].size;
       doc.dispose();
 
       PdfRaster? raster;
-      await for (final r in Printing.raster(octets, pages: const [0], dpi: 150)) {
+      await for (final r in Printing.raster(octets, pages: [pageActive], dpi: 150)) {
         raster = r;
         break;
       }
@@ -3131,7 +3201,9 @@ class _AccueilState extends State<Accueil> {
         octetsDocument = octets;
         taillePage = Size(taille.width, taille.height);
         apercuLecture = png;
-        statut = "Lecture seule — choisissez ce que vous voulez en faire";
+        statut = nbPages > 1
+            ? "Lecture seule — $nbPages pages, choisissez ce que vous voulez en faire"
+            : "Lecture seule — choisissez ce que vous voulez en faire";
       });
       _etapesSauvegardees = 0;
     } catch (e) {
@@ -3160,11 +3232,16 @@ class _AccueilState extends State<Accueil> {
       historique.clear();
       futur.clear();
       final doc = PdfDocument(inputBytes: octets);
-      final page = doc.pages[0];
+      nbPages = doc.pages.count;
+      if (pageActive >= nbPages) pageActive = 0;
+      final page = doc.pages[pageActive];
       if (!mounted) return;
       setState(() {
         document = doc;
         mots = [];
+        motsParPage.clear();
+        pagesAnalysees.clear();
+        modeAnnotationSeule = true;
         selection.clear();
         imageOrigine = null;
         taillePage = Size(page.size.width, page.size.height);
@@ -3205,6 +3282,7 @@ class _AccueilState extends State<Accueil> {
   }
 
   Future<void> _analyser(Uint8List octets) async {
+    modeAnnotationSeule = false;
     // Les polices embarquées doivent être là avant la calibration des
     // lignes : c'est avec elles qu'on mesure la place que prendra un texte
     // réécrit, et les mesurer avec une autre fausserait tous les cadres.
@@ -3213,12 +3291,121 @@ class _AccueilState extends State<Accueil> {
     document = null;
     historique.clear();
     futur.clear();
+    motsParPage.clear();
+    pagesAnalysees.clear();
+    vignettes.clear();
+    imageOrigine = null;
     try {
       final doc = PdfDocument(inputBytes: octets);
-      final extracteur = PdfTextExtractor(doc);
-      final lignes = extracteur.extractTextLines(startPageIndex: 0, endPageIndex: 0);
+      nbPages = doc.pages.count;
+      // On analyse la page qu'on avait sous les yeux en lecture, et non la
+      // première : lire la page 4 puis toucher « Modifier le texte » doit
+      // ouvrir la page 4.
+      final depart = (pageActive >= 0 && pageActive < nbPages) ? pageActive : 0;
+      pageActive = depart;
+      await _analyserPage(doc, depart);
+    } catch (e) {
+      // Aucune analyse ne doit laisser l'application sur un rond qui tourne
+      // sans fin : on revient à la lecture, où le document reste consultable
+      // et où le bouton « modifier » permet de réessayer.
+      setState(() {
+        modeLecture = true;
+        statut = "Analyse impossible ($e) — document ouvert en lecture seule";
+      });
+    }
+  }
 
-      final page = doc.pages[0];
+  /// Ouvre une autre page du document. Les lignes de la page qu'on quitte
+  /// sont mises de côté telles quelles : y revenir ne relance aucune
+  /// analyse, et les cadres qu'on y avait posés sont toujours là.
+  Future<void> _allerPage(int index) async {
+    final doc = document;
+    if (doc == null || _occupe) return;
+    if (index < 0 || index >= nbPages || index == pageActive) return;
+    await _refermerLesModes();
+    if (!mounted) return;
+    setState(() => _occupe = true);
+    try {
+      motsParPage[pageActive] = mots;
+      setState(() {
+        pageActive = index;
+        mots = motsParPage[index] ?? [];
+        selection.clear();
+        resultatsRecherche = [];
+        indexRecherche = 0;
+        // L'image de la page précédente ne doit jamais servir de repère
+        // pour celle-ci : ni pour la couleur du papier, ni pour l'affichage.
+        imageOrigine = null;
+        imageDeFond = null;
+        imageDecodee = null;
+        taillePage = Size(
+            doc.pages[index].size.width, doc.pages[index].size.height);
+        statut = "Page ${index + 1} sur $nbPages";
+      });
+      // Le zoom et le décalage de la page précédente n'ont plus de sens.
+      _transformation.value = Matrix4.identity();
+      if (modeAnnotationSeule || pagesAnalysees.contains(index)) {
+        await _activerApercuImage(doc);
+      } else {
+        await _analyserPage(doc, index);
+      }
+      if (modeRemplissage && mounted) {
+        setState(() => champsFormulaire = _lireChampsFormulaire(doc));
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => statut = "Page ${index + 1} : analyse impossible ($e)");
+      }
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Change de page en lecture seule : rien n'est analysé, on ne refait que
+  /// l'image de la page.
+  Future<void> _allerPageLecture(int index) async {
+    final octets = octetsDocument;
+    if (octets == null || _occupe) return;
+    if (index < 0 || index >= nbPages || index == pageActive) return;
+    setState(() {
+      _occupe = true;
+      pageActive = index;
+    });
+    try {
+      final doc = PdfDocument(inputBytes: octets);
+      final taille = doc.pages[index].size;
+      doc.dispose();
+      PdfRaster? raster;
+      await for (final r in Printing.raster(octets, pages: [index], dpi: 150)) {
+        raster = r;
+        break;
+      }
+      final png = raster == null ? null : await raster.toPng();
+      if (!mounted) return;
+      setState(() {
+        taillePage = Size(taille.width, taille.height);
+        if (png != null) apercuLecture = png;
+        statut = "Page ${index + 1} sur $nbPages";
+      });
+      _transformation.value = Matrix4.identity();
+    } catch (e) {
+      if (mounted) setState(() => statut = "Page ${index + 1} illisible : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Analyse une page, et elle seule : ses lignes de texte si le PDF en
+  /// contient, sinon la reconnaissance de caractères sur son image. Une
+  /// page à la fois, et seulement au moment où on l'ouvre — reconnaître le
+  /// texte des trente pages d'un dossier dès l'ouverture ferait attendre
+  /// des minutes pour des pages qu'on ne regardera peut-être jamais.
+  Future<void> _analyserPage(PdfDocument doc, int index) async {
+      final extracteur = PdfTextExtractor(doc);
+      final lignes = extracteur.extractTextLines(
+          startPageIndex: index, endPageIndex: index);
+
+      final page = doc.pages[index];
       final trouvesTexte = <MotDetecte>[];
 
       for (final ligne in lignes) {
@@ -3249,7 +3436,9 @@ class _AccueilState extends State<Accueil> {
           imageDeFond = null;
           imageDecodee = null;
           selection.clear();
-          statut = "${trouvesTexte.length} ligne(s) détectée(s)";
+          statut = nbPages > 1
+              ? "Page ${index + 1} sur $nbPages — ${trouvesTexte.length} ligne(s)"
+              : "${trouvesTexte.length} ligne(s) détectée(s)";
         });
         // Même un document au vrai texte a besoin de l'image de sa page :
         // c'est elle qui dit de quelle couleur est le papier juste à côté
@@ -3271,20 +3460,17 @@ class _AccueilState extends State<Accueil> {
             ligne.couleurTexte ??= _couleurEncre(ligne.zone);
           }
         }
+        pagesAnalysees.add(index);
+        motsParPage[index] = mots;
         return;
       }
 
-      setState(() => statut = "Page scannée détectée, analyse OCR en cours...");
+      setState(() => statut = nbPages > 1
+          ? "Page ${index + 1} scannée, reconnaissance du texte en cours..."
+          : "Page scannée détectée, analyse OCR en cours...");
       await _analyserParOcr(doc, page);
-    } catch (e) {
-      // Aucune analyse ne doit laisser l'application sur un rond qui tourne
-      // sans fin : on revient à la lecture, où le document reste consultable
-      // et où le bouton « modifier » permet de réessayer.
-      setState(() {
-        modeLecture = true;
-        statut = "Analyse impossible ($e) — document ouvert en lecture seule";
-      });
-    }
+      pagesAnalysees.add(index);
+      motsParPage[index] = mots;
   }
 
   /// Regroupe les mots détectés par l'OCR qui appartiennent à la même
@@ -3440,7 +3626,7 @@ class _AccueilState extends State<Accueil> {
       final octetsDoc = Uint8List.fromList(await doc.save());
 
       PdfRaster? raster;
-      await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
+      await for (final r in Printing.raster(octetsDoc, pages: [pageActive], dpi: dpi)) {
         raster = r;
         break;
       }
@@ -3516,7 +3702,9 @@ class _AccueilState extends State<Accueil> {
         imageDecodee = imageAnalysee;
         echelleOcr = echelle;
         selection.clear();
-        statut = "${fusionnees.length} ligne(s) détectée(s) (OCR)";
+        statut = nbPages > 1
+            ? "Page ${pageActive + 1} sur $nbPages — ${fusionnees.length} ligne(s) (texte reconnu)"
+            : "${fusionnees.length} ligne(s) détectée(s) (OCR)";
       });
     } catch (_) {
       // Remontée à l'appelant, qui remet le document en lecture plutôt que
@@ -3532,7 +3720,7 @@ class _AccueilState extends State<Accueil> {
     try {
       final octetsDoc = Uint8List.fromList(await doc.save());
       PdfRaster? raster;
-      await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
+      await for (final r in Printing.raster(octetsDoc, pages: [pageActive], dpi: dpi)) {
         raster = r;
         break;
       }
@@ -4612,56 +4800,39 @@ class _AccueilState extends State<Accueil> {
 
   Future<Etat> _etatActuel(PdfDocument doc) async {
     final octetsDocument = Uint8List.fromList(await doc.save());
-    final motsCopie = mots
-        .map((m) => MotDetecte(m.texte, m.zone,
-            gras: m.gras,
-            redessine: m.redessine,
-            tailleManuelle: m.tailleManuelle,
-            boiteLibre: m.boiteLibre,
-            alignement: m.alignement,
-            italique: m.italique,
-            souligne: m.souligne,
-            morceauDe: m.morceauDe,
-            famille: m.famille,
-            couleurTexte: m.couleurTexte,
-            tailleAuto: m.tailleAuto,
-            traitsSignature: m.traitsSignature,
-            imageFlottante: m.imageFlottante,
-            ratioSignature: m.ratioSignature,
-            depuisOcr: m.depuisOcr,
-            pixelsSource: m.pixelsSource,
-            tailleSource: m.tailleSource,
-            decalageSource: m.decalageSource))
-        .toList();
-    return Etat(octetsDocument, motsCopie, imageDeFond, echelleOcr);
+    final motsCopie = mots.map(copieDe).toList();
+    final autres = <int, List<MotDetecte>>{
+      for (final entree in motsParPage.entries)
+        if (entree.key != pageActive)
+          entree.key: entree.value.map(copieDe).toList(),
+    };
+    return Etat(octetsDocument, motsCopie, imageDeFond, echelleOcr,
+        motsAutresPages: autres, page: pageActive);
   }
 
   Future<void> _restaurerEtat(Etat etat) async {
     document?.dispose();
     final doc = PdfDocument(inputBytes: etat.octetsDocument);
+    // Une modification faite sur une autre page se défait sur cette
+    // page-là : on y revient, sinon l'annulation serait invisible.
+    final changeDePage = etat.page != pageActive;
     setState(() {
       document = doc;
-      mots = etat.mots
-          .map((m) => MotDetecte(m.texte, m.zone,
-              gras: m.gras,
-              redessine: m.redessine,
-              tailleManuelle: m.tailleManuelle,
-              boiteLibre: m.boiteLibre,
-              alignement: m.alignement,
-              italique: m.italique,
-              souligne: m.souligne,
-              morceauDe: m.morceauDe,
-              famille: m.famille,
-              couleurTexte: m.couleurTexte,
-              tailleAuto: m.tailleAuto,
-              traitsSignature: m.traitsSignature,
-              imageFlottante: m.imageFlottante,
-              ratioSignature: m.ratioSignature,
-              depuisOcr: m.depuisOcr,
-              pixelsSource: m.pixelsSource,
-              tailleSource: m.tailleSource,
-              decalageSource: m.decalageSource))
-          .toList();
+      nbPages = doc.pages.count;
+      pageActive = etat.page;
+      motsParPage
+        ..clear()
+        ..addAll({
+          for (final entree in etat.motsAutresPages.entries)
+            entree.key: entree.value.map(copieDe).toList(),
+        });
+      mots = etat.mots.map(copieDe).toList();
+      motsParPage[etat.page] = mots;
+      if (changeDePage && pageActive < doc.pages.count) {
+        taillePage = Size(doc.pages[pageActive].size.width,
+            doc.pages[pageActive].size.height);
+        imageOrigine = null;
+      }
       imageDeFond = etat.image;
       final reprise =
           etat.image != null ? img.decodePng(etat.image!) : null;
@@ -4673,6 +4844,10 @@ class _AccueilState extends State<Accueil> {
       champEnEdition = null;
       if (modeRemplissage) champsFormulaire = _lireChampsFormulaire(doc);
     });
+    // L'image gardée dans l'état est celle de l'autre page : il faut
+    // refaire celle-ci, sans quoi on verrait la page 4 avec les cadres de
+    // la page 1.
+    if (changeDePage) await _rafraichirApercuOcr(doc);
   }
 
   Future<void> _annuler() async {
@@ -4715,13 +4890,6 @@ class _AccueilState extends State<Accueil> {
     final doc = document;
     if (doc == null || _occupe) return;
 
-    if (doc.pages.count > 1) {
-      setState(() => statut =
-          "Aplatissement impossible : ce document a plusieurs pages, "
-          "seule la première serait conservée pour l'instant.");
-      return;
-    }
-
     setState(() => _occupe = true);
     try {
       historique.add(await _etatActuel(doc));
@@ -4732,7 +4900,7 @@ class _AccueilState extends State<Accueil> {
       // entrent donc dans l'image, et leurs cadres flottants disparaissent.
       final octetsDoc = Uint8List.fromList(await _octetsAvecSignatures(doc));
       PdfRaster? raster;
-      await for (final r in Printing.raster(octetsDoc, pages: const [0], dpi: dpi)) {
+      await for (final r in Printing.raster(octetsDoc, pages: [pageActive], dpi: dpi)) {
         raster = r;
         break;
       }
@@ -4761,14 +4929,38 @@ class _AccueilState extends State<Accueil> {
         }
       }
 
+      // Toutes les pages sont figées, pas seulement celle qu'on regarde :
+      // ce qui a été effacé page 2 doit disparaître du fichier comme le
+      // reste. Les autres pages sont rendues moins finement — on ne les
+      // édite pas à cet instant, et garder trente pages en 300 points par
+      // pouce ferait un fichier bien trop lourd à partager.
+      final tailles = [
+        for (var i = 0; i < doc.pages.count; i++)
+          Size(doc.pages[i].size.width, doc.pages[i].size.height)
+      ];
+      final rendus = <int, Uint8List>{pageActive: pngOctets};
+      if (tailles.length > 1) {
+        var index = 0;
+        await for (final r in Printing.raster(octetsDoc, dpi: 200)) {
+          if (index != pageActive) rendus[index] = await r.toPng();
+          index++;
+        }
+      }
+
       final nouveauDoc = PdfDocument();
       nouveauDoc.pageSettings.margins.all = 0;
-      nouveauDoc.pageSettings.size = taillePage;
-      final nouvellePage = nouveauDoc.pages.add();
-      nouvellePage.graphics.drawImage(
-        PdfBitmap(pngOctets),
-        Rect.fromLTWH(0, 0, taillePage.width, taillePage.height),
-      );
+      for (var i = 0; i < tailles.length; i++) {
+        final image = rendus[i];
+        if (image == null) {
+          throw Exception("la page ${i + 1} n'a pas pu être rendue");
+        }
+        nouveauDoc.pageSettings.size = tailles[i];
+        final nouvellePage = nouveauDoc.pages.add();
+        nouvellePage.graphics.drawImage(
+          PdfBitmap(image),
+          Rect.fromLTWH(0, 0, tailles[i].width, tailles[i].height),
+        );
+      }
 
       doc.dispose();
 
@@ -4783,9 +4975,20 @@ class _AccueilState extends State<Accueil> {
         for (final m in mots) {
           m.redessine = false;
         }
-        statut =
-            "Page aplatie : les zones effacées sont maintenant supprimées "
-            "du fichier, pas seulement recouvertes";
+        // Les signatures posées sur les autres pages viennent elles aussi
+        // d'entrer dans le fichier : elles ne flottent plus.
+        for (final entree in motsParPage.entries) {
+          entree.value.removeWhere((m) => m.estFlottant);
+          for (final m in entree.value) {
+            m.redessine = false;
+          }
+        }
+        motsParPage[pageActive] = mots;
+        statut = nbPages > 1
+            ? "Document aplati ($nbPages pages) : les zones effacées sont "
+                "maintenant supprimées du fichier, pas seulement recouvertes"
+            : "Page aplatie : les zones effacées sont maintenant supprimées "
+                "du fichier, pas seulement recouvertes";
       });
     } catch (e) {
       historique.removeLast();
@@ -4805,6 +5008,7 @@ class _AccueilState extends State<Accueil> {
           "Ce qui a été effacé ou déplacé sera définitivement retiré du "
           "fichier (impossible à récupérer, même en inspectant le PDF), "
           "au lieu d'être seulement recouvert visuellement comme jusqu'ici. "
+          "Toutes les pages du document sont concernées. "
           "À faire juste avant de partager le document.\n\n"
           "Vérifie la page juste après : si elle apparaît vide ou "
           "incomplète, touche « Annuler » immédiatement avant de "
@@ -5233,7 +5437,7 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
 
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
       final rectEfface = _rectEffacement(mot);
       _effacerRect(page, rectEfface, mot);
 
@@ -5460,7 +5664,7 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
 
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
 
       // On photographie chaque contenu avant de toucher à la page : déplacer
       // l'image imprimée conserve la police et la graisse d'origine, qu'on ne
@@ -5815,10 +6019,43 @@ class _AccueilState extends State<Accueil> {
             (ligne, position),
       ];
       statut = resultatsRecherche.isEmpty
-          ? "Aucune occurrence trouvée"
+          ? (nbPages > 1
+              ? "Rien trouvé sur la page ${pageActive + 1}"
+              : "Aucune occurrence trouvée")
           : "${resultatsRecherche.length} occurrence(s) trouvée(s)";
     });
     if (resultatsRecherche.isNotEmpty) _allerAuResultat(0);
+  }
+
+  /// Poursuit la recherche sur les autres pages : chacune est ouverte à
+  /// son tour — donc analysée si elle ne l'a jamais été — jusqu'à la
+  /// première qui contient le mot, et on s'arrête là, dessus. Sans cela,
+  /// chercher dans un dossier de vingt pages obligerait à ouvrir les vingt
+  /// pages à la main.
+  Future<void> _chercherAilleurs() async {
+    final terme = _champRecherche.text.trim();
+    if (terme.isEmpty || nbPages <= 1 || _occupe) return;
+    final depart = pageActive;
+    for (var pas = 1; pas < nbPages; pas++) {
+      final cible = (depart + pas) % nbPages;
+      if (mounted) {
+        setState(() => statut = "Recherche page ${cible + 1} sur $nbPages...");
+      }
+      await _allerPage(cible);
+      if (!mounted) return;
+      final trouve = mots.any((m) =>
+          m.texte.isNotEmpty && _positionsDansLigne(m.texte, terme).isNotEmpty);
+      if (trouve) {
+        _chercher();
+        return;
+      }
+    }
+    // Rien nulle part : on revient d'où l'on venait plutôt que de laisser
+    // l'utilisateur sur la dernière page parcourue.
+    await _allerPage(depart);
+    if (mounted) {
+      setState(() => statut = "« $terme » ne figure sur aucune page");
+    }
   }
 
   /// Amène le résultat choisi sous les yeux et le sélectionne.
@@ -6310,7 +6547,7 @@ class _AccueilState extends State<Accueil> {
       historique.add(await _etatActuel(doc));
       futur.clear();
 
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
       _effacerRect(page, zone, mot);
 
       setState(() {
@@ -6495,7 +6732,7 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
 
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
       final nouvelles = <MotDetecte>[];
       for (var i = 0; i < lignesCopiees.length; i++) {
         final ligne = lignesCopiees[i];
@@ -6562,19 +6799,29 @@ class _AccueilState extends State<Accueil> {
   /// reste vierge de leur encre, si bien qu'après un enregistrement on peut
   /// encore les déplacer, les redimensionner ou les retirer.
   Future<List<int>> _octetsAvecSignatures(PdfDocument doc) async {
-    final flottants = mots.where((m) => m.estFlottant).toList();
+    // Les signatures et morceaux posés sur les autres pages comptent aussi :
+    // n'écrire que ceux de la page ouverte les aurait fait disparaître du
+    // fichier enregistré, alors qu'ils étaient bien à l'écran.
+    final parPage = <int, List<MotDetecte>>{};
+    for (final entree in _motsDeTouteLesPages().entries) {
+      final flottants = entree.value.where((m) => m.estFlottant).toList();
+      if (flottants.isNotEmpty) parPage[entree.key] = flottants;
+    }
     final octets = await doc.save();
-    if (flottants.isEmpty) return octets;
+    if (parPage.isEmpty) return octets;
     final copie = PdfDocument(inputBytes: Uint8List.fromList(octets));
     try {
-      final page = copie.pages[0];
-      for (final objet in flottants) {
-        final traits = objet.traitsSignature;
-        final image = objet.imageFlottante;
-        if (traits != null) {
-          _tracerSignature(page, traits, objet.zone);
-        } else if (image != null) {
-          page.graphics.drawImage(PdfBitmap(image), objet.zone);
+      for (final entree in parPage.entries) {
+        if (entree.key < 0 || entree.key >= copie.pages.count) continue;
+        final page = copie.pages[entree.key];
+        for (final objet in entree.value) {
+          final traits = objet.traitsSignature;
+          final image = objet.imageFlottante;
+          if (traits != null) {
+            _tracerSignature(page, traits, objet.zone);
+          } else if (image != null) {
+            page.graphics.drawImage(PdfBitmap(image), objet.zone);
+          }
         }
       }
       return await copie.save();
@@ -6582,6 +6829,13 @@ class _AccueilState extends State<Accueil> {
       copie.dispose();
     }
   }
+
+  /// Les lignes de toutes les pages : celles mises de côté, et celles de la
+  /// page ouverte — qui sont dans [mots] et pas encore rangées.
+  Map<int, List<MotDetecte>> _motsDeTouteLesPages() => {
+        ...motsParPage,
+        pageActive: mots,
+      };
 
   Future<void> _enregistrer() async {
     final doc = document;
@@ -6662,7 +6916,7 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
 
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
       _effacerRect(page, _rectEffacement(mot), mot);
 
       setState(() {
@@ -6720,7 +6974,7 @@ class _AccueilState extends State<Accueil> {
 
       historique.add(avant);
       futur.clear();
-      _effacerRect(doc.pages[0], zone, mot);
+      _effacerRect(doc.pages[pageActive], zone, mot);
 
       setState(() {
         mot.texte = "";
@@ -6792,7 +7046,7 @@ class _AccueilState extends State<Accueil> {
     if (octets == null) return null;
     PdfRaster? raster;
     await for (final r
-        in Printing.raster(octets, pages: const [0], dpi: _dpiApercu)) {
+        in Printing.raster(octets, pages: [pageActive], dpi: _dpiApercu)) {
       raster = r;
       break;
     }
@@ -6843,7 +7097,7 @@ class _AccueilState extends State<Accueil> {
       avant = await _etatActuel(doc);
       historique.add(avant);
       futur.clear();
-      doc.pages[0].graphics.drawImage(PdfBitmap(octets), zone);
+      doc.pages[pageActive].graphics.drawImage(PdfBitmap(octets), zone);
       // Les pixels de la page ont changé sous ce cadre : la photo gardée de
       // la ligne n'a plus lieu d'être, elle sera reprise au besoin.
       mot.pixelsSource = null;
@@ -6916,6 +7170,12 @@ class _AccueilState extends State<Accueil> {
     setState(() {
       document = null;
       mots = [];
+      motsParPage.clear();
+      pagesAnalysees.clear();
+      vignettes.clear();
+      pageActive = 0;
+      nbPages = 1;
+      modeAnnotationSeule = false;
       selection.clear();
       historique.clear();
       futur.clear();
@@ -7104,7 +7364,7 @@ class _AccueilState extends State<Accueil> {
       historique.add(avant);
       futur.clear();
 
-      final page = doc.pages[0];
+      final page = doc.pages[pageActive];
       for (final mot in choisis) {
         // Une signature n'est pas écrite dans la page tant qu'on n'a pas
         // enregistré, et un cadre vide n'a rien sous lui : dans les deux
@@ -7511,6 +7771,7 @@ class _AccueilState extends State<Accueil> {
           ),
         ],
       ),
+      bottomNavigationBar: _barrePages(context, lecture: true),
       // Deux portes d'entrée, et non une. Signer ou annoter n'exige pas
       // l'analyse du texte : la réclamer d'abord faisait attendre plusieurs
       // secondes, et parfois échouer, pour une fonction qui n'en avait pas
@@ -7646,6 +7907,21 @@ class _AccueilState extends State<Accueil> {
                 ),
               ],
             ),
+            if (nbPages > 1)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed:
+                      (_occupe || _champRecherche.text.trim().isEmpty)
+                          ? null
+                          : _chercherAilleurs,
+                  icon: const Icon(Icons.travel_explore, size: 18),
+                  label: const Text(
+                    "Chercher sur les autres pages",
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
             if (_champRecherche.text.trim().isNotEmpty)
               Align(
                 alignment: Alignment.centerLeft,
@@ -7653,7 +7929,9 @@ class _AccueilState extends State<Accueil> {
                   padding: const EdgeInsets.only(top: 4),
                   child: Text(
                     total == 0
-                        ? "Aucune occurrence trouvée"
+                        ? (nbPages > 1
+                            ? "Rien sur la page ${pageActive + 1}"
+                            : "Aucune occurrence trouvée")
                         : "Occurrence ${indexRecherche + 1} sur $total",
                     style: TextStyle(
                       fontSize: 12,
@@ -7666,6 +7944,164 @@ class _AccueilState extends State<Accueil> {
         ),
       ),
     );
+  }
+
+  /// La bande des pages, en bas de l'écran. Elle n'apparaît que si le
+  /// document en compte plusieurs : sur une page unique, ce serait un
+  /// bouton de plus pour rien.
+  Widget? _barrePages(BuildContext context, {required bool lecture}) {
+    if (nbPages <= 1) return null;
+    final aller = lecture ? _allerPageLecture : _allerPage;
+    return SafeArea(
+      top: false,
+      child: Material(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        child: SizedBox(
+          height: 54,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.chevron_left, size: 32),
+                tooltip: "Page précédente",
+                onPressed: (_occupe || pageActive == 0)
+                    ? null
+                    : () => aller(pageActive - 1),
+              ),
+              TextButton.icon(
+                onPressed: _occupe ? null : _feuillePages,
+                icon: const Icon(Icons.grid_view, size: 18),
+                label: Text(
+                  "Page ${pageActive + 1} / $nbPages",
+                  style: const TextStyle(fontSize: 15),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.chevron_right, size: 32),
+                tooltip: "Page suivante",
+                onPressed: (_occupe || pageActive >= nbPages - 1)
+                    ? null
+                    : () => aller(pageActive + 1),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Toutes les pages en vignettes : on touche celle qu'on veut. Sur un
+  /// dossier de trente pages, atteindre la page 22 en appuyant vingt et une
+  /// fois sur la flèche n'aurait aucun sens.
+  Future<void> _feuillePages() async {
+    if (_occupe || nbPages <= 1) return;
+    final doc = document;
+    if (vignettes.length < nbPages) {
+      setState(() {
+        _occupe = true;
+        statut = "Préparation des pages...";
+      });
+      try {
+        final octets = doc != null
+            ? Uint8List.fromList(await _octetsAvecSignatures(doc))
+            : octetsDocument;
+        if (octets != null) {
+          var index = 0;
+          await for (final rendu in Printing.raster(octets, dpi: 16)) {
+            vignettes[index] = await rendu.toPng();
+            index++;
+          }
+        }
+      } catch (_) {
+        // Sans vignette, la planche montre quand même les numéros : on
+        // peut toujours aller à sa page.
+      } finally {
+        if (mounted) {
+          setState(() {
+            _occupe = false;
+            statut = "Page ${pageActive + 1} sur $nbPages";
+          });
+        }
+      }
+    }
+    if (!mounted) return;
+    final choix = await showModalBottomSheet<int>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text(
+                "Aller à une page",
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+            ),
+            Flexible(
+              child: GridView.builder(
+                shrinkWrap: true,
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                gridDelegate:
+                    const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 4,
+                  childAspectRatio: 0.62,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                ),
+                itemCount: nbPages,
+                itemBuilder: (c, i) {
+                  final vignette = vignettes[i];
+                  final courante = i == pageActive;
+                  return InkWell(
+                    onTap: () => Navigator.pop(ctx, i),
+                    child: Column(
+                      children: [
+                        Expanded(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              // Du papier blanc sous la vignette : beaucoup
+                              // de PDF ne peignent pas leur fond.
+                              color: Colors.white,
+                              border: Border.all(
+                                color: courante
+                                    ? Theme.of(c).colorScheme.primary
+                                    : Colors.black26,
+                                width: courante ? 3 : 1,
+                              ),
+                            ),
+                            child: vignette == null
+                                ? const Center(
+                                    child: Icon(Icons.description_outlined,
+                                        color: Colors.black26))
+                                : Image.memory(vignette, fit: BoxFit.contain),
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          "${i + 1}",
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight:
+                                courante ? FontWeight.bold : FontWeight.normal,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choix == null) return;
+    if (modeLecture) {
+      await _allerPageLecture(choix);
+    } else {
+      await _allerPage(choix);
+    }
   }
 
   Widget _buildEdition(BuildContext context) {
@@ -8869,6 +9305,13 @@ class _AccueilState extends State<Accueil> {
           ),
         ],
       ),
+      // La bande des pages s'efface pendant qu'on écrit : le clavier la
+      // pousserait contre la barre d'écriture, et deux barres superposées
+      // sous le doigt, c'est une erreur de frappe assurée.
+      bottomNavigationBar:
+          (motEnEditionDirecte != null || champEnEdition != null)
+              ? null
+              : _barrePages(context, lecture: false),
       // Les outils se replient derrière un seul bouton. En colonne, les six
       // recouvraient tout le bord droit de la page — sur un document dont le
       // contenu va jusqu'au bord, ils mangeaient le cachet et la signature.
