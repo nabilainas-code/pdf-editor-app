@@ -1413,6 +1413,12 @@ class _AccueilState extends State<Accueil> {
     final taille = tailleDirecte;
     focusDirect.unfocus();
     setState(() => motEnEditionDirecte = null);
+    // Une zone ajoutée puis laissée vide n'a rien à garder : ni texte, ni
+    // cadre. La retirer évite un pointillé orphelin sur la page.
+    if (mot.boiteLibre && mot.texte.isEmpty && texte.trim().isEmpty) {
+      _retirerRepere(mot);
+      return;
+    }
     await _appliquerModification(mot,
         texte: texte,
         gras: gras,
@@ -4046,7 +4052,10 @@ class _AccueilState extends State<Accueil> {
     // Un peu d'air à droite pour le curseur.
     var largeur = peintre.width / echelle + 4;
     if (largeur < mot.zone.width) largeur = mot.zone.width;
-    final maxi = taillePage.width - mot.zone.left - 2;
+    // Jamais au-delà du bord droit de la page, même si le cadre a été poussé
+    // à gauche du bord : un champ qui dépasse déborde à l'écran.
+    final gaucheUtile = mot.zone.left < 0 ? 0.0 : mot.zone.left;
+    final maxi = taillePage.width - gaucheUtile - 2;
     if (maxi > 0 && largeur > maxi) largeur = maxi;
     if (largeur < 1) largeur = mot.zone.width;
 
@@ -4304,7 +4313,21 @@ class _AccueilState extends State<Accueil> {
   void _effacerRect(PdfPage page, Rect rect, MotDetecte mot) {
     final papier = _papierProche(rect);
     if (papier != null) {
-      page.graphics.drawImage(papier, rect);
+      // La bande de papier prélevée fait six points de haut. Étirée sur
+      // toute la hauteur d'une ligne, elle devenait floue et striée, d'un
+      // ton un peu à côté du papier autour : un rectangle grisâtre
+      // trahissait chaque zone effacée. Posée en carreaux, à sa taille,
+      // elle garde le grain du scan et se fond dans la page.
+      const hauteurBande = 6.0;
+      var y = rect.top;
+      while (y < rect.bottom - 0.01) {
+        final h = (rect.bottom - y) < hauteurBande
+            ? rect.bottom - y
+            : hauteurBande;
+        page.graphics.drawImage(
+            papier, Rect.fromLTWH(rect.left, y, rect.width, h));
+        y += hauteurBande;
+      }
     } else {
       page.graphics.drawRectangle(
         brush: PdfSolidBrush(_couleurDeFond(mot)),
@@ -4810,7 +4833,9 @@ class _AccueilState extends State<Accueil> {
               children: [
                 Icon(Icons.drag_indicator, size: 20),
                 SizedBox(width: 6),
-                Text("Modifier la ligne"),
+                Text(mot.texte.isEmpty && mot.boiteLibre
+                    ? "Nouveau texte"
+                    : "Modifier la ligne"),
               ],
             ),
           ),
@@ -4858,8 +4883,14 @@ class _AccueilState extends State<Accueil> {
                     ),
                   ),
                   const Text("Souligné", style: TextStyle(fontSize: 13)),
-                  const Spacer(),
+                ],
+              ),
+              // La taille sur sa propre rangée : avec les trois cases, elle
+              // venait se coller à « Souligné » et plus rien ne se lisait.
+              Row(
+                children: [
                   const Text("Taille", style: TextStyle(fontSize: 13)),
+                  const Spacer(),
                   IconButton(
                     visualDensity: VisualDensity.compact,
                     padding: EdgeInsets.zero,
@@ -5504,7 +5535,10 @@ class _AccueilState extends State<Accueil> {
       enAjoutTexte = false;
     });
 
-    await _modifierMot(nouvelleLigne);
+    // On écrit directement sur la page, comme sur n'importe quelle ligne :
+    // c'est le geste de toute l'application. La boîte de réglages reste
+    // accessible ensuite par « Aa ».
+    _ecrireSurLaLigne(nouvelleLigne);
   }
 
   /// Pose un cadre vide au milieu de ce qu'on a sous les yeux. Il sert à
@@ -5929,9 +5963,16 @@ class _AccueilState extends State<Accueil> {
     if (choix == null || !mounted) return;
     switch (choix) {
       case "texte":
+        // Une écriture en cours est d'abord posée : deux modes d'écriture
+        // ouverts en même temps se seraient contredits à l'écran.
+        if (motEnEditionDirecte != null) {
+          await _validerEditionDirecte();
+          if (!mounted) return;
+        }
         setState(() {
           enAjoutTexte = true;
           enCollage = false;
+          selection.clear();
           statut = "Touchez la page pour écrire à cet endroit";
         });
         break;
@@ -8291,9 +8332,14 @@ class _AccueilState extends State<Accueil> {
                                 final decalage = matrice.getTranslation();
                                 const largeur = 48.0;
                                 const hauteur = 44.0;
-                                var gauche =
-                                    ligne.zone.left * echelle * zoom +
-                                        decalage.x;
+                                // Calé sur la fin de la ligne plutôt que sur
+                                // son début : au-dessus du début, il
+                                // couvrait les premiers mots de la ligne
+                                // précédente. Les fins de lignes sont
+                                // inégales, il y a plus souvent du vide.
+                                var gauche = ligne.zone.right * echelle * zoom +
+                                    decalage.x -
+                                    largeur;
                                 if (gauche + largeur > constraints.maxWidth) {
                                   gauche = constraints.maxWidth - largeur;
                                 }
