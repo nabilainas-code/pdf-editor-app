@@ -782,8 +782,18 @@ class _AccueilState extends State<Accueil> {
   bool panneauRecherche = false;
   final TextEditingController _champRecherche = TextEditingController();
   final TextEditingController _champRemplacement = TextEditingController();
-  List<MotDetecte> resultatsRecherche = [];
+  /// Une occurrence, et non une ligne : une ligne peut en contenir
+  /// plusieurs. Les compter par lignes annonçait « 4 occurrences » là où il
+  /// y en avait douze, et « Remplacer » — au singulier — les remplaçait
+  /// toutes d'un coup dans la ligne visée.
+  List<(MotDetecte, int)> resultatsRecherche = [];
   int indexRecherche = 0;
+
+  /// Chercher « d » trouvait le d de chaque mot du document. Ces deux
+  /// réglages sont ceux de n'importe quel traitement de texte, et ils
+  /// évitent un remplacement massif qu'on n'avait pas voulu.
+  bool motEntier = false;
+  bool respecterCasse = false;
 
   String? outilTrace;
   final List<Offset> traceEnCours = [];
@@ -5564,8 +5574,34 @@ class _AccueilState extends State<Accueil> {
 
   /// Relève toutes les lignes contenant le terme cherché, dans l'ordre où
   /// on les lit : de haut en bas, puis de gauche à droite.
+  /// Vrai si la lettre n'appartient pas à un mot : c'est ce qui borne une
+  /// recherche « mot entier ».
+  bool _horsMot(String source, int position) {
+    if (position < 0 || position >= source.length) return true;
+    return !RegExp(r'[A-Za-zÀ-ÖØ-öø-ÿ0-9]').hasMatch(source[position]);
+  }
+
+  /// Positions du terme dans une ligne, selon les réglages en cours.
+  List<int> _positionsDansLigne(String source, String terme) {
+    if (terme.isEmpty) return const [];
+    final ou = respecterCasse ? source : source.toLowerCase();
+    final quoi = respecterCasse ? terme : terme.toLowerCase();
+    final trouvees = <int>[];
+    var i = 0;
+    while (i <= ou.length - quoi.length) {
+      final position = ou.indexOf(quoi, i);
+      if (position < 0) break;
+      final borne = !motEntier ||
+          (_horsMot(source, position - 1) &&
+              _horsMot(source, position + quoi.length));
+      if (borne) trouvees.add(position);
+      i = position + 1;
+    }
+    return trouvees;
+  }
+
   void _chercher() {
-    final terme = _champRecherche.text.trim().toLowerCase();
+    final terme = _champRecherche.text.trim();
     setState(() {
       indexRecherche = 0;
       if (terme.isEmpty) {
@@ -5573,13 +5609,16 @@ class _AccueilState extends State<Accueil> {
         statut = "Tapez le mot à chercher";
         return;
       }
-      resultatsRecherche = mots
-          .where((m) => m.texte.toLowerCase().contains(terme))
-          .toList()
+      final lignes = mots.where((m) => m.texte.isNotEmpty).toList()
         ..sort((a, b) {
           final vertical = a.zone.top.compareTo(b.zone.top);
           return vertical != 0 ? vertical : a.zone.left.compareTo(b.zone.left);
         });
+      resultatsRecherche = [
+        for (final ligne in lignes)
+          for (final position in _positionsDansLigne(ligne.texte, terme))
+            (ligne, position),
+      ];
       statut = resultatsRecherche.isEmpty
           ? "Aucune occurrence trouvée"
           : "${resultatsRecherche.length} occurrence(s) trouvée(s)";
@@ -5592,7 +5631,7 @@ class _AccueilState extends State<Accueil> {
     if (resultatsRecherche.isEmpty) return;
     final n = resultatsRecherche.length;
     final vise = ((index % n) + n) % n;
-    final ligne = resultatsRecherche[vise];
+    final ligne = resultatsRecherche[vise].$1;
     setState(() {
       indexRecherche = vise;
       selection
@@ -5627,8 +5666,11 @@ class _AccueilState extends State<Accueil> {
     if (resultatsRecherche.isEmpty || _occupe) return;
     final terme = _champRecherche.text.trim();
     if (terme.isEmpty) return;
-    final ligne = resultatsRecherche[indexRecherche];
-    final nouveau = _texteRemplace(ligne.texte, terme, _champRemplacement.text);
+    final (ligne, position) = resultatsRecherche[indexRecherche];
+    if (position + terme.length > ligne.texte.length) return;
+    // Cette occurrence-là, et elle seule : « Remplacer » est au singulier.
+    final nouveau = ligne.texte.replaceRange(
+        position, position + terme.length, _champRemplacement.text);
     if (nouveau == ligne.texte) return;
 
     await _appliquerModification(ligne,
@@ -5646,15 +5688,17 @@ class _AccueilState extends State<Accueil> {
     if (_occupe) return;
     final terme = _champRecherche.text.trim();
     if (terme.isEmpty) return;
-    final aTraiter = List<MotDetecte>.from(resultatsRecherche);
+    final aTraiter = <MotDetecte>{
+      for (final r in resultatsRecherche) r.$1
+    }.toList();
     if (aTraiter.isEmpty) return;
 
     final confirme = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Remplacer partout ?"),
-        content: Text("« $terme » sera remplacé dans "
-            "${aTraiter.length} ligne(s) par "
+        content: Text("${resultatsRecherche.length} occurrence(s) de "
+            "« $terme » seront remplacées par "
             "« ${_champRemplacement.text} »."),
         actions: [
           TextButton(
@@ -5685,25 +5729,17 @@ class _AccueilState extends State<Accueil> {
     setState(() => statut = "$faits ligne(s) remplacée(s)");
   }
 
-  /// Remplace toutes les occurrences dans une ligne, sans tenir compte de
-  /// la casse — on cherche « document », on trouve aussi « DOCUMENT ».
+  /// Remplace toutes les occurrences retenues dans une ligne. On parcourt
+  /// de la fin vers le début : remplacer par la fin laisse intactes les
+  /// positions de ce qui précède.
   String _texteRemplace(String source, String terme, String parQuoi) {
-    if (terme.isEmpty) return source;
-    final bas = source.toLowerCase();
-    final cible = terme.toLowerCase();
-    final sortie = StringBuffer();
-    var i = 0;
-    while (i < source.length) {
-      final trouve = bas.indexOf(cible, i);
-      if (trouve < 0) {
-        sortie.write(source.substring(i));
-        break;
-      }
-      sortie.write(source.substring(i, trouve));
-      sortie.write(parQuoi);
-      i = trouve + terme.length;
+    final positions = _positionsDansLigne(source, terme);
+    var sortie = source;
+    for (final position in positions.reversed) {
+      sortie =
+          sortie.replaceRange(position, position + terme.length, parQuoi);
     }
-    return sortie.toString();
+    return sortie;
   }
 
   void _poserCadre() {
@@ -7035,6 +7071,31 @@ class _AccueilState extends State<Accueil> {
                 ),
               ],
             ),
+            Row(
+              children: [
+                FilterChip(
+                  label: const Text("Mot entier",
+                      style: TextStyle(fontSize: 12)),
+                  selected: motEntier,
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (v) {
+                    setState(() => motEntier = v);
+                    _chercher();
+                  },
+                ),
+                const SizedBox(width: 8),
+                FilterChip(
+                  label: const Text("Respecter la casse",
+                      style: TextStyle(fontSize: 12)),
+                  selected: respecterCasse,
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (v) {
+                    setState(() => respecterCasse = v);
+                    _chercher();
+                  },
+                ),
+              ],
+            ),
             if (_champRecherche.text.trim().isNotEmpty)
               Align(
                 alignment: Alignment.centerLeft,
@@ -7897,8 +7958,8 @@ class _AccueilState extends State<Accueil> {
                                         // restent visibles en jaune pâle :
                                         // on voit d'un coup d'œil où le mot
                                         // se trouve dans la page.
-                                        resultat:
-                                            resultatsRecherche.contains(mot),
+                                        resultat: resultatsRecherche
+                                            .any((r) => r.$1 == mot),
                                       ),
                                       // Une signature n'est pas dans le
                                       // fichier tant qu'on n'a pas
