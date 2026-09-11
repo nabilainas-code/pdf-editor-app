@@ -1024,6 +1024,16 @@ class _AccueilState extends State<Accueil> {
       // message « repère posé ») ne pouvait qu'embrouiller.
       enAjoutTexte = false;
       enCollage = false;
+      // La ligne qu'on écrit est la seule chose choisie : un cadre bleu
+      // resté sur une autre ligne, ou un cadre à détacher en attente,
+      // brouillait ce qui allait recevoir l'action suivante.
+      selection.clear();
+      final cadre = cadreTampon;
+      if (modeTampon && cadre != null && !cadre.estFlottant) {
+        mots = mots.where((m) => !identical(m, cadre)).toList();
+      }
+      modeTampon = false;
+      cadreTampon = null;
       motEnEditionDirecte = mot;
       selectionMemorisee = null;
       texteDeLaSelection = "";
@@ -5569,8 +5579,10 @@ class _AccueilState extends State<Accueil> {
   /// Ce cadre-ci ne contient rien : on l'ajuste autant qu'on veut sans que
   /// la page bouge d'un pixel, et « Détacher » emporte alors ce qui est
   /// dessous.
-  void _outilTampon() {
+  Future<void> _outilTampon() async {
     if (document == null || _occupe) return;
+    await _refermerLesModes();
+    if (!mounted) return;
     final centre = _centreVisible();
     var largeur = taillePage.width / 3;
     if (largeur < 60) largeur = 60;
@@ -5609,10 +5621,13 @@ class _AccueilState extends State<Accueil> {
   /// une en laissant le reste sur place — le cachet finissait déchiré, et
   /// ce qu'il traversait abîmé. Un cadre unique autour de l'ensemble, puis
   /// « Détacher », en fait un seul morceau qui se déplace d'une pièce.
-  void _encadrerLaSelection() {
+  Future<void> _encadrerLaSelection() async {
     if (selection.isEmpty || document == null || _occupe) return;
-    var bloc = selection.first.zone;
-    for (final m in selection) {
+    final choisis = List<MotDetecte>.from(selection);
+    await _refermerLesModes();
+    if (!mounted) return;
+    var bloc = choisis.first.zone;
+    for (final m in choisis) {
       bloc = bloc.expandToInclude(m.zone);
     }
     // Un peu de marge : les cadres de lignes serrent le texte au plus juste,
@@ -5697,8 +5712,10 @@ class _AccueilState extends State<Accueil> {
   /// Le cadre part minuscule à l'endroit touché, puis s'écarte tant qu'il
   /// touche de l'encre : il épouse ainsi le signe, quelle que soit sa
   /// taille, sans qu'on ait à le viser au pixel près.
-  void _encadrerSousLeDoigt(double xPage, double yPage) {
+  Future<void> _encadrerSousLeDoigt(double xPage, double yPage) async {
     if (document == null || _occupe) return;
+    await _refermerLesModes();
+    if (!mounted) return;
     const graine = 10.0;
     final depart = Rect.fromCenter(
       center: Offset(xPage, yPage),
@@ -6012,6 +6029,33 @@ class _AccueilState extends State<Accueil> {
         _nettoyerReperesVides();
         break;
     }
+  }
+
+  /// Referme tout mode en cours avant d'en ouvrir un autre.
+  ///
+  /// Le cadre à détacher, l'écriture sur une ligne, l'ajout de texte, le
+  /// collage : chacun a ses marques à l'écran. Ouverts ensemble, ils
+  /// empilaient cadre bleu, ronds bleus, surlignage marron, pastille noire
+  /// et bouton « Détacher » sur la même ligne — cinq façons de dire
+  /// « ceci est choisi ». Un seul mode à la fois, un seul marquage.
+  Future<void> _refermerLesModes() async {
+    if (motEnEditionDirecte != null) {
+      await _validerEditionDirecte();
+      if (!mounted) return;
+    }
+    setState(() {
+      // Un cadre posé pour détacher, jamais détaché : il n'a rien emporté,
+      // il n'y a rien à garder.
+      final cadre = cadreTampon;
+      if (modeTampon && cadre != null && !cadre.estFlottant) {
+        mots = mots.where((m) => !identical(m, cadre)).toList();
+        selection.remove(cadre);
+      }
+      modeTampon = false;
+      cadreTampon = null;
+      enAjoutTexte = false;
+      enCollage = false;
+    });
   }
 
   void _poserCadre() {
@@ -7441,13 +7485,17 @@ class _AccueilState extends State<Accueil> {
             isSelected: panneauRecherche,
             onPressed: _occupe
                 ? null
-                : () => setState(() {
+                : () async {
+                    await _refermerLesModes();
+                    if (!mounted) return;
+                    setState(() {
                       panneauRecherche = !panneauRecherche;
                       if (!panneauRecherche) {
                         resultatsRecherche = [];
                         selection.clear();
                       }
-                    }),
+                    });
+                  },
           ),
           // Elle ne s'affiche que lorsqu'il y a quelque chose à coller.
           // Postée en permanence dans la barre, grise et inerte, elle
@@ -8613,25 +8661,9 @@ class _AccueilState extends State<Accueil> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                // En mode tampon, l'action à faire ensuite est nommée en
-                // clair : on ajuste le cadre, on appuie, c'est détaché.
-                if (modeTampon) ...[
-                  FloatingActionButton.extended(
-                    heroTag: "detacherTampon",
-                    onPressed: _occupe ? null : _detacherLeTampon,
-                    icon: const Icon(Icons.content_cut),
-                    label: const Text("Détacher"),
-                  ),
-                  const SizedBox(height: 8),
-                  FloatingActionButton.small(
-                    heroTag: "annulerTampon",
-                    elevation: 2,
-                    tooltip: "Retirer ce cadre sans rien détacher",
-                    onPressed: _occupe ? null : _annulerLeTampon,
-                    child: const Icon(Icons.close),
-                  ),
-                  const SizedBox(height: 12),
-                ],
+                // « Détacher » et sa croix ne sont plus dupliqués ici : la
+                // pastille posée sur le cadre les porte déjà. Deux fois le
+                // même bouton à l'écran, c'est une question de plus.
                 // Deux boutons, pas douze. ✋ bascule le doigt entre
                 // « déplacer la page » et « toucher une ligne » — il doit
                 // rester sous les yeux, le basculement est constant. ＋
