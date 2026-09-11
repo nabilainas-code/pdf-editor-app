@@ -355,11 +355,20 @@ class ChampFormulaire {
 class _CadreLigne extends CustomPainter {
   final bool selectionne;
   final bool resultat;
-  const _CadreLigne({required this.selectionne, this.resultat = false});
+
+  /// Un cadre sans encre dessous — repère, zone à détacher — n'a que son
+  /// tracé pour exister : lui seul reste dessiné au repos.
+  final bool vide;
+  const _CadreLigne(
+      {required this.selectionne, this.resultat = false, this.vide = false});
 
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
+    // Au repos, rien : la page se lit telle qu'elle est. Un pointillé sur
+    // chaque ligne disait « ceci est modifiable » — mais tout l'est, et
+    // c'est en touchant qu'on le découvre. Le bruit partait avec.
+    if (!selectionne && !resultat && !vide) return;
     if (resultat && !selectionne) {
       canvas.drawRect(
           rect, Paint()..color = const Color(0x55FFC107));
@@ -401,7 +410,9 @@ class _CadreLigne extends CustomPainter {
 
   @override
   bool shouldRepaint(_CadreLigne ancien) =>
-      ancien.selectionne != selectionne || ancien.resultat != resultat;
+      ancien.selectionne != selectionne ||
+      ancien.resultat != resultat ||
+      ancien.vide != vide;
 }
 
 /// Une signature enregistrée dans le répertoire : ses traits normalisés
@@ -945,18 +956,10 @@ class _AccueilState extends State<Accueil> {
 
   /// Les outils du bord droit sont repliés par défaut derrière un seul
   /// bouton : en colonne, ils recouvraient le bord droit de la page.
-  bool outilsOuverts = false;
+
 
   /// Referme l'éventail des outils après avoir lancé l'un d'eux : on a
   /// choisi, la page peut redevenir dégagée.
-  VoidCallback? _outil(VoidCallback? action) {
-    if (action == null) return null;
-    return () {
-      setState(() => outilsOuverts = false);
-      action();
-    };
-  }
-
   final TransformationController _transformation = TransformationController();
 
   /// Page telle qu'elle était à l'ouverture, et son échelle pixels/point.
@@ -5844,6 +5847,121 @@ class _AccueilState extends State<Accueil> {
     return sortie;
   }
 
+  /// « Aa » depuis la barre d'écriture : ce qu'on tape est d'abord posé,
+  /// puis la feuille de style s'ouvre sur la ligne. Deux champs de texte
+  /// ouverts en même temps sur la même ligne se seraient contredits.
+  Future<void> _styleDepuisEcriture() async {
+    final mot = motEnEditionDirecte;
+    if (mot == null || _occupe) return;
+    await _validerEditionDirecte();
+    if (!mounted) return;
+    await _modifierMot(mot);
+  }
+
+  /// Tout ce qu'on peut ajouter à la page, derrière un seul ＋. Douze
+  /// boutons empilés sur le bord droit cachaient le document ; ici une
+  /// liste nommée en clair, qui se referme dès qu'on a choisi.
+  Future<void> _feuilleAjouter() async {
+    final choix = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.text_fields),
+              title: const Text("Texte"),
+              subtitle: const Text("Touchez ensuite l'endroit où écrire"),
+              onTap: () => Navigator.pop(ctx, "texte"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.draw),
+              title: const Text("Signature"),
+              subtitle: const Text("Mes signatures, ou en tracer une"),
+              onTap: () => Navigator.pop(ctx, "signature"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.approval),
+              title: const Text("Tampon ou cachet déjà sur la page"),
+              subtitle: const Text("Entourer, puis détacher pour le déplacer"),
+              onTap: () => Navigator.pop(ctx, "tampon"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.brush),
+              title: const Text("Dessiner au doigt"),
+              onTap: () => Navigator.pop(ctx, "stylo"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.cleaning_services),
+              title: const Text("Gomme au doigt"),
+              onTap: () => Navigator.pop(ctx, "gomme"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_note),
+              title: Text(modeRemplissage
+                  ? "Quitter le remplissage du formulaire"
+                  : "Remplir le formulaire du PDF"),
+              onTap: () => Navigator.pop(ctx, "remplir"),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.crop_free),
+              title: const Text("Poser un cadre libre"),
+              subtitle: const Text("Pour effacer ou récupérer une zone"),
+              onTap: () => Navigator.pop(ctx, "cadre"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.zoom_out_map),
+              title: const Text("Recentrer la page"),
+              onTap: () => Navigator.pop(ctx, "recentrer"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.clear_all),
+              title: const Text("Retirer tous les cadres vides"),
+              onTap: () => Navigator.pop(ctx, "nettoyer"),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (choix == null || !mounted) return;
+    switch (choix) {
+      case "texte":
+        setState(() {
+          enAjoutTexte = true;
+          enCollage = false;
+          statut = "Touchez la page pour écrire à cet endroit";
+        });
+        break;
+      case "signature":
+        _choisirSignature();
+        break;
+      case "tampon":
+        _outilTampon();
+        break;
+      case "stylo":
+        _choisirOutilTrace("stylo");
+        break;
+      case "gomme":
+        _choisirOutilTrace("gomme");
+        break;
+      case "remplir":
+        _basculerRemplissage();
+        break;
+      case "cadre":
+        _poserCadre();
+        break;
+      case "recentrer":
+        _transformation.value = Matrix4.identity();
+        break;
+      case "nettoyer":
+        _nettoyerReperesVides();
+        break;
+    }
+  }
+
   void _poserCadre() {
     final centre = _centreVisible();
     _ajouterZoneEffacee(centre.dx, centre.dy);
@@ -6846,6 +6964,36 @@ class _AccueilState extends State<Accueil> {
                   _retirerRepere(mot);
                 },
               ),
+            // Le doigt déplace ; les flèches restent pour le réglage fin,
+            // à la demande plutôt qu'en permanence dans une barre.
+            ListTile(
+              leading: const Icon(Icons.open_with),
+              title: const Text("Déplacer finement"),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final fleche in const [
+                    (Icons.arrow_back, -1.0, 0.0),
+                    (Icons.arrow_upward, 0.0, -1.0),
+                    (Icons.arrow_downward, 0.0, 1.0),
+                    (Icons.arrow_forward, 1.0, 0.0),
+                  ])
+                    IconButton(
+                      icon: Icon(fleche.$1, size: 20),
+                      visualDensity: VisualDensity.compact,
+                      onPressed: _occupe
+                          ? null
+                          : () => _deplacerGroupe(
+                                selection.contains(mot)
+                                    ? selection.toList()
+                                    : [mot],
+                                fleche.$2 * _pasDeplacement,
+                                fleche.$3 * _pasDeplacement,
+                              ),
+                    ),
+                ],
+              ),
+            ),
             const SizedBox(height: 8),
           ],
         ),
@@ -7273,11 +7421,6 @@ class _AccueilState extends State<Accueil> {
                     : _activerModeCollage),
           ),
           IconButton(
-            icon: const Icon(Icons.folder_open),
-            tooltip: "Importer un document",
-            onPressed: _importerDocument,
-          ),
-          IconButton(
             icon: enregistrementEnCours
                 ? const SizedBox(
                     width: 20,
@@ -7422,112 +7565,18 @@ class _AccueilState extends State<Accueil> {
                         onPressed:
                             _occupe ? null : () => _appliquerStyle("souligne"),
                       ),
-                      // Un seul bouton pour toutes les actions de texte : la
-                      // barre est déjà pleine, et les quatre tiennent dans un
-                      // menu sans rien en chasser.
-                      PopupMenuButton<String>(
-                        icon: const Icon(Icons.select_all, size: 20),
-                        tooltip: "Sélectionner, couper, copier, coller",
-                        onSelected: _actionTexte,
-                        itemBuilder: (ctx) => const [
-                          PopupMenuItem(
-                            value: "tout",
-                            child: ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(Icons.select_all),
-                              title: Text("Tout sélectionner"),
-                            ),
-                          ),
-                          PopupMenuItem(
-                            value: "copier",
-                            child: ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(Icons.content_copy),
-                              title: Text("Copier"),
-                              subtitle: Text("La sélection, sinon la ligne"),
-                            ),
-                          ),
-                          PopupMenuItem(
-                            value: "couper",
-                            child: ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(Icons.content_cut),
-                              title: Text("Couper"),
-                              subtitle: Text("La sélection, sinon la ligne"),
-                            ),
-                          ),
-                          PopupMenuItem(
-                            value: "coller",
-                            child: ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(Icons.content_paste),
-                              title: Text("Coller ici"),
-                              subtitle: Text("À l'endroit du curseur"),
-                            ),
-                          ),
-                        ],
-                      ),
-                      // Un écart fixe, et non un Spacer : dans une barre qui
-                      // défile, la largeur n'est pas bornée et un ressort n'a
-                      // rien où s'étendre.
-                      const SizedBox(width: 10),
-                      const Text("Taille", style: TextStyle(fontSize: 13)),
+                      // « Aa » rassemble tout ce qui habille la ligne :
+                      // taille, police, couleur, alignement. Ce qu'on tape
+                      // est d'abord posé, puis la feuille s'ouvre dessus.
                       IconButton(
-                        icon: const Icon(Icons.remove, size: 20),
-                        tooltip: "Réduire",
-                        onPressed: () => setState(() {
-                          tailleDirecte =
-                              (_tailleEditionDirecte(motEnEditionDirecte!) - 1)
-                                  .clamp(4, 200);
-                        }),
-                      ),
-                      SizedBox(
-                        width: 34,
-                        child: Text(
-                          tailleDirecte?.round().toString() ?? "Auto",
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(fontSize: 13),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.add, size: 20),
-                        tooltip: "Agrandir",
-                        onPressed: () => setState(() {
-                          tailleDirecte =
-                              (_tailleEditionDirecte(motEnEditionDirecte!) + 1)
-                                  .clamp(4, 200);
-                        }),
-                      ),
-                      const SizedBox(width: 10),
-                      // Supprimer juste ici, là où l'on tape déjà : plus
-                      // besoin de rectangle ni de passer par les réglages
-                      // pour retirer une ligne.
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 20),
-                        tooltip: "Supprimer cette ligne",
-                        onPressed: _occupe ? null : _supprimerEditionDirecte,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.keyboard_return, size: 20),
-                        tooltip: "Ligne suivante (écarte ce qui gêne)",
-                        onPressed: _occupe ? null : _ligneSuivante,
+                        icon: const Icon(Icons.text_fields, size: 20),
+                        tooltip: "Style : taille, police, couleur, alignement",
+                        focusNode: _sansFocus,
+                        onPressed: _occupe ? null : _styleDepuisEcriture,
                       ),
                     ],
                           ),
                         ),
-                      ),
-                      // Porter le curseur sur la ligne du dessus ou du
-                      // dessous, ce que la poignée d'Android ne sait pas
-                      // faire : elle ne se déplace que dans son propre champ.
-                      IconButton(
-                        icon: const Icon(Icons.keyboard_arrow_up, size: 22),
-                        tooltip: "Ligne du dessus",
-                        onPressed: _occupe ? null : () => _ligneVoisine(-1),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.keyboard_arrow_down, size: 22),
-                        tooltip: "Ligne du dessous",
-                        onPressed: _occupe ? null : () => _ligneVoisine(1),
                       ),
                       IconButton(
                         icon: const Icon(Icons.close, size: 20),
@@ -7544,122 +7593,11 @@ class _AccueilState extends State<Accueil> {
                   ),
                 ),
               )
-            : selection.isEmpty
-            ? null
-            : PreferredSize(
-                preferredSize: const Size.fromHeight(40),
-                child: ColoredBox(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  child: Row(
-                    children: [
-                      const SizedBox(width: 8),
-                      IconButton(
-                        icon: const Icon(Icons.edit, size: 20),
-                        tooltip: "Écrire directement sur la ligne",
-                        onPressed: selection.length == 1
-                            ? () => _ecrireSurLaLigne(selection.first)
-                            : null,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.tune, size: 20),
-                        tooltip: "Réglages de la ligne (boîte)",
-                        onPressed: selection.length == 1
-                            ? () => _modifierMot(selection.first)
-                            : null,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.content_copy, size: 20),
-                        tooltip: selection.length > 1
-                            ? "Copier les ${selection.length} lignes"
-                            : "Copier cette ligne",
-                        onPressed: selection
-                                .any((m) => m.texte.isNotEmpty || m.estFlottant)
-                            ? _copier
-                            : null,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.approval, size: 20),
-                        tooltip: selection.length > 1
-                            ? "Entourer les ${selection.length} éléments d'un "
-                                "seul cadre, pour les détacher d'un bloc"
-                            : "Entourer pour détacher (tampon, signature)",
-                        onPressed: _occupe ? null : _encadrerLaSelection,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.cleaning_services, size: 20),
-                        tooltip: "Effacer ici (gomme)",
-                        onPressed: _occupe ||
-                                selection.length != 1 ||
-                                selection.first.estFlottant
-                            ? null
-                            : () => _effacerZone(selection.first),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 20),
-                        tooltip: selection.length > 1
-                            ? "Supprimer les ${selection.length} éléments"
-                            : "Retirer ce cadre (n'efface rien dans le PDF)",
-                        onPressed: _occupe
-                            ? null
-                            : (selection.length > 1
-                                ? _supprimerSelection
-                                : (selection.length == 1 &&
-                                        selection.first.texte.isEmpty
-                                    ? () => _retirerRepere(selection.first)
-                                    : null)),
-                      ),
-                      Expanded(
-                        child: Text(
-                          selection.length > 1
-                              ? "${selection.length} éléments sélectionnés"
-                              : (selection.first.texte.isEmpty
-                                  ? "(ligne vide)"
-                                  : selection.first.texte),
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.arrow_back, size: 20),
-                        tooltip: "Déplacer à gauche",
-                        onPressed: _occupe
-                            ? null
-                            : () => _deplacerGroupe(
-                                selection.toList(), -_pasDeplacement, 0),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.arrow_upward, size: 20),
-                        tooltip: "Déplacer vers le haut",
-                        onPressed: _occupe
-                            ? null
-                            : () => _deplacerGroupe(
-                                selection.toList(), 0, -_pasDeplacement),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.arrow_downward, size: 20),
-                        tooltip: "Déplacer vers le bas",
-                        onPressed: _occupe
-                            ? null
-                            : () => _deplacerGroupe(
-                                selection.toList(), 0, _pasDeplacement),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.arrow_forward, size: 20),
-                        tooltip: "Déplacer à droite",
-                        onPressed: _occupe
-                            ? null
-                            : () => _deplacerGroupe(
-                                selection.toList(), _pasDeplacement, 0),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 20),
-                        tooltip: "Désélectionner",
-                        onPressed: () => setState(() => selection.clear()),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+            // Plus de barre de sélection : tout ce qui concerne l'objet
+            // touché est dans la pastille posée à côté de lui. Une barre
+            // fixe de douze boutons faisait doublon avec elle et cachait
+            // la page.
+            : null,
       ),
       body: Column(
         children: [
@@ -8062,6 +8000,8 @@ class _AccueilState extends State<Accueil> {
                                         // se trouve dans la page.
                                         resultat: resultatsRecherche
                                             .any((r) => r.$1 == mot),
+                                        vide: mot.texte.isEmpty &&
+                                            !mot.estFlottant,
                                       ),
                                       // Une signature n'est pas dans le
                                       // fichier tant qu'on n'a pas
@@ -8420,7 +8360,7 @@ class _AccueilState extends State<Accueil> {
                         // courantes. Il est hors du zoom (sinon il grossirait
                         // avec la page) et suit la ligne à chaque
                         // déplacement de la vue.
-                        if (selection.length == 1 &&
+                        if (selection.isNotEmpty &&
                             motEnEditionDirecte == null &&
                             champEnEdition == null &&
                             !modeRemplissage &&
@@ -8464,12 +8404,99 @@ class _AccueilState extends State<Accueil> {
                                 // peut vraiment en faire.
                                 final estCadreTampon =
                                     modeTampon && mot == cadreTampon;
-                                // Copier était rangé derrière « … » alors
-                                // que c'est un geste courant : le voici au
-                                // premier rang, pour le texte comme pour un
-                                // tampon détaché.
-                                final nbBoutons =
-                                    estCadreTampon ? 3 : (estSignature ? 5 : 6);
+                                final plusieurs = selection.length > 1;
+                                // La pastille dit ce qu'on peut faire de
+                                // ce qu'on a touché — et rien d'autre. Ce
+                                // qui sert tous les jours est au premier
+                                // rang ; « … » garde le reste.
+                                final boutons = <Widget>[
+                                  if (plusieurs) ...[
+                                    _boutonMenu(Icons.content_copy,
+                                        "Copier les ${selection.length} lignes",
+                                        _occupe ? null : _copier),
+                                    _boutonMenu(
+                                        Icons.approval,
+                                        "Entourer d'un seul cadre, pour "
+                                            "détacher d'un bloc",
+                                        _occupe ? null : _encadrerLaSelection),
+                                    _boutonMenu(
+                                        Icons.delete_outline,
+                                        "Supprimer les ${selection.length} "
+                                            "éléments",
+                                        _occupe ? null : _supprimerSelection),
+                                    _boutonMenu(Icons.close, "Désélectionner",
+                                        () => setState(() => selection.clear())),
+                                  ] else if (estCadreTampon) ...[
+                                    _boutonMenu(Icons.content_cut, "Détacher",
+                                        _occupe ? null : _detacherLeTampon),
+                                    _boutonMenu(
+                                        Icons.delete_outline,
+                                        "Supprimer ce qui est dans le cadre",
+                                        _occupe
+                                            ? null
+                                            : () => _supprimerLeCadre(mot)),
+                                    _boutonMenu(Icons.close, "Retirer ce cadre",
+                                        _occupe ? null : _annulerLeTampon),
+                                  ] else if (estSignature) ...[
+                                    _boutonMenu(
+                                        Icons.content_copy,
+                                        "Copier pour poser ailleurs",
+                                        _occupe
+                                            ? null
+                                            : () => _copierPourPoser(mot)),
+                                    _boutonMenu(
+                                        Icons.control_point_duplicate,
+                                        "Dupliquer sur place",
+                                        _occupe
+                                            ? null
+                                            : () => _dupliquerSignature(mot)),
+                                    _boutonMenu(
+                                        Icons.delete_outline,
+                                        "Supprimer",
+                                        _occupe
+                                            ? null
+                                            : () => _supprimerObjet(mot)),
+                                    _boutonMenu(
+                                        Icons.more_horiz,
+                                        "Plus d'actions",
+                                        _occupe
+                                            ? null
+                                            : () => _plusDActions(mot)),
+                                  ] else ...[
+                                    _boutonMenu(
+                                        Icons.edit,
+                                        "Écrire",
+                                        _occupe
+                                            ? null
+                                            : () => _ecrireSurLaLigne(mot)),
+                                    _boutonMenu(
+                                        Icons.text_fields,
+                                        "Style : gras, taille, police, "
+                                            "couleur, alignement",
+                                        _occupe
+                                            ? null
+                                            : () => _modifierMot(mot)),
+                                    _boutonMenu(
+                                        Icons.content_copy,
+                                        "Copier",
+                                        _occupe
+                                            ? null
+                                            : () => _copierPourPoser(mot)),
+                                    _boutonMenu(
+                                        Icons.delete_outline,
+                                        "Supprimer",
+                                        _occupe
+                                            ? null
+                                            : () => _supprimerObjet(mot)),
+                                    _boutonMenu(
+                                        Icons.more_horiz,
+                                        "Plus d'actions",
+                                        _occupe
+                                            ? null
+                                            : () => _plusDActions(mot)),
+                                  ],
+                                ];
+                                final nbBoutons = boutons.length;
                                 final largeurMenu = 44.0 * nbBoutons + 10;
                                 const hauteurMenu = 44.0;
                                 var gauche = coin.dx;
@@ -8507,91 +8534,7 @@ class _AccueilState extends State<Accueil> {
                                         child: Row(
                                           mainAxisAlignment:
                                               MainAxisAlignment.spaceEvenly,
-                                          children: [
-                                            if (estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.content_cut,
-                                                "Détacher",
-                                                _occupe
-                                                    ? null
-                                                    : _detacherLeTampon,
-                                              ),
-                                            if (estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.delete_outline,
-                                                "Supprimer ce qui est dans le "
-                                                    "cadre",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _supprimerLeCadre(mot),
-                                              ),
-                                            if (estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.close,
-                                                "Retirer ce cadre",
-                                                _occupe
-                                                    ? null
-                                                    : _annulerLeTampon,
-                                              ),
-                                            if (!estSignature &&
-                                                !estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.edit,
-                                                "Écrire",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _ecrireSurLaLigne(mot),
-                                              ),
-                                            if (!estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.text_decrease,
-                                                "Réduire",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _redimensionnerDUnCran(
-                                                            mot, 0.8),
-                                              ),
-                                            if (!estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.text_increase,
-                                                "Agrandir",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _redimensionnerDUnCran(
-                                                            mot, 1.25),
-                                              ),
-                                            if (!estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.content_copy,
-                                                "Copier",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _copierPourPoser(mot),
-                                              ),
-                                            if (!estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.delete_outline,
-                                                "Supprimer",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _supprimerObjet(mot),
-                                              ),
-                                            if (!estCadreTampon)
-                                              _boutonMenu(
-                                                Icons.more_horiz,
-                                                "Plus d'actions",
-                                                _occupe
-                                                    ? null
-                                                    : () =>
-                                                        _plusDActions(mot),
-                                              ),
-                                          ],
+                                          children: boutons,
                                         ),
                                       ),
                                     ),
@@ -8635,186 +8578,37 @@ class _AccueilState extends State<Accueil> {
                   ),
                   const SizedBox(height: 12),
                 ],
-                AnimatedSize(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOutCubic,
-                  alignment: Alignment.bottomCenter,
-                  child: !outilsOuverts
-                      ? const SizedBox(width: 40)
-                      : Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            FloatingActionButton.small(
-                              heroTag: "ajoutTexte",
-                              elevation: 2,
-                              tooltip: enAjoutTexte
-                                  ? "Touchez la page pour écrire à cet endroit"
-                                  : "Ajouter du texte n'importe où",
-                              backgroundColor: enAjoutTexte
-                                  ? Theme.of(context).colorScheme.primary
-                                  : null,
-                              foregroundColor: enAjoutTexte
-                                  ? Theme.of(context).colorScheme.onPrimary
-                                  : null,
-                              onPressed: _outil(_occupe
-                                  ? null
-                                  : () => setState(() {
-                                        enAjoutTexte = !enAjoutTexte;
-                                        if (enAjoutTexte) enCollage = false;
-                                        statut = enAjoutTexte
-                                            ? "Touchez la page pour écrire à cet endroit"
-                                            : "Ajout de texte annulé";
-                                      })),
-                              child: const Icon(Icons.add),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "mode",
-                              elevation: 2,
-                              tooltip: modeNavigation
-                                  ? "Mode navigation : doigt = déplacer la page"
-                                  : "Mode édition : doigt = sélectionner une ligne",
-                              backgroundColor: modeNavigation
-                                  ? Theme.of(context).colorScheme.primary
-                                  : null,
-                              foregroundColor: modeNavigation
-                                  ? Theme.of(context).colorScheme.onPrimary
-                                  : null,
-                              onPressed: _outil(() => setState(() {
-                                    modeNavigation = !modeNavigation;
-                                    statut = modeNavigation
-                                        ? "Mode navigation : faites glisser la page"
-                                        : "Mode édition : touchez une ligne";
-                                  })),
-                              child: Icon(modeNavigation
-                                  ? Icons.pan_tool
-                                  : Icons.touch_app),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "tampon",
-                              elevation: 2,
-                              tooltip: "Tampon ou signature : entourer, "
-                                  "puis détacher",
-                              backgroundColor: modeTampon
-                                  ? Theme.of(context).colorScheme.primary
-                                  : null,
-                              foregroundColor: modeTampon
-                                  ? Theme.of(context).colorScheme.onPrimary
-                                  : null,
-                              onPressed:
-                                  _outil(_occupe ? null : _outilTampon),
-                              child: const Icon(Icons.approval),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "cadre",
-                              elevation: 2,
-                              tooltip: "Poser un cadre (grande zone)",
-                              onPressed:
-                                  _outil(_occupe ? null : _poserCadre),
-                              child: const Icon(Icons.crop_free),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "stylo",
-                              elevation: 2,
-                              tooltip: "Stylo : écrire ou dessiner au doigt",
-                              backgroundColor: outilTrace == "stylo"
-                                  ? Theme.of(context).colorScheme.primary
-                                  : null,
-                              foregroundColor: outilTrace == "stylo"
-                                  ? Theme.of(context).colorScheme.onPrimary
-                                  : null,
-                              onPressed: _outil(_occupe
-                                  ? null
-                                  : () => _choisirOutilTrace("stylo")),
-                              child: const Icon(Icons.brush),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "gommeDoigt",
-                              elevation: 2,
-                              tooltip:
-                                  "Gomme : effacer au doigt, sans poser de cadre",
-                              backgroundColor: outilTrace == "gomme"
-                                  ? Theme.of(context).colorScheme.primary
-                                  : null,
-                              foregroundColor: outilTrace == "gomme"
-                                  ? Theme.of(context).colorScheme.onPrimary
-                                  : null,
-                              onPressed: _outil(_occupe
-                                  ? null
-                                  : () => _choisirOutilTrace("gomme")),
-                              child: const Icon(Icons.cleaning_services),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "signature",
-                              elevation: 2,
-                              tooltip:
-                                  "Signature (mes signatures / en tracer une)",
-                              onPressed:
-                                  _outil(_occupe ? null : _choisirSignature),
-                              child: const Icon(Icons.draw),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "remplir",
-                              elevation: 2,
-                              tooltip: modeRemplissage
-                                  ? "Quitter le remplissage du formulaire"
-                                  : "Remplir le formulaire du PDF",
-                              backgroundColor: modeRemplissage
-                                  ? Theme.of(context).colorScheme.primary
-                                  : null,
-                              foregroundColor: modeRemplissage
-                                  ? Theme.of(context).colorScheme.onPrimary
-                                  : null,
-                              onPressed:
-                                  _outil(_occupe ? null : _basculerRemplissage),
-                              child: const Icon(Icons.edit_note),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "recentrer",
-                              elevation: 2,
-                              tooltip: "Recentrer / réinitialiser le zoom",
-                              onPressed: _outil(() =>
-                                  _transformation.value = Matrix4.identity()),
-                              child: const Icon(Icons.zoom_out_map),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "aplatir",
-                              elevation: 2,
-                              tooltip:
-                                  "Rédaction définitive (avant de partager)",
-                              onPressed: _outil(
-                                  _occupe ? null : _confirmerAplatissement),
-                              child: const Icon(Icons.security),
-                            ),
-                            const SizedBox(height: 8),
-                            FloatingActionButton.small(
-                              heroTag: "nettoyer",
-                              elevation: 2,
-                              tooltip: "Retirer tous les cadres vides",
-                              onPressed: _outil(
-                                  _occupe ? null : _nettoyerReperesVides),
-                              child: const Icon(Icons.clear_all),
-                            ),
-                            const SizedBox(height: 10),
-                          ],
-                        ),
-                ),
+                // Deux boutons, pas douze. ✋ bascule le doigt entre
+                // « déplacer la page » et « toucher une ligne » — il doit
+                // rester sous les yeux, le basculement est constant. ＋
+                // ouvre tout ce qu'on peut ajouter à la page.
                 FloatingActionButton.small(
-                  heroTag: "outils",
+                  heroTag: "mode",
                   elevation: 2,
-                  tooltip: outilsOuverts ? "Fermer les outils" : "Outils",
-                  onPressed: () =>
-                      setState(() => outilsOuverts = !outilsOuverts),
+                  tooltip: modeNavigation
+                      ? "Mode navigation : doigt = déplacer la page"
+                      : "Mode édition : doigt = toucher une ligne",
+                  backgroundColor: modeNavigation
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                  foregroundColor: modeNavigation
+                      ? Theme.of(context).colorScheme.onPrimary
+                      : null,
+                  onPressed: () => setState(() {
+                    modeNavigation = !modeNavigation;
+                    statut = modeNavigation
+                        ? "Mode navigation : faites glisser la page"
+                        : "Mode édition : touchez une ligne";
+                  }),
                   child: Icon(
-                      outilsOuverts ? Icons.close : Icons.more_horiz),
+                      modeNavigation ? Icons.pan_tool : Icons.touch_app),
+                ),
+                const SizedBox(height: 10),
+                FloatingActionButton(
+                  heroTag: "ajouter",
+                  tooltip: "Ajouter : texte, signature, tampon, dessin…",
+                  onPressed: _occupe ? null : _feuilleAjouter,
+                  child: const Icon(Icons.add),
                 ),
               ],
             ),
