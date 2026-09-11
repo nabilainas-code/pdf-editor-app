@@ -335,6 +335,31 @@ MotDetecte copieDe(MotDetecte m) => MotDetecte(
       decalageSource: m.decalageSource,
     );
 
+/// Ce que le contrôle avant envoi a remarqué, et le geste qui y répond.
+///
+/// Pas de conseil vague : chaque constat dit ce qui a été vu, pourquoi
+/// c'est gênant, et propose l'action qui règle la chose.
+class _Constat {
+  final IconData icone;
+  final String titre;
+  final String detail;
+  final String? actionTitre;
+  final Future<void> Function()? action;
+
+  /// Vrai quand la chose abîmerait le document envoyé, et pas seulement le
+  /// confort de travail.
+  final bool grave;
+
+  const _Constat({
+    required this.icone,
+    required this.titre,
+    required this.detail,
+    this.actionTitre,
+    this.action,
+    this.grave = false,
+  });
+}
+
 class Etat {
   final Uint8List octetsDocument;
   final List<MotDetecte> mots;
@@ -6752,6 +6777,293 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Relit le document et dresse la liste de ce qui mérite un coup d'œil
+  /// avant de l'envoyer.
+  ///
+  /// Tout se passe sur le téléphone : aucune de ces vérifications ne
+  /// demande quoi que ce soit à l'extérieur, et rien ne sort de l'appareil.
+  List<_Constat> _controlerLeDocument() {
+    final constats = <_Constat>[];
+
+    // Ce que l'application a effacé est recouvert, pas retiré : le texte
+    // reste sélectionnable dans un autre lecteur. Sur une attestation, ce
+    // n'est pas un détail.
+    if (historique.isNotEmpty) {
+      constats.add(_Constat(
+        icone: Icons.visibility_off_outlined,
+        titre: "Ce que vous avez effacé est encore dans le fichier",
+        detail: "L'application peint par-dessus, elle n'enlève rien. À "
+            "l'écran la ligne a disparu ; dans le fichier, un autre lecteur "
+            "peut encore la sélectionner et la lire. Exportez une version "
+            "aplatie juste avant de partager.",
+        actionTitre: "Exporter en PDF aplati",
+        action: _exporterAplati,
+        grave: true,
+      ));
+    }
+
+    // Une ligne dont le cadre sort de la page sera coupée à l'impression,
+    // et chez celui qui reçoit le document.
+    final dehors = mots
+        .where((m) =>
+            m.texte.isNotEmpty &&
+            !m.estFlottant &&
+            (m.zone.right > taillePage.width + 1 ||
+                m.zone.left < -1 ||
+                m.zone.bottom > taillePage.height + 1 ||
+                m.zone.top < -1))
+        .toList();
+    if (dehors.isNotEmpty) {
+      constats.add(_Constat(
+        icone: Icons.open_in_full,
+        titre: dehors.length == 1
+            ? "Une ligne sort de la page"
+            : "${dehors.length} lignes sortent de la page",
+        detail: "Ce qui dépasse du bord ne s'imprimera pas, et sera coupé "
+            "chez celui qui reçoit le document.",
+        actionTitre: "Me montrer la première",
+        action: () async {
+          setState(() {
+            selection
+              ..clear()
+              ..add(dehors.first);
+            statut = "Ligne qui sort de la page";
+          });
+          _amenerEnVue(dehors.first.zone);
+        },
+        grave: true,
+      ));
+    }
+
+    // Un caractère que la police ne sait pas écrire disparaît au moment de
+    // redessiner la ligne. Mieux vaut le savoir avant d'y toucher qu'après.
+    final perdus = <MotDetecte>[];
+    for (final m in mots) {
+      if (m.texte.isEmpty || m.estFlottant) continue;
+      final police = _dessinTexte(m, m.zone).police;
+      if (_texteSelonPolice(police, m.texte) != m.texte) perdus.add(m);
+    }
+    if (perdus.isNotEmpty) {
+      constats.add(_Constat(
+        icone: Icons.warning_amber_rounded,
+        titre: perdus.length == 1
+            ? "Une ligne contient un signe que sa police ne sait pas écrire"
+            : "${perdus.length} lignes contiennent un signe que leur police "
+                "ne sait pas écrire",
+        detail: "Tant que vous n'y touchez pas, elles sont intactes. Mais si "
+            "vous les modifiez, ces signes disparaîtront. Changez leur "
+            "police dans « Aa Style » avant de les retoucher.",
+        actionTitre: "Me montrer la première",
+        action: () async {
+          setState(() {
+            selection
+              ..clear()
+              ..add(perdus.first);
+            statut = "Ligne au signe non écrivable";
+          });
+          _amenerEnVue(perdus.first.zone);
+        },
+        grave: true,
+      ));
+    }
+
+    // Un cadre vide ne s'imprime pas, mais il se met sous le doigt.
+    final vides =
+        mots.where((m) => m.texte.isEmpty && !m.estFlottant).length;
+    if (vides > 0) {
+      constats.add(_Constat(
+        icone: Icons.crop_free,
+        titre: vides == 1
+            ? "Un cadre vide est resté sur la page"
+            : "$vides cadres vides sont restés sur la page",
+        detail: "Ils ne sont pas dans le fichier et ne s'impriment pas. Ils "
+            "se mettent seulement sous le doigt et gênent la suite du "
+            "travail.",
+        actionTitre: "Les retirer",
+        action: () async {
+          _nettoyerReperesVides();
+        },
+      ));
+    }
+
+    // Une signature posée n'entre dans le fichier qu'à l'enregistrement :
+    // la voir à l'écran ne suffit pas à la croire enregistrée.
+    final flottants = mots.where((m) => m.estFlottant).length;
+    if (flottants > 0) {
+      constats.add(_Constat(
+        icone: Icons.draw_outlined,
+        titre: flottants == 1
+            ? "Une signature ou un tampon flotte au-dessus de la page"
+            : "$flottants éléments flottent au-dessus de la page",
+        detail: "Ils entrent dans le fichier au moment de l'enregistrement, "
+            "pas avant. Tant que vous n'avez pas enregistré, ils n'existent "
+            "que dans l'application.",
+      ));
+    }
+
+    // Le contrôle ne parle que des pages qu'il a lues : le dire plutôt que
+    // de laisser croire qu'il a tout vu.
+    if (nbPages > 1) {
+      final jamais = <int>[];
+      for (var i = 0; i < nbPages; i++) {
+        if (!pagesAnalysees.contains(i)) jamais.add(i + 1);
+      }
+      if (jamais.isNotEmpty) {
+        constats.add(_Constat(
+          icone: Icons.auto_stories_outlined,
+          titre: jamais.length == 1
+              ? "La page ${jamais.first} n'a pas été ouverte"
+              : "${jamais.length} pages n'ont pas été ouvertes",
+          detail: "Elles sont bien dans le document et seront enregistrées "
+              "telles quelles. Ce contrôle ne peut rien en dire : "
+              "page${jamais.length > 1 ? 's' : ''} ${jamais.join(', ')}.",
+        ));
+      }
+    }
+
+    return constats;
+  }
+
+  /// Montre le résultat du contrôle : ce qui a été remarqué, et le geste
+  /// qui y répond.
+  Future<void> _verifierAvantEnvoi() async {
+    if (document == null || _occupe) return;
+    await _refermerLesModes();
+    if (!mounted) return;
+    final constats = _controlerLeDocument();
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.82,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 16, 16, 2),
+                child: Row(
+                  children: [
+                    Icon(Icons.fact_check_outlined),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        "Vérification avant envoi",
+                        style: TextStyle(
+                            fontSize: 17, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 2, 16, 12),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    "Tout est contrôlé sur votre téléphone. Votre document "
+                    "ne part nulle part, ni maintenant ni jamais.",
+                    style: TextStyle(fontSize: 12.5, height: 1.3),
+                  ),
+                ),
+              ),
+              const Divider(height: 1),
+              if (constats.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(30),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.check_circle_outline, size: 46),
+                      SizedBox(height: 14),
+                      Text("Rien à signaler",
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600)),
+                      SizedBox(height: 6),
+                      Text(
+                        "Le document est prêt à être enregistré et partagé.",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 13, height: 1.3),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.only(bottom: 8),
+                    itemCount: constats.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (c, i) {
+                      final constat = constats[i];
+                      return Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              constat.icone,
+                              size: 22,
+                              color: constat.grave
+                                  ? Theme.of(c).colorScheme.error
+                                  : Theme.of(c).colorScheme.primary,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    constat.titre,
+                                    style: const TextStyle(
+                                        fontSize: 14.5,
+                                        fontWeight: FontWeight.w600,
+                                        height: 1.25),
+                                  ),
+                                  const SizedBox(height: 5),
+                                  Text(
+                                    constat.detail,
+                                    style: TextStyle(
+                                      fontSize: 12.5,
+                                      height: 1.35,
+                                      color: Theme.of(c)
+                                          .colorScheme
+                                          .onSurfaceVariant,
+                                    ),
+                                  ),
+                                  if (constat.actionTitre != null)
+                                    Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: TextButton(
+                                        onPressed: () {
+                                          Navigator.pop(ctx);
+                                          constat.action?.call();
+                                        },
+                                        child: Text(constat.actionTitre!),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              const SizedBox(height: 6),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   /// Referme tout mode en cours avant d'en ouvrir un autre.
   ///
   /// Le cadre à détacher, l'écriture sur une ligne, l'ajout de texte, le
@@ -7697,6 +8009,9 @@ class _AccueilState extends State<Accueil> {
           case "image":
             _exporterImage();
             break;
+          case "verifier":
+            _verifierAvantEnvoi();
+            break;
           case "aplati":
             _exporterAplati();
             break;
@@ -7766,6 +8081,16 @@ class _AccueilState extends State<Accueil> {
                 : "Passer en sombre"),
           ),
         ),
+        if (document != null)
+          const PopupMenuItem(
+            value: "verifier",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.fact_check_outlined),
+              title: Text("Vérifier avant d'envoyer"),
+              subtitle: Text("Sur le téléphone, rien ne part ailleurs"),
+            ),
+          ),
         if (document != null)
           const PopupMenuItem(
             value: "aplati",
