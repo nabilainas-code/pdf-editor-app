@@ -4655,6 +4655,9 @@ class _AccueilState extends State<Accueil> {
   /// gras le recolle.
   void _recollerVoisines(PdfPage page, MotDetecte mot) {
     if (mot.texte.isEmpty || mot.estFlottant || mot.boiteLibre) return;
+    // Recoller une ligne qui n'est plus dans la page reviendrait à réécrire
+    // son texte dans celle qui l'a déjà absorbée.
+    if (!mots.any((m) => identical(m, mot))) return;
     var courant = mot;
     var encore = true;
     while (encore) {
@@ -4678,6 +4681,20 @@ class _AccueilState extends State<Accueil> {
 
         final gauche = voisinAvant ? voisin : courant;
         final droite = voisinAvant ? courant : voisin;
+
+        // Deux garde-fous, pour que jamais plus une ligne ne puisse
+        // grossir sans fin en avalant ses voisines :
+        //
+        // — la ligne recollée reste dans la page. Une jonction qui la
+        //   ferait déborder n'est pas une jonction, c'est un emballement ;
+        // — on ne recolle pas un texte déjà présent dans la ligne. Le voir
+        //   deux fois est le signe qu'on rajoute un morceau déjà absorbé.
+        if (droite.zone.right > taillePage.width + 2) continue;
+        if (droite.texte.length >= 12 &&
+            gauche.texte.contains(droite.texte)) {
+          continue;
+        }
+
         _effacerRect(page, _rectEffacement(gauche), gauche);
         _effacerRect(page, _rectEffacement(droite), droite);
         gauche.texte = gauche.texte + droite.texte;
@@ -4848,6 +4865,10 @@ class _AccueilState extends State<Accueil> {
     // refaire celle-ci, sans quoi on verrait la page 4 avec les cadres de
     // la page 1.
     if (changeDePage) await _rafraichirApercuOcr(doc);
+    // Les lignes viennent d'être recréées : les résultats de recherche
+    // désignaient les anciennes, qui n'existent plus. On refait le relevé
+    // plutôt que de garder une liste qui ne mène nulle part.
+    if (panneauRecherche && mounted) _chercher();
   }
 
   Future<void> _annuler() async {
@@ -5431,6 +5452,13 @@ class _AccueilState extends State<Accueil> {
 
     final doc = document;
     if (doc == null || _occupe) return;
+    // Cette ligne est-elle encore une ligne de la page ? Une ligne recollée
+    // à sa voisine, ou supprimée, n'y est plus : elle reste pourtant
+    // référencée par la sélection et par les résultats de recherche. La
+    // modifier quand même la réécrivait dans la page, et son texte venait
+    // s'ajouter à celui de la ligne qui l'avait absorbée — d'où une ligne
+    // qui se répétait dix fois, en tout petit, jusqu'à déborder de la page.
+    if (!mots.any((m) => identical(m, mot))) return;
     setState(() => _occupe = true);
     final avant = await _etatActuel(doc);
     try {
@@ -6149,6 +6177,10 @@ class _AccueilState extends State<Accueil> {
     var faits = 0;
     for (final ligne in aTraiter) {
       if (!mounted) break;
+      // La liste a été dressée avant la première modification. Entre-temps,
+      // une ligne a pu être recollée à sa voisine et quitter la page : la
+      // traiter quand même réécrivait son texte une seconde fois.
+      if (!mots.any((m) => identical(m, ligne))) continue;
       final nouveau =
           _texteRemplace(ligne.texte, terme, _champRemplacement.text);
       if (nouveau == ligne.texte) continue;
