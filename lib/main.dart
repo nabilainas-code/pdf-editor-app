@@ -3799,6 +3799,32 @@ class _AccueilState extends State<Accueil> {
     return mot.zone.right;
   }
 
+  /// La puce ou le tiret posé juste à gauche d'une ligne, séparé d'elle
+  /// par un blanc.
+  ///
+  /// Depuis que les blancs séparent les cellules, ce tiret forme une
+  /// cellule à part entière : supprimer la ligne sans lui laissait un tiret
+  /// orphelin au milieu du vide.
+  MotDetecte? _puceDe(MotDetecte mot) {
+    if (mot.texte.isEmpty || mot.estFlottant || mot.boiteLibre) return null;
+    MotDetecte? plusProche;
+    for (final m in _rangeeDe(mot)) {
+      if (identical(m, mot) || m.estFlottant || m.boiteLibre) continue;
+      if (m.zone.right > mot.zone.left) continue;
+      // Une puce est juste devant sa ligne, pas à l'autre bout de la page.
+      if (mot.zone.left - m.zone.right > 40) continue;
+      final t = m.texte.trim();
+      // Un ou deux signes, sans lettre ni chiffre : un tiret, un point, un
+      // rond. Un mot n'est pas une puce.
+      if (t.isEmpty || t.length > 2) continue;
+      if (RegExp(r'[A-Za-z0-9À-ÿ]').hasMatch(t)) continue;
+      if (plusProche == null || m.zone.right > plusProche.zone.right) {
+        plusProche = m;
+      }
+    }
+    return plusProche;
+  }
+
   /// Bord droit de la cellule voisine à gauche, sur la même rangée : la
   /// limite que la cellule ne doit pas franchir en s'allongeant.
   double? _bordVoisineAGauche(MotDetecte mot) {
@@ -6295,14 +6321,41 @@ class _AccueilState extends State<Accueil> {
   /// toucher — les deux étaient trop proches pour n'en avoir qu'une.
   Future<void> _supprimerLeCadre(MotDetecte cadre) async {
     if (_occupe) return;
-    await _effacerZone(cadre);
+    // Les lignes que le cadre recouvre s'en vont avec lui. Les laisser dans
+    // la liste revenait à les garder invisibles mais vivantes : leur cadre
+    // restait sous le doigt, et la première modification venue les
+    // redessinait au milieu de la zone blanchie. On ne prend que ce qui est
+    // franchement dedans — une ligne effleurée par le bord du cadre reste.
+    final zone = cadre.zone;
+    final couvertes = mots.where((m) {
+      if (identical(m, cadre) || m.estFlottant || m.texte.isEmpty) {
+        return false;
+      }
+      final commun = m.zone.intersect(zone);
+      if (commun.width <= 0 || commun.height <= 0) return false;
+      final aire = m.zone.width * m.zone.height;
+      if (aire <= 0) return false;
+      return (commun.width * commun.height) / aire > 0.6;
+    }).toList();
+
+    final efface = await _effacerZone(cadre);
     if (!mounted) return;
     setState(() {
-      mots = mots.where((m) => m != cadre).toList();
+      mots = mots
+          .where((m) =>
+              !identical(m, cadre) &&
+              (!efface || !couvertes.any((c) => identical(c, m))))
+          .toList();
+      if (efface) selection.removeAll(couvertes);
       selection.remove(cadre);
       if (cadreTampon == cadre) {
         cadreTampon = null;
         modeTampon = false;
+      }
+      if (efface && couvertes.isNotEmpty) {
+        statut = couvertes.length == 1
+            ? "Ligne supprimée"
+            : "${couvertes.length} lignes supprimées";
       }
     });
   }
@@ -6901,9 +6954,13 @@ class _AccueilState extends State<Accueil> {
   /// paragraphes d'un coup — sans rien demander, et il n'y paraissait plus
   /// qu'un grand blanc. Au-delà d'une zone de la taille de quelques lignes,
   /// on demande donc confirmation.
-  Future<void> _effacerZone(MotDetecte mot) async {
+  /// Recouvre de papier tout ce que le cadre entoure. Renvoie vrai si
+  /// l'effacement a bien eu lieu : sur un grand cadre une confirmation est
+  /// demandée, et l'appelant doit savoir qu'elle a été refusée plutôt que
+  /// de retirer des lignes qui sont toujours là.
+  Future<bool> _effacerZone(MotDetecte mot) async {
     final doc = document;
-    if (doc == null || _occupe) return;
+    if (doc == null || _occupe) return false;
 
     // Une signature n'est pas écrite dans la page : la gomme n'effacerait
     // que le document en dessous, ce que personne ne demande en visant une
@@ -6911,7 +6968,7 @@ class _AccueilState extends State<Accueil> {
     if (mot.estFlottant) {
       setState(() => statut =
           "La gomme efface la page, pas cet objet — utilisez la corbeille");
-      return;
+      return false;
     }
 
     final zone = _rectEffacement(mot);
@@ -6919,7 +6976,7 @@ class _AccueilState extends State<Accueil> {
         ? 0.0
         : (zone.width * zone.height) /
             (taillePage.width * taillePage.height);
-    if (partPage > 0.03) {
+    if (partPage > 0.06) {
       final confirme = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -6942,7 +6999,7 @@ class _AccueilState extends State<Accueil> {
           ],
         ),
       );
-      if (confirme != true) return;
+      if (confirme != true) return false;
     }
 
     setState(() => _occupe = true);
@@ -6962,6 +7019,7 @@ class _AccueilState extends State<Accueil> {
       if (imageDeFond != null) {
         await _rafraichirApercuOcr(doc);
       }
+      return true;
     } finally {
       setState(() => _occupe = false);
     }
@@ -7320,11 +7378,16 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[pageActive];
+      final puce = _puceDe(mot);
       _effacerRect(page, _rectEffacement(mot), mot);
+      if (puce != null) _effacerRect(page, _rectEffacement(puce), puce);
 
       setState(() {
-        mots = mots.where((m) => m != mot).toList();
+        mots = mots
+            .where((m) => !identical(m, mot) && !identical(m, puce))
+            .toList();
         selection.remove(mot);
+        if (puce != null) selection.remove(puce);
         statut = "Supprimé";
       });
 
@@ -7769,7 +7832,18 @@ class _AccueilState extends State<Accueil> {
       futur.clear();
 
       final page = doc.pages[pageActive];
+      // Les puces des lignes choisies partent avec elles.
+      final puces = <MotDetecte>[];
       for (final mot in choisis) {
+        if (mot.estFlottant || mot.texte.isEmpty) continue;
+        final puce = _puceDe(mot);
+        if (puce == null) continue;
+        if (choisis.any((m) => identical(m, puce))) continue;
+        if (puces.any((m) => identical(m, puce))) continue;
+        puces.add(puce);
+      }
+
+      for (final mot in [...choisis, ...puces]) {
         // Une signature n'est pas écrite dans la page tant qu'on n'a pas
         // enregistré, et un cadre vide n'a rien sous lui : dans les deux
         // cas il n'y a rien à effacer, seulement un cadre à retirer.
@@ -7779,7 +7853,11 @@ class _AccueilState extends State<Accueil> {
       }
 
       setState(() {
-        mots = mots.where((m) => !choisis.contains(m)).toList();
+        mots = mots
+            .where((m) =>
+                !choisis.any((c) => identical(c, m)) &&
+                !puces.any((p) => identical(p, m)))
+            .toList();
         selection.clear();
         statut = "${choisis.length} éléments supprimés";
       });
