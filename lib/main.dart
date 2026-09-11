@@ -1495,7 +1495,7 @@ class _AccueilState extends State<Accueil> {
     if (!mounted) return;
     setState(() {
       imageDeFond = png;
-      imageDecodee = decodee;
+      imageDecodee = decodee == null ? null : _surFondBlanc(decodee);
       echelleOcr = dpi / 72.0;
     });
   }
@@ -3381,7 +3381,13 @@ class _AccueilState extends State<Accueil> {
         }
       }
 
-      final imageAnalysee = img.decodePng(pngOctets);
+      final rendu = img.decodePng(pngOctets);
+      // Aplatie sur du papier blanc une fois pour toutes : beaucoup de PDF
+      // ne peignent pas leur fond, et ce qui n'est pas encre y arrive
+      // transparent. Lu tel quel, le transparent passe pour du noir — toute
+      // la page aurait été prise pour de l'encre, chaque ligne déclarée en
+      // gras et l'encre relevée noire partout.
+      final imageAnalysee = rendu == null ? null : _surFondBlanc(rendu);
       if (imageAnalysee != null) {
         // La couleur d'encre a besoin de l'image et de son échelle : on les
         // pose avant de parcourir les mots.
@@ -3455,7 +3461,7 @@ class _AccueilState extends State<Accueil> {
       if (!mounted) return;
       setState(() {
         imageDeFond = pngOctets;
-        imageDecodee = nouvelle;
+        imageDecodee = nouvelle == null ? null : _surFondBlanc(nouvelle);
         echelleOcr = dpi / 72.0;
       });
     } catch (e) {
@@ -4458,7 +4464,9 @@ class _AccueilState extends State<Accueil> {
               decalageSource: m.decalageSource))
           .toList();
       imageDeFond = etat.image;
-      imageDecodee = etat.image != null ? img.decodePng(etat.image!) : null;
+      final reprise =
+          etat.image != null ? img.decodePng(etat.image!) : null;
+      imageDecodee = reprise == null ? null : _surFondBlanc(reprise);
       echelleOcr = etat.echelleImage;
       selection.clear();
       // Le document vient d'être rechargé : les champs lus dans l'ancien
@@ -4568,7 +4576,8 @@ class _AccueilState extends State<Accueil> {
       setState(() {
         document = nouveauDoc;
         imageDeFond = pngOctets;
-        imageDecodee = img.decodePng(pngOctets);
+        final rendue = img.decodePng(pngOctets);
+        imageDecodee = rendue == null ? null : _surFondBlanc(rendue);
         echelleOcr = dpi / 72.0;
         mots = mots.where((m) => !m.estFlottant).toList();
         selection.removeWhere((m) => m.estFlottant);
@@ -6736,10 +6745,19 @@ class _AccueilState extends State<Accueil> {
                           boundaryMargin: const EdgeInsets.all(double.infinity),
                           minScale: 0.5,
                           maxScale: 8,
-                          child: SizedBox(
+                          child: Container(
                             width: constraints.maxWidth,
                             height: taillePage.height * echelle,
-                            child: Image.memory(apercuLecture!, fit: BoxFit.fill),
+                            // Du papier blanc sous l'image de la page.
+                            // Beaucoup de PDF ne peignent pas leur fond : ce
+                            // qui n'est pas encre y est transparent. Posée
+                            // sans rien dessous, la page prenait donc la
+                            // couleur de l'écran — et en mode sombre, un
+                            // texte noir se retrouvait sur du noir,
+                            // illisible.
+                            color: Colors.white,
+                            child:
+                                Image.memory(apercuLecture!, fit: BoxFit.fill),
                           ),
                         ),
                       );
@@ -7363,10 +7381,17 @@ class _AccueilState extends State<Accueil> {
                                               });
                                             }
                                           },
-                                    child: imageDeFond != null
-                                        ? Image.memory(imageDeFond!,
-                                            fit: BoxFit.fill)
-                                        : Container(color: Colors.white),
+                                    // Toujours du papier blanc dessous :
+                                    // l'image d'une page au fond
+                                    // transparent laisserait sinon passer
+                                    // la couleur de l'écran.
+                                    child: Container(
+                                      color: Colors.white,
+                                      child: imageDeFond == null
+                                          ? null
+                                          : Image.memory(imageDeFond!,
+                                              fit: BoxFit.fill),
+                                    ),
                                   ),
                                 ),
                               // Pendant un collage ou un ajout de texte, les
