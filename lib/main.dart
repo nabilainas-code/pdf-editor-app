@@ -7904,8 +7904,15 @@ class _AccueilState extends State<Accueil> {
                                       // couleur du papier pour masquer le
                                       // texte d'origine pendant la frappe.
                                       ? Container(
-                                          color:
-                                              _couleurPapierEcran(mot.zone),
+                                          // Le fond du champ cache le texte
+                                          // d'origine pendant la frappe. Une
+                                          // zone neuve n'a rien à cacher : un
+                                          // fond lui ferait un rectangle
+                                          // blanc sur une colonne grise ou un
+                                          // bandeau de couleur.
+                                          color: mot.texte.isEmpty
+                                              ? Colors.transparent
+                                              : _couleurPapierEcran(mot.zone),
                                           // Le cadre d'une ligne est souvent
                                           // juste à la hauteur du texte : sans
                                           // ça, le champ (un peu plus haut)
@@ -7936,7 +7943,13 @@ class _AccueilState extends State<Accueil> {
                                                 fontWeight: grasDirect
                                                     ? FontWeight.bold
                                                     : FontWeight.normal,
-                                                color: Colors.black,
+                                                color: mot.couleurTexte == null
+                                                    ? Colors.black
+                                                    : Color.fromARGB(
+                                                        255,
+                                                        mot.couleurTexte!.r,
+                                                        mot.couleurTexte!.g,
+                                                        mot.couleurTexte!.b),
                                               ),
                                               decoration: const InputDecoration(
                                                 isDense: true,
