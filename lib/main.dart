@@ -3708,22 +3708,56 @@ class _AccueilState extends State<Accueil> {
     // centrer ou d'aligner à droite dedans).
     final largeurDispo =
         mot.boiteLibre ? zone.width - 4 : taillePage.width - zone.left - 2;
+
+    // Nombre de lignes que le texte occupera dans la boîte.
+    //
+    // Une zone de texte libre garde une largeur fixe : un texte plus long
+    // que sa largeur était donc rapetissé jusqu'à tenir sur une seule
+    // ligne — et une phrase un peu longue dans une boîte étroite finissait
+    // écrite en quatre points de haut, illisible. On croyait le texte
+    // perdu : il était bien là, mais trop petit pour se voir. Ce qui
+    // s'écrit ici est ce qu'on lit partout ailleurs : le texte garde sa
+    // taille et passe à la ligne, la boîte s'allongeant vers le bas.
+    var lignes = 1;
     if (largeurDispo > 0 && mesure.width > largeurDispo) {
-      var taille = police.size * largeurDispo / mesure.width;
-      if (taille < 4) taille = 4;
-      police = _police(mot, taille);
-      texte = _texteSelonPolice(police, mot.texte);
-      mesure = police.measureString(texte);
+      if (mot.boiteLibre) {
+        lignes = (mesure.width / largeurDispo).ceil();
+        // Une boîte minuscule avec un texte immense donnerait un pavé plus
+        // haut que la page : au-delà, on rapetisse quand même.
+        final maxLignes = ((taillePage.height - zone.top) / mesure.height)
+            .floor()
+            .clamp(1, 60);
+        if (lignes > maxLignes) {
+          lignes = maxLignes;
+          var taille = police.size * largeurDispo * lignes / mesure.width;
+          if (taille < 4) taille = 4;
+          police = _police(mot, taille);
+          texte = _texteSelonPolice(police, mot.texte);
+          mesure = police.measureString(texte);
+        }
+      } else {
+        var taille = police.size * largeurDispo / mesure.width;
+        if (taille < 4) taille = 4;
+        police = _police(mot, taille);
+        texte = _texteSelonPolice(police, mot.texte);
+        mesure = police.measureString(texte);
+      }
     }
 
     final largeur = mot.boiteLibre
         ? zone.width
         : (mesure.width > zone.width ? mesure.width : zone.width) + 2;
-    final hauteur = mesure.height > zone.height ? mesure.height : zone.height;
+    // Un poil d'interligne, sinon les lignes se touchent.
+    final hauteurTexte = mesure.height * lignes * (lignes > 1 ? 1.18 : 1.0);
+    final hauteur =
+        hauteurTexte > zone.height ? hauteurTexte : zone.height;
     return (
       rect: Rect.fromLTWH(
         zone.left,
-        zone.center.dy - hauteur / 2,
+        // Une boîte qui se déroule sur plusieurs lignes grandit vers le
+        // bas, à partir d'où elle a été posée. La centrer la ferait
+        // remonter par-dessus ce qui est écrit au-dessus.
+        lignes > 1 ? zone.top : zone.center.dy - hauteur / 2,
         largeur,
         hauteur,
       ),
@@ -3777,8 +3811,26 @@ class _AccueilState extends State<Accueil> {
         ),
       ),
       textDirection: TextDirection.ltr,
-      maxLines: 1,
-    )..layout();
+      maxLines: mot.boiteLibre ? null : 1,
+    )..layout(
+        maxWidth: mot.boiteLibre
+            ? mot.zone.width * echelle
+            : double.infinity,
+      );
+
+    // Une zone de texte libre garde sa largeur et se déroule vers le bas :
+    // le champ doit montrer la même chose que ce qui sera écrit, sinon on
+    // tape à l'aveugle.
+    if (mot.boiteLibre) {
+      var hauteurLibre = peintre.height / echelle;
+      if (hauteurLibre < mot.zone.height) hauteurLibre = mot.zone.height;
+      return Rect.fromLTWH(
+        mot.zone.left,
+        mot.zone.top,
+        mot.zone.width,
+        hauteurLibre,
+      );
+    }
 
     // Un peu d'air à droite pour le curseur.
     var largeur = peintre.width / echelle + 4;
@@ -6955,7 +7007,11 @@ class _AccueilState extends State<Accueil> {
                                               controller: controleurDirect,
                                               focusNode: focusDirect,
                                               autofocus: true,
-                                              maxLines: 1,
+                                              // Une zone de texte libre se
+                                              // déroule sur plusieurs
+                                              // lignes, comme ce qui sera
+                                              // écrit dans la page.
+                                              maxLines: mot.boiteLibre ? null : 1,
                                               cursorWidth: 2,
                                               cursorColor: _brunSelection,
                                               contextMenuBuilder:
