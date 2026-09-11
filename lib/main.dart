@@ -2750,12 +2750,8 @@ class _AccueilState extends State<Accueil> {
         title: const Text("Exporter une copie aplatie ?"),
         content: const Text(
           "Le texte que vous avez remplacé reste caché dans le fichier "
-          "d'origine : recouvert, mais toujours lisible par un outil.
-
-"
-          "Dans la copie aplatie, il ne restera que ce qui se voit.
-
-"
+          "d'origine : recouvert, mais toujours lisible par un outil.\n\n"
+          "Dans la copie aplatie, il ne restera que ce qui se voit.\n\n"
           "⚠️ En contrepartie, le texte de cette copie ne sera plus "
           "sélectionnable et ne pourra plus être modifié ligne par ligne. "
           "Votre document de travail, lui, n'est pas touché.",
@@ -2784,8 +2780,10 @@ class _AccueilState extends State<Accueil> {
 
       // Toutes les pages, pas seulement celle qu'on édite : n'aplatir que
       // la première aurait fait disparaître les autres de la copie.
+      // PdfPageCollection ne se parcourt pas comme une liste : on l'indexe.
       final tailles = [
-        for (final page in doc.pages) Size(page.size.width, page.size.height)
+        for (var i = 0; i < doc.pages.count; i++)
+          Size(doc.pages[i].size.width, doc.pages[i].size.height)
       ];
 
       aplati = PdfDocument();
