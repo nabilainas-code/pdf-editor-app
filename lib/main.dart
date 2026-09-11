@@ -687,6 +687,13 @@ class _AccueilState extends State<Accueil> {
   /// gardées ensuite.
   final Map<int, Uint8List> vignettes = {};
 
+  /// Les couloirs blancs qui séparent les colonnes, page par page. Repérés
+  /// à l'analyse, ils servent ensuite à ne jamais recoller deux colonnes en
+  /// une seule ligne, et à savoir où s'arrête un paragraphe.
+  final Map<int, List<double>> couloirsParPage = {};
+
+  List<double> get couloirsColonnes => couloirsParPage[pageActive] ?? const [];
+
   /// Vrai quand le document est ouvert pour signer ou annoter seulement :
   /// changer de page n'y lance alors aucune reconnaissance de texte, qui
   /// n'aurait aucune raison d'être.
@@ -3174,6 +3181,7 @@ class _AccueilState extends State<Accueil> {
       motsParPage.clear();
       pagesAnalysees.clear();
       vignettes.clear();
+      couloirsParPage.clear();
       pageActive = 0;
       nbPages = 1;
       // Occupé pendant le rendu : sans ça, l'accueil (qui s'affiche dès
@@ -3294,6 +3302,7 @@ class _AccueilState extends State<Accueil> {
     motsParPage.clear();
     pagesAnalysees.clear();
     vignettes.clear();
+    couloirsParPage.clear();
     imageOrigine = null;
     try {
       final doc = PdfDocument(inputBytes: octets);
@@ -3406,26 +3415,64 @@ class _AccueilState extends State<Accueil> {
           startPageIndex: index, endPageIndex: index);
 
       final page = doc.pages[index];
+
+      // Les couloirs de colonnes se lisent sur tous les mots de la page :
+      // une séparation n'en est une que si le texte ne la traverse nulle
+      // part.
+      final boitesMots = <Rect>[];
+      for (final ligne in lignes) {
+        for (final mot in ligne.wordCollection) {
+          if (mot.text.trim().isEmpty) continue;
+          boitesMots.add(mot.bounds);
+        }
+      }
+      final couloirs = _couloirsVides(boitesMots);
+      couloirsParPage[index] = couloirs;
+
       final trouvesTexte = <MotDetecte>[];
 
       for (final ligne in lignes) {
         if (ligne.text.trim().isEmpty) continue;
-        trouvesTexte.add(MotDetecte(
-          ligne.text,
-          Rect.fromLTWH(
-            ligne.bounds.left,
-            ligne.bounds.top,
-            ligne.bounds.width,
-            ligne.bounds.height,
-          ),
-          gras: ligne.fontStyle.contains(PdfFontStyle.bold),
-          italique: ligne.fontStyle.contains(PdfFontStyle.italic),
-          famille: _familleDepuisNom(ligne.fontName),
-          // Taille réelle indiquée par le document : bien plus fidèle que
-          // celle qu'on déduisait de la hauteur du cadre, qui faisait
-          // changer de taille une ligne au premier passage.
-          tailleManuelle: ligne.fontSize > 0 ? ligne.fontSize : null,
-        ));
+        final gras = ligne.fontStyle.contains(PdfFontStyle.bold);
+        final italique = ligne.fontStyle.contains(PdfFontStyle.italic);
+        final famille = _familleDepuisNom(ligne.fontName);
+        // Taille réelle indiquée par le document : bien plus fidèle que
+        // celle qu'on déduisait de la hauteur du cadre, qui faisait
+        // changer de taille une ligne au premier passage.
+        final taille = ligne.fontSize > 0 ? ligne.fontSize : null;
+
+        // Une ligne qui enjambe deux colonnes, ou qui pose une valeur en
+        // face d'une étiquette, devient deux lignes : corriger l'une ne
+        // réécrit plus l'autre, et la mise en page tient. Une ligne
+        // ordinaire n'est pas touchée — elle garde le texte du document au
+        // caractère près.
+        final morceaux = _couperAuxBlancs(ligne.wordCollection, couloirs);
+        if (morceaux.isEmpty) {
+          trouvesTexte.add(MotDetecte(
+            ligne.text,
+            Rect.fromLTWH(
+              ligne.bounds.left,
+              ligne.bounds.top,
+              ligne.bounds.width,
+              ligne.bounds.height,
+            ),
+            gras: gras,
+            italique: italique,
+            famille: famille,
+            tailleManuelle: taille,
+          ));
+          continue;
+        }
+        for (final morceau in morceaux) {
+          trouvesTexte.add(MotDetecte(
+            morceau.texte,
+            morceau.zone,
+            gras: gras,
+            italique: italique,
+            famille: famille,
+            tailleManuelle: taille,
+          ));
+        }
       }
 
       if (trouvesTexte.isNotEmpty) {
@@ -3436,9 +3483,12 @@ class _AccueilState extends State<Accueil> {
           imageDeFond = null;
           imageDecodee = null;
           selection.clear();
+          final colonnes = couloirs.isEmpty
+              ? ""
+              : ", ${couloirs.length + 1} colonnes";
           statut = nbPages > 1
-              ? "Page ${index + 1} sur $nbPages — ${trouvesTexte.length} ligne(s)"
-              : "${trouvesTexte.length} ligne(s) détectée(s)";
+              ? "Page ${index + 1} sur $nbPages — ${trouvesTexte.length} ligne(s)$colonnes"
+              : "${trouvesTexte.length} ligne(s) détectée(s)$colonnes";
         });
         // Même un document au vrai texte a besoin de l'image de sa page :
         // c'est elle qui dit de quelle couleur est le papier juste à côté
@@ -3483,7 +3533,163 @@ class _AccueilState extends State<Accueil> {
   /// dès qu'on la modifie et qu'elle est redessinée, tout le texte devient
   /// uniformément gras ou non, en plus de s'élargir (le gras est plus
   /// large) et de déborder de son cadre.
-  List<MotDetecte> _fusionnerParRangee(List<MotDetecte> brutes) {
+  /// Les couloirs verticaux que le texte ne traverse jamais : les
+  /// séparations de colonnes de la page.
+  ///
+  /// On projette toutes les boîtes de mots sur l'axe horizontal. Là où
+  /// aucune n'écrit, sur toute la hauteur du texte et sur une largeur
+  /// franche, il y a une séparation. Sans elle, la colonne de gauche et
+  /// celle de droite d'un document sur deux colonnes ne faisaient qu'une
+  /// seule ligne : toucher l'une réécrivait l'autre, et la mise en page
+  /// était détruite au premier mot corrigé.
+  List<double> _couloirsVides(List<Rect> boites) {
+    if (boites.length < 6) return const [];
+    var gaucheMin = double.infinity;
+    var droiteMax = 0.0;
+    for (final b in boites) {
+      if (b.left < gaucheMin) gaucheMin = b.left;
+      if (b.right > droiteMax) droiteMax = b.right;
+    }
+    if (!gaucheMin.isFinite || droiteMax - gaucheMin < 80) return const [];
+
+    final largeur = (droiteMax - gaucheMin).ceil();
+    final occupe = List<bool>.filled(largeur + 1, false);
+    for (final b in boites) {
+      var debut = (b.left - gaucheMin).floor();
+      var fin = (b.right - gaucheMin).ceil();
+      if (debut < 0) debut = 0;
+      if (fin > largeur) fin = largeur;
+      for (var x = debut; x <= fin; x++) {
+        occupe[x] = true;
+      }
+    }
+
+    // Une espace entre deux mots laisse deux ou trois points de blanc : ce
+    // n'est pas une colonne. Une vraie séparation fait plusieurs dizaines
+    // de points, et se retrouve à la même place sur toute la page.
+    final proportionnel = (droiteMax - gaucheMin) * 0.045;
+    final minimum = proportionnel < 16 ? 16.0 : proportionnel;
+
+    final couloirs = <double>[];
+    var debut = -1;
+    for (var x = 0; x <= largeur; x++) {
+      if (!occupe[x]) {
+        if (debut < 0) debut = x;
+        continue;
+      }
+      // Un blanc n'est refermé — donc retenu — que s'il a du texte des deux
+      // côtés : le blanc qui finit la page est une marge, pas un couloir.
+      if (debut >= 0) {
+        if (x - debut >= minimum) couloirs.add(gaucheMin + (debut + x) / 2);
+        debut = -1;
+      }
+    }
+    return couloirs;
+  }
+
+  /// Coupe une suite de mots là où le document laisse un vrai blanc :
+  /// un couloir de colonne, ou un écart bien plus large qu'une espace.
+  ///
+  /// C'est ce qui garde la mise en page quand on corrige un nom : sur
+  /// « certifie que :        Monsieur AINAS Nabil », les deux parties
+  /// restent deux lignes, et réécrire la seconde ne touche pas la
+  /// première. Renvoie une liste vide quand il n'y a rien à couper — la
+  /// ligne est alors gardée telle que le document la donne, au caractère
+  /// près.
+  List<({String texte, Rect zone})> _couperAuxBlancs(
+      List<TextWord> mots, List<double> couloirs) {
+    final utiles = [
+      for (final m in mots)
+        if (m.text.trim().isNotEmpty) m
+    ]..sort((a, b) => a.bounds.left.compareTo(b.bounds.left));
+    if (utiles.length < 2) return [];
+
+    final groupes = <List<TextWord>>[
+      [utiles.first]
+    ];
+    for (var i = 1; i < utiles.length; i++) {
+      final precedent = utiles[i - 1];
+      final courant = utiles[i];
+      final ecart = courant.bounds.left - precedent.bounds.right;
+      final hauteur =
+          courant.bounds.height > 0 ? courant.bounds.height : 10.0;
+      final traverseUnCouloir = couloirs.any(
+          (x) => precedent.bounds.right <= x && courant.bounds.left >= x);
+      if (traverseUnCouloir || (ecart > hauteur * 1.2 && ecart > 10)) {
+        groupes.add([courant]);
+      } else {
+        groupes.last.add(courant);
+      }
+    }
+    if (groupes.length < 2) return [];
+    // Une ligne ordinaire ne se découpe pas en six. Au-delà, ce ne sont pas
+    // des colonnes : ce sont des positions de mots que le document donne
+    // mal, et mieux vaut alors ne rien changer à la ligne.
+    if (groupes.length > 6) return [];
+
+    return [
+      for (final groupe in groupes)
+        (
+          texte: groupe.map((m) => m.text).join(' '),
+          zone: Rect.fromLTRB(
+            groupe.map((m) => m.bounds.left).reduce((a, b) => a < b ? a : b),
+            groupe.map((m) => m.bounds.top).reduce((a, b) => a < b ? a : b),
+            groupe.map((m) => m.bounds.right).reduce((a, b) => a > b ? a : b),
+            groupe
+                .map((m) => m.bounds.bottom)
+                .reduce((a, b) => a > b ? a : b),
+          ),
+        ),
+    ];
+  }
+
+  /// Les lignes du même paragraphe que [mot] : celles qui la suivent ou la
+  /// précèdent immédiatement, dans la même colonne, à un interligne normal.
+  /// Un titre isolé, la colonne d'en face ou la ligne d'après un blanc n'en
+  /// font pas partie.
+  List<MotDetecte> _paragrapheDe(MotDetecte mot) {
+    if (mot.texte.isEmpty || mot.estFlottant || mot.boiteLibre) return [mot];
+    final candidates = mots
+        .where((m) => m.texte.isNotEmpty && !m.estFlottant && !m.boiteLibre)
+        .toList()
+      ..sort((a, b) => a.zone.top.compareTo(b.zone.top));
+    final index = candidates.indexWhere((m) => identical(m, mot));
+    if (index < 0) return [mot];
+
+    final couloirs = couloirsColonnes;
+
+    bool suite(MotDetecte a, MotDetecte b) {
+      final hauteur = a.zone.height > 0 ? a.zone.height : 10.0;
+      final ecart = b.zone.top - a.zone.bottom;
+      // Au-delà d'un interligne et demi, c'est un autre bloc.
+      if (ecart > hauteur * 1.6 || ecart < -hauteur) return false;
+      // Jamais par-dessus un couloir de colonne.
+      final traverse = couloirs.any((x) =>
+          (a.zone.right <= x && b.zone.left >= x) ||
+          (b.zone.right <= x && a.zone.left >= x));
+      if (traverse) return false;
+      // Les deux lignes doivent se recouvrir horizontalement : une valeur
+      // posée en face d'une étiquette n'est pas la suite de celle-ci.
+      final gauche = a.zone.left > b.zone.left ? a.zone.left : b.zone.left;
+      final droite =
+          a.zone.right < b.zone.right ? a.zone.right : b.zone.right;
+      return droite - gauche > 0;
+    }
+
+    final bloc = <MotDetecte>[mot];
+    for (var i = index; i > 0; i--) {
+      if (!suite(candidates[i - 1], candidates[i])) break;
+      bloc.insert(0, candidates[i - 1]);
+    }
+    for (var i = index; i < candidates.length - 1; i++) {
+      if (!suite(candidates[i], candidates[i + 1])) break;
+      bloc.add(candidates[i + 1]);
+    }
+    return bloc;
+  }
+
+  List<MotDetecte> _fusionnerParRangee(
+      List<MotDetecte> brutes, List<double> couloirs) {
     if (brutes.isEmpty) return brutes;
     final triees = [...brutes]..sort((a, b) => a.zone.top.compareTo(b.zone.top));
     final rangees = <List<MotDetecte>>[];
@@ -3550,7 +3756,19 @@ class _AccueilState extends State<Accueil> {
         // que de former un cadre minuscule à lui tout seul.
         final tropCourt = mot.texte.trim().length <= 2 ||
             (courant != null && courant.texte.trim().length <= 2);
+        // Un vrai blanc sépare deux lignes, quoi qu'il arrive : un couloir
+        // de colonne, ou un écart plus large qu'une espace ne saurait
+        // l'être. C'est ce qui empêche la colonne de gauche et celle de
+        // droite de ne faire qu'une seule ligne.
+        var separe = false;
+        if (courant != null) {
+          final finCourant = courant.zone.right;
+          final hauteur = mot.zone.height > 0 ? mot.zone.height : 10.0;
+          separe = (mot.zone.left - finCourant) > hauteur * 1.2 ||
+              couloirs.any((x) => finCourant <= x && mot.zone.left >= x);
+        }
         if (courant != null &&
+            !separe &&
             (courant.gras == mot.gras || colles || tropCourt)) {
           final gauche =
               courant.zone.left < mot.zone.left ? courant.zone.left : mot.zone.left;
@@ -3685,7 +3903,9 @@ class _AccueilState extends State<Accueil> {
           mot.couleurTexte = _couleurEncre(mot.zone);
         }
       }
-      final fusionnees = _fusionnerParRangee(brutes);
+      final couloirs = _couloirsVides([for (final m in brutes) m.zone]);
+      couloirsParPage[pageActive] = couloirs;
+      final fusionnees = _fusionnerParRangee(brutes, couloirs);
       // Calibre chaque ligne sur la largeur de son cadre, tant que son texte
       // est encore celui d'origine : c'est le seul moment où la
       // correspondance texte ↔ cadre est garantie.
@@ -3702,9 +3922,11 @@ class _AccueilState extends State<Accueil> {
         imageDecodee = imageAnalysee;
         echelleOcr = echelle;
         selection.clear();
+        final colonnes =
+            couloirs.isEmpty ? "" : ", ${couloirs.length + 1} colonnes";
         statut = nbPages > 1
-            ? "Page ${pageActive + 1} sur $nbPages — ${fusionnees.length} ligne(s) (texte reconnu)"
-            : "${fusionnees.length} ligne(s) détectée(s) (OCR)";
+            ? "Page ${pageActive + 1} sur $nbPages — ${fusionnees.length} ligne(s)$colonnes (texte reconnu)"
+            : "${fusionnees.length} ligne(s) détectée(s)$colonnes (OCR)";
       });
     } catch (_) {
       // Remontée à l'appelant, qui remet le document en lecture plutôt que
@@ -7205,6 +7427,7 @@ class _AccueilState extends State<Accueil> {
       motsParPage.clear();
       pagesAnalysees.clear();
       vignettes.clear();
+      couloirsParPage.clear();
       pageActive = 0;
       nbPages = 1;
       modeAnnotationSeule = false;
@@ -7426,6 +7649,7 @@ class _AccueilState extends State<Accueil> {
   /// principale courte.
   Future<void> _plusDActions(MotDetecte mot) async {
     final estSignature = mot.estFlottant;
+    final paragraphe = _paragrapheDe(mot);
     await showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -7455,6 +7679,28 @@ class _AccueilState extends State<Accueil> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _dupliquerSignature(mot);
+                },
+              ),
+            // Un paragraphe se prend d'un seul geste : quatre lignes
+            // serrées les unes sous les autres sont une idée, pas quatre.
+            // On les déplace, on les supprime ou on les habille ensemble,
+            // au lieu de refaire quatre fois le même geste.
+            if (!estSignature && paragraphe.length > 1)
+              ListTile(
+                leading: const Icon(Icons.notes),
+                title: Text("Prendre tout le paragraphe "
+                    "(${paragraphe.length} lignes)"),
+                subtitle: const Text(
+                    "Pour le déplacer, le supprimer ou l'habiller d'un coup"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() {
+                    selection
+                      ..clear()
+                      ..addAll(paragraphe);
+                    statut = "Paragraphe de ${paragraphe.length} lignes "
+                        "sélectionné";
+                  });
                 },
               ),
             if (mot.texte.isNotEmpty)
