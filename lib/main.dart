@@ -4840,10 +4840,10 @@ class _AccueilState extends State<Accueil> {
             behavior: HitTestBehavior.translucent,
             onPanUpdate: (details) =>
                 setDialogState(() => positionBoite += details.delta),
-            child: const Row(
+            child: Row(
               children: [
-                Icon(Icons.drag_indicator, size: 20),
-                SizedBox(width: 6),
+                const Icon(Icons.drag_indicator, size: 20),
+                const SizedBox(width: 6),
                 Text(mot.texte.isEmpty && mot.boiteLibre
                     ? "Nouveau texte"
                     : "Modifier la ligne"),
