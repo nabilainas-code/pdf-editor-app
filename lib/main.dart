@@ -780,11 +780,16 @@ class _AccueilState extends State<Accueil> {
   /// quelque chose de nouveau.
   String? _dejaColle;
 
+  /// Ce que le bouton a déjà proposé. Il se montre une fois par contenu
+  /// copié, puis se tait : le revoir à chaque ligne qu'on vient écrire
+  /// était une gêne. Coller autre chose le fait revenir.
+  String? _dejaPropose;
+
   void _montrerColler() {
     if (!presseCollable) return;
     _minuteurColler?.cancel();
     if (!collerVisible) setState(() => collerVisible = true);
-    _minuteurColler = Timer(const Duration(seconds: 4), () {
+    _minuteurColler = Timer(const Duration(seconds: 3), () {
       if (mounted && collerVisible) setState(() => collerVisible = false);
     });
   }
@@ -1045,9 +1050,10 @@ class _AccueilState extends State<Accueil> {
   /// bouton soit déjà là quand le doigt arrive dessus.
   Future<void> _releverPressePapier() async {
     var collable = false;
+    String texte = '';
     try {
       final donnees = await Clipboard.getData(Clipboard.kTextPlain);
-      final texte = donnees?.text ?? '';
+      texte = donnees?.text ?? '';
       collable = texte.isNotEmpty && texte != _dejaColle;
     } catch (_) {
       // Certaines versions d'Android refusent la question : on retombe
@@ -1058,9 +1064,14 @@ class _AccueilState extends State<Accueil> {
     if (collable != presseCollable) {
       setState(() => presseCollable = collable);
     }
-    // Montré au moment où l'on arrive sur la ligne, le temps de s'en
-    // servir ; ensuite il s'efface et laisse le texte tranquille.
-    if (collable) _montrerColler();
+    // Montré une fois par contenu copié, au moment où l'on arrive sur une
+    // ligne, le temps de s'en servir ; ensuite il s'efface et ne revient
+    // pas tant qu'on n'a pas copié autre chose. Le long appui dans la
+    // ligne offre toujours « Coller », comme partout sur le téléphone.
+    if (collable && texte != _dejaPropose) {
+      _dejaPropose = texte;
+      _montrerColler();
+    }
   }
 
   /// Actions de texte pendant l'écriture sur une ligne : tout sélectionner,
@@ -7894,10 +7905,7 @@ class _AccueilState extends State<Accueil> {
                                                 _cacherColler();
                                                 setState(() {});
                                               },
-                                              // Un appui dans la ligne le
-                                              // rappelle, là où le doigt
-                                              // vient de se poser.
-                                              onTap: _montrerColler,
+                                              onTap: _cacherColler,
                                               // Entrée = ligne suivante, comme
                                               // dans un traitement de texte ;
                                               // le ✓ de la barre termine.
