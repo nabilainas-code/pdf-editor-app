@@ -2726,6 +2726,113 @@ class _AccueilState extends State<Accueil> {
   /// partage. Un PDF ne se glisse pas dans une conversation aussi
   /// facilement qu'une photo : pour envoyer une attestation par message,
   /// c'est souvent l'image qu'on attend.
+  /// Exporte une copie aplatie : chaque page est rendue en image, puis
+  /// posée seule dans un nouveau PDF.
+  ///
+  /// Recouvrir n'est pas effacer. Quand une ligne est modifiée, l'ancienne
+  /// est couverte d'un morceau de papier, mais elle reste dans le fichier :
+  /// invisible à l'œil, et pourtant toujours lisible par qui sélectionne le
+  /// texte ou analyse le document. Sur une annotation, c'est sans
+  /// conséquence ; sur une attestation qu'on envoie à quelqu'un, ça n'est
+  /// pas acceptable.
+  ///
+  /// Ici il ne reste que ce qui se voit. Le prix est assumé et annoncé : le
+  /// texte n'est plus sélectionnable, et cette copie ne se remodifie plus
+  /// ligne par ligne. C'est une copie — le document de travail, lui, n'est
+  /// pas touché.
+  Future<void> _exporterAplati() async {
+    final doc = document;
+    if (doc == null || enregistrementEnCours) return;
+
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Exporter une copie aplatie ?"),
+        content: const Text(
+          "Le texte que vous avez remplacé reste caché dans le fichier "
+          "d'origine : recouvert, mais toujours lisible par un outil.
+
+"
+          "Dans la copie aplatie, il ne restera que ce qui se voit.
+
+"
+          "⚠️ En contrepartie, le texte de cette copie ne sera plus "
+          "sélectionnable et ne pourra plus être modifié ligne par ligne. "
+          "Votre document de travail, lui, n'est pas touché.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Exporter la copie"),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true || !mounted) return;
+
+    setState(() {
+      enregistrementEnCours = true;
+      statut = "Aplatissement en cours...";
+    });
+    PdfDocument? aplati;
+    try {
+      final octets = Uint8List.fromList(await _octetsAvecSignatures(doc));
+
+      // Toutes les pages, pas seulement celle qu'on édite : n'aplatir que
+      // la première aurait fait disparaître les autres de la copie.
+      final tailles = [
+        for (final page in doc.pages) Size(page.size.width, page.size.height)
+      ];
+
+      aplati = PdfDocument();
+      aplati.pageSettings.margins.all = 0;
+      var index = 0;
+      await for (final rendu in Printing.raster(octets, dpi: 200)) {
+        final png = await rendu.toPng();
+        final taille =
+            index < tailles.length ? tailles[index] : tailles.last;
+        aplati.pageSettings.size = taille;
+        final page = aplati.pages.add();
+        page.graphics.drawImage(
+          PdfBitmap(png),
+          Rect.fromLTWH(0, 0, taille.width, taille.height),
+        );
+        index++;
+      }
+      if (index == 0) throw Exception("aucune page rendue");
+
+      final resultat = await aplati.save();
+      final dossier = await getTemporaryDirectory();
+      final fichier = File('${dossier.path}/pdf_aplati_'
+          '${DateTime.now().millisecondsSinceEpoch}.pdf');
+      await fichier.writeAsBytes(resultat, flush: true);
+      await Share.shareXFiles([XFile(fichier.path)],
+          text: "PDF aplati (rien ne reste dessous)");
+      if (mounted) {
+        setState(() => statut =
+            "Copie aplatie créée — le document ouvert n'a pas changé");
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => statut = "Aplatissement impossible : $e");
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 8),
+            content: Text("Aplatissement impossible : $e\n"
+                "Le document ouvert n'a pas été touché."),
+          ),
+        );
+      }
+    } finally {
+      aplati?.dispose();
+      if (mounted) setState(() => enregistrementEnCours = false);
+    }
+  }
+
   Future<void> _exporterImage() async {
     final doc = document;
     if (doc == null || enregistrementEnCours) return;
@@ -6176,6 +6283,9 @@ class _AccueilState extends State<Accueil> {
           case "image":
             _exporterImage();
             break;
+          case "aplati":
+            _exporterAplati();
+            break;
           case "fermer":
             _fermerDocument();
             break;
@@ -6242,6 +6352,16 @@ class _AccueilState extends State<Accueil> {
                 : "Passer en sombre"),
           ),
         ),
+        if (document != null)
+          const PopupMenuItem(
+            value: "aplati",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.shield_outlined),
+              title: Text("Exporter en PDF aplati et sécurisé"),
+              subtitle: Text("Le texte remplacé ne reste pas dessous"),
+            ),
+          ),
         if (document != null)
           const PopupMenuItem(
             value: "image",
