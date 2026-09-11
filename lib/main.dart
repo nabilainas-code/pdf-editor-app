@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
@@ -821,6 +822,25 @@ class _AccueilState extends State<Accueil> {
   /// Numérote les coupes de ligne, pour savoir quels morceaux sont frères.
   int _prochainMorceau = 1;
 
+  /// Nom du document ouvert, tel que le fichier s'appelait. Sert aux
+  /// récents et à la reprise : « Reprendre attestation.pdf » dit quelque
+  /// chose, « Reprendre » tout court ne dit rien.
+  String nomDocument = "Document";
+
+  /// Sauvegarde automatique : toutes les vingt secondes, si quelque chose a
+  /// changé depuis la dernière, le document de travail est écrit dans le
+  /// dossier de l'application. Fermer l'application, perdre la batterie,
+  /// recevoir un appel — rien ne se perd, et l'accueil propose de
+  /// reprendre là où l'on en était.
+  Timer? _minuteurSauvegarde;
+  int _etapesSauvegardees = 0;
+  bool _sauvegardeEnCours = false;
+
+  /// Ce que l'accueil propose : le travail en cours, s'il y en a un, et les
+  /// derniers documents ouverts.
+  Map<String, dynamic>? travailEnCours;
+  List<Map<String, dynamic>> recents = [];
+
   String? outilTrace;
   final List<Offset> traceEnCours = [];
   double epaisseurStylo = 2;
@@ -993,11 +1013,15 @@ class _AccueilState extends State<Accueil> {
     controleurDirect.addListener(_memoriserSelection);
     _chargerPolices();
     _init();
+    _chargerRecents();
+    _minuteurSauvegarde = Timer.periodic(
+        const Duration(seconds: 20), (_) => _sauvegardeAuto());
   }
 
   @override
   void dispose() {
     _minuteurColler?.cancel();
+    _minuteurSauvegarde?.cancel();
     _champRecherche.dispose();
     _champRemplacement.dispose();
     controleurDirect.removeListener(_memoriserSelection);
@@ -3040,7 +3064,10 @@ class _AccueilState extends State<Accueil> {
       );
       final chemin = resultat?.files.single.path;
       if (chemin == null) return false;
-      await _chargerPourLecture(File(chemin).readAsBytesSync());
+      final octets = File(chemin).readAsBytesSync();
+      nomDocument = resultat?.files.single.name ?? "Document";
+      await _chargerPourLecture(octets);
+      if (octetsDocument != null) _noterRecent(nomDocument, octets);
       return octetsDocument != null;
     } catch (e) {
       if (mounted) {
@@ -3106,6 +3133,7 @@ class _AccueilState extends State<Accueil> {
         apercuLecture = png;
         statut = "Lecture seule — choisissez ce que vous voulez en faire";
       });
+      _etapesSauvegardees = 0;
     } catch (e) {
       setState(() => statut = "Erreur d'ouverture : $e");
     } finally {
@@ -6058,6 +6086,143 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  Future<Directory> _dossierApp() => getApplicationDocumentsDirectory();
+
+  /// Relit à l'ouverture ce que l'accueil doit proposer.
+  Future<void> _chargerRecents() async {
+    try {
+      final dossier = await _dossierApp();
+      final fichierTravail = File('${dossier.path}/travail_en_cours.json');
+      final fichierRecents = File('${dossier.path}/recents.json');
+      Map<String, dynamic>? travail;
+      if (await fichierTravail.exists() &&
+          await File('${dossier.path}/travail_en_cours.pdf').exists()) {
+        travail = jsonDecode(await fichierTravail.readAsString())
+            as Map<String, dynamic>;
+      }
+      var liste = <Map<String, dynamic>>[];
+      if (await fichierRecents.exists()) {
+        final brut = jsonDecode(await fichierRecents.readAsString()) as List;
+        liste = [
+          for (final e in brut)
+            if (e is Map<String, dynamic> &&
+                await File(e['chemin'] as String).exists())
+              e
+        ];
+      }
+      if (!mounted) return;
+      setState(() {
+        travailEnCours = travail;
+        recents = liste;
+      });
+    } catch (_) {
+      // Un fichier de récents illisible ne doit pas empêcher d'ouvrir
+      // l'application : on repart simplement sans lui.
+    }
+  }
+
+  /// Garde une copie du document ouvert et l'inscrit en tête des récents.
+  Future<void> _noterRecent(String nom, Uint8List octets) async {
+    try {
+      final dossier = await _dossierApp();
+      final coin = Directory('${dossier.path}/recents');
+      if (!await coin.exists()) await coin.create(recursive: true);
+      final chemin =
+          '${coin.path}/${DateTime.now().millisecondsSinceEpoch}.pdf';
+      await File(chemin).writeAsBytes(octets, flush: true);
+      final entree = {
+        'nom': nom,
+        'chemin': chemin,
+        'date': DateTime.now().toIso8601String(),
+      };
+      // Le même document rouvert remonte en tête, sans doublon.
+      final liste = [
+        entree,
+        for (final e in recents)
+          if (e['nom'] != nom) e
+      ];
+      // Dix récents, pas plus : au-delà, ce n'est plus « récent », et les
+      // copies pèseraient inutilement sur le téléphone.
+      for (final e in liste.skip(10)) {
+        try {
+          await File(e['chemin'] as String).delete();
+        } catch (_) {}
+      }
+      final gardes = liste.take(10).toList();
+      await File('${dossier.path}/recents.json')
+          .writeAsString(jsonEncode(gardes), flush: true);
+      if (mounted) setState(() => recents = gardes);
+    } catch (_) {}
+  }
+
+  /// Écrit le document de travail s'il a changé depuis la dernière fois.
+  Future<void> _sauvegardeAuto() async {
+    final doc = document;
+    if (doc == null || modeLecture || _sauvegardeEnCours || _occupe) return;
+    if (historique.length == _etapesSauvegardees) return;
+    _sauvegardeEnCours = true;
+    try {
+      final octets = Uint8List.fromList(await _octetsAvecSignatures(doc));
+      final dossier = await _dossierApp();
+      await File('${dossier.path}/travail_en_cours.pdf')
+          .writeAsBytes(octets, flush: true);
+      final fiche = {
+        'nom': nomDocument,
+        'date': DateTime.now().toIso8601String(),
+      };
+      await File('${dossier.path}/travail_en_cours.json')
+          .writeAsString(jsonEncode(fiche), flush: true);
+      _etapesSauvegardees = historique.length;
+      if (mounted) setState(() => travailEnCours = fiche);
+    } catch (_) {
+      // Une sauvegarde qui échoue réessaiera dans vingt secondes ; elle ne
+      // doit surtout pas interrompre ce qu'on est en train de faire.
+    } finally {
+      _sauvegardeEnCours = false;
+    }
+  }
+
+  Future<void> _reprendreTravail() async {
+    try {
+      final dossier = await _dossierApp();
+      final octets =
+          await File('${dossier.path}/travail_en_cours.pdf').readAsBytes();
+      nomDocument = (travailEnCours?['nom'] as String?) ?? "Document";
+      await _chargerPourLecture(octets);
+      if (!mounted || octetsDocument == null) return;
+      // Le document reprend là où il en était : on passe directement à la
+      // modification, sans repasser par le choix du service.
+      await _passerEnModification();
+    } catch (e) {
+      if (mounted) setState(() => statut = "Reprise impossible : $e");
+    }
+  }
+
+  Future<void> _ouvrirRecent(Map<String, dynamic> entree) async {
+    try {
+      final octets = await File(entree['chemin'] as String).readAsBytes();
+      nomDocument = (entree['nom'] as String?) ?? "Document";
+      await _chargerPourLecture(octets);
+      _noterRecent(nomDocument, octets);
+    } catch (e) {
+      if (mounted) setState(() => statut = "Ouverture impossible : $e");
+    }
+  }
+
+  /// « il y a 5 min », « il y a 2 h », « hier » : une date qui se lit d'un
+  /// coup d'œil, plutôt qu'un horodatage.
+  String _ilYA(String? iso) {
+    if (iso == null) return "";
+    final date = DateTime.tryParse(iso);
+    if (date == null) return "";
+    final ecart = DateTime.now().difference(date);
+    if (ecart.inMinutes < 1) return "à l'instant";
+    if (ecart.inMinutes < 60) return "il y a ${ecart.inMinutes} min";
+    if (ecart.inHours < 24) return "il y a ${ecart.inHours} h";
+    if (ecart.inDays == 1) return "hier";
+    return "il y a ${ecart.inDays} jours";
+  }
+
   void _poserCadre() {
     final centre = _centreVisible();
     _ajouterZoneEffacee(centre.dx, centre.dy);
@@ -6430,6 +6595,8 @@ class _AccueilState extends State<Accueil> {
       final fichier = File('${dossier.path}/pdf_modifie_$horodatage.pdf');
       await fichier.writeAsBytes(octets, flush: true);
       await Share.shareXFiles([XFile(fichier.path)], text: "PDF modifié");
+      _etapesSauvegardees = -1;
+      _sauvegardeAuto();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -7186,6 +7353,22 @@ class _AccueilState extends State<Accueil> {
                     fontSize: 15, color: Theme.of(context).colorScheme.onSurfaceVariant),
               ),
             ),
+            // Le travail en cours d'abord : c'est ce qu'on vient chercher
+            // neuf fois sur dix quand on rouvre l'application.
+            if (travailEnCours != null)
+              Card(
+                margin: const EdgeInsets.only(bottom: 12),
+                color: Theme.of(context).colorScheme.primaryContainer,
+                child: ListTile(
+                  leading: const Icon(Icons.history),
+                  title: Text(
+                      "Reprendre ${travailEnCours!['nom'] ?? 'le document'}"),
+                  subtitle: Text("Travail en cours, sauvegardé "
+                      "${_ilYA(travailEnCours!['date'] as String?)}"),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _occupe ? null : _reprendreTravail,
+                ),
+              ),
             _carteService(
               icone: Icons.document_scanner,
               titre: "Scanner",
@@ -7216,6 +7399,27 @@ class _AccueilState extends State<Accueil> {
                   "partager tel quel.",
               action: _occupe ? null : () => _importerDocument(),
             ),
+            if (recents.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 18, 4, 6),
+                child: Text(
+                  "Documents récents",
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant),
+                ),
+              ),
+              for (final e in recents)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.picture_as_pdf_outlined),
+                  title: Text(e['nom'] as String? ?? "Document",
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(_ilYA(e['date'] as String?)),
+                  onTap: _occupe ? null : () => _ouvrirRecent(e),
+                ),
+            ],
             const SizedBox(height: 8),
             Center(
               child: Text(
