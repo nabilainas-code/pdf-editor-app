@@ -347,11 +347,17 @@ class ChampFormulaire {
 /// couleur d'alerte sur une opération parfaitement ordinaire.
 class _CadreLigne extends CustomPainter {
   final bool selectionne;
-  const _CadreLigne({required this.selectionne});
+  final bool resultat;
+  const _CadreLigne({required this.selectionne, this.resultat = false});
 
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
+    if (resultat && !selectionne) {
+      canvas.drawRect(
+          rect, Paint()..color = const Color(0x55FFC107));
+      return;
+    }
     if (selectionne) {
       canvas.drawRect(rect, Paint()..color = Colors.blue.withOpacity(0.08));
       canvas.drawRect(
@@ -388,7 +394,7 @@ class _CadreLigne extends CustomPainter {
 
   @override
   bool shouldRepaint(_CadreLigne ancien) =>
-      ancien.selectionne != selectionne;
+      ancien.selectionne != selectionne || ancien.resultat != resultat;
 }
 
 /// Une signature enregistrée dans le répertoire : ses traits normalisés
@@ -770,6 +776,15 @@ class _AccueilState extends State<Accueil> {
     if (collerVisible) setState(() => collerVisible = false);
   }
 
+  /// Recherche en cours. Les résultats sont des lignes du document : c'est
+  /// par elles que passe le remplacement, exactement comme si on les avait
+  /// touchées du doigt. Un seul mécanisme d'édition, pas deux.
+  bool panneauRecherche = false;
+  final TextEditingController _champRecherche = TextEditingController();
+  final TextEditingController _champRemplacement = TextEditingController();
+  List<MotDetecte> resultatsRecherche = [];
+  int indexRecherche = 0;
+
   String? outilTrace;
   final List<Offset> traceEnCours = [];
   double epaisseurStylo = 2;
@@ -955,6 +970,8 @@ class _AccueilState extends State<Accueil> {
   @override
   void dispose() {
     _minuteurColler?.cancel();
+    _champRecherche.dispose();
+    _champRemplacement.dispose();
     controleurDirect.removeListener(_memoriserSelection);
     _sansFocus.dispose();
     _transformation.dispose();
@@ -5545,6 +5562,150 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  /// Relève toutes les lignes contenant le terme cherché, dans l'ordre où
+  /// on les lit : de haut en bas, puis de gauche à droite.
+  void _chercher() {
+    final terme = _champRecherche.text.trim().toLowerCase();
+    setState(() {
+      indexRecherche = 0;
+      if (terme.isEmpty) {
+        resultatsRecherche = [];
+        statut = "Tapez le mot à chercher";
+        return;
+      }
+      resultatsRecherche = mots
+          .where((m) => m.texte.toLowerCase().contains(terme))
+          .toList()
+        ..sort((a, b) {
+          final vertical = a.zone.top.compareTo(b.zone.top);
+          return vertical != 0 ? vertical : a.zone.left.compareTo(b.zone.left);
+        });
+      statut = resultatsRecherche.isEmpty
+          ? "Aucune occurrence trouvée"
+          : "${resultatsRecherche.length} occurrence(s) trouvée(s)";
+    });
+    if (resultatsRecherche.isNotEmpty) _allerAuResultat(0);
+  }
+
+  /// Amène le résultat choisi sous les yeux et le sélectionne.
+  void _allerAuResultat(int index) {
+    if (resultatsRecherche.isEmpty) return;
+    final n = resultatsRecherche.length;
+    final vise = ((index % n) + n) % n;
+    final ligne = resultatsRecherche[vise];
+    setState(() {
+      indexRecherche = vise;
+      selection
+        ..clear()
+        ..add(ligne);
+      statut = "Occurrence ${vise + 1} sur $n";
+    });
+    _amenerEnVue(ligne.zone);
+  }
+
+  /// Déplace la vue pour centrer une zone de la page, sans changer le zoom.
+  void _amenerEnVue(Rect zone) {
+    final echelle = _echelleVue;
+    if (echelle <= 0 || _tailleVue.isEmpty) return;
+    final zoom = _transformation.value.getMaxScaleOnAxis();
+    if (zoom <= 0) return;
+    final x = _tailleVue.width / 2 - zone.center.dx * echelle * zoom;
+    final y = _tailleVue.height / 2 - zone.center.dy * echelle * zoom;
+    _transformation.value = Matrix4.identity()
+      ..translate(x, y)
+      ..scale(zoom);
+  }
+
+  /// Remplace le terme cherché dans la ligne courante.
+  ///
+  /// Le remplacement ne connaît pas de chemin à lui : il fabrique le
+  /// nouveau texte et le confie à la modification ordinaire — celle qui
+  /// efface la seule place de la ligne, la réécrit avec sa police, son
+  /// corps, sa couleur et son gras, et sait s'annuler entièrement. Ce qui
+  /// vaut pour un doigt vaut pour une recherche.
+  Future<void> _remplacerCourant() async {
+    if (resultatsRecherche.isEmpty || _occupe) return;
+    final terme = _champRecherche.text.trim();
+    if (terme.isEmpty) return;
+    final ligne = resultatsRecherche[indexRecherche];
+    final nouveau = _texteRemplace(ligne.texte, terme, _champRemplacement.text);
+    if (nouveau == ligne.texte) return;
+
+    await _appliquerModification(ligne,
+        texte: nouveau, gras: ligne.gras, taille: ligne.tailleManuelle);
+    if (!mounted) return;
+    // La ligne peut ne plus contenir le terme : on refait le relevé, et on
+    // se replace où on en était.
+    final positionAvant = indexRecherche;
+    _chercher();
+    if (!mounted || resultatsRecherche.isEmpty) return;
+    _allerAuResultat(positionAvant);
+  }
+
+  Future<void> _remplacerTout() async {
+    if (_occupe) return;
+    final terme = _champRecherche.text.trim();
+    if (terme.isEmpty) return;
+    final aTraiter = List<MotDetecte>.from(resultatsRecherche);
+    if (aTraiter.isEmpty) return;
+
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Remplacer partout ?"),
+        content: Text("« $terme » sera remplacé dans "
+            "${aTraiter.length} ligne(s) par "
+            "« ${_champRemplacement.text} »."),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Remplacer tout"),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true || !mounted) return;
+
+    var faits = 0;
+    for (final ligne in aTraiter) {
+      if (!mounted) break;
+      final nouveau =
+          _texteRemplace(ligne.texte, terme, _champRemplacement.text);
+      if (nouveau == ligne.texte) continue;
+      await _appliquerModification(ligne,
+          texte: nouveau, gras: ligne.gras, taille: ligne.tailleManuelle);
+      faits++;
+    }
+    if (!mounted) return;
+    _chercher();
+    setState(() => statut = "$faits ligne(s) remplacée(s)");
+  }
+
+  /// Remplace toutes les occurrences dans une ligne, sans tenir compte de
+  /// la casse — on cherche « document », on trouve aussi « DOCUMENT ».
+  String _texteRemplace(String source, String terme, String parQuoi) {
+    if (terme.isEmpty) return source;
+    final bas = source.toLowerCase();
+    final cible = terme.toLowerCase();
+    final sortie = StringBuffer();
+    var i = 0;
+    while (i < source.length) {
+      final trouve = bas.indexOf(cible, i);
+      if (trouve < 0) {
+        sortie.write(source.substring(i));
+        break;
+      }
+      sortie.write(source.substring(i, trouve));
+      sortie.write(parQuoi);
+      i = trouve + terme.length;
+    }
+    return sortie.toString();
+  }
+
   void _poserCadre() {
     final centre = _centreVisible();
     _ajouterZoneEffacee(centre.dx, centre.dy);
@@ -6797,6 +6958,105 @@ class _AccueilState extends State<Accueil> {
     );
   }
 
+  /// Le panneau de recherche : deux champs, et juste ce qu'on peut en
+  /// faire. Il ne s'ouvre que si on le demande, et se referme d'une croix.
+  Widget _panneauRecherche(BuildContext context) {
+    final total = resultatsRecherche.length;
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _champRecherche,
+                    autofocus: true,
+                    textInputAction: TextInputAction.search,
+                    onChanged: (_) => _chercher(),
+                    onSubmitted: (_) => _allerAuResultat(indexRecherche + 1),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: "Rechercher",
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.keyboard_arrow_up),
+                  tooltip: "Occurrence précédente",
+                  onPressed: total == 0
+                      ? null
+                      : () => _allerAuResultat(indexRecherche - 1),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.keyboard_arrow_down),
+                  tooltip: "Occurrence suivante",
+                  onPressed: total == 0
+                      ? null
+                      : () => _allerAuResultat(indexRecherche + 1),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: "Fermer la recherche",
+                  onPressed: () => setState(() {
+                    panneauRecherche = false;
+                    resultatsRecherche = [];
+                    selection.clear();
+                  }),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _champRemplacement,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: "Remplacer par",
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                TextButton(
+                  onPressed:
+                      (total == 0 || _occupe) ? null : _remplacerCourant,
+                  child: const Text("Remplacer"),
+                ),
+                FilledButton(
+                  onPressed: (total == 0 || _occupe) ? null : _remplacerTout,
+                  child: const Text("Tout"),
+                ),
+              ],
+            ),
+            if (_champRecherche.text.trim().isNotEmpty)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    total == 0
+                        ? "Aucune occurrence trouvée"
+                        : "Occurrence ${indexRecherche + 1} sur $total",
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildEdition(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -6811,6 +7071,20 @@ class _AccueilState extends State<Accueil> {
             icon: const Icon(Icons.redo),
             tooltip: "Rétablir",
             onPressed: (futur.isEmpty || _occupe) ? null : _retablir,
+          ),
+          IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: "Rechercher et remplacer",
+            isSelected: panneauRecherche,
+            onPressed: _occupe
+                ? null
+                : () => setState(() {
+                      panneauRecherche = !panneauRecherche;
+                      if (!panneauRecherche) {
+                        resultatsRecherche = [];
+                        selection.clear();
+                      }
+                    }),
           ),
           // Elle ne s'affiche que lorsqu'il y a quelque chose à coller.
           // Postée en permanence dans la barre, grise et inerte, elle
@@ -7245,6 +7519,7 @@ class _AccueilState extends State<Accueil> {
             height: 3,
             child: _occupe ? const LinearProgressIndicator(minHeight: 3) : null,
           ),
+          if (panneauRecherche) _panneauRecherche(context),
           Expanded(
             child: document == null
                 ? const Center(child: CircularProgressIndicator())
@@ -7618,6 +7893,12 @@ class _AccueilState extends State<Accueil> {
                                     child: CustomPaint(
                                       painter: _CadreLigne(
                                         selectionne: selection.contains(mot),
+                                        // Les autres occurrences trouvées
+                                        // restent visibles en jaune pâle :
+                                        // on voit d'un coup d'œil où le mot
+                                        // se trouve dans la page.
+                                        resultat:
+                                            resultatsRecherche.contains(mot),
                                       ),
                                       // Une signature n'est pas dans le
                                       // fichier tant qu'on n'a pas
