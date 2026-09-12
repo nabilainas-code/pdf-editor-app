@@ -7457,35 +7457,58 @@ class _AccueilState extends State<Accueil> {
     return sortie;
   }
 
-  /// Découpe une image en rond, ou à coins arrondis si un rayon est donné.
+  /// Découpe une image en rond : un vrai cercle, jamais un ovale.
+  ///
+  /// L'ellipse inscrite dans un rectangle non carré donne une forme d'œuf.
+  /// Sur une photo de 37,7 sur 34,4 millimètres, le résultat ne se cale
+  /// sous aucun liseré rond : il déborde en haut et en bas.
+  ///
+  /// On prend donc le disque du plus petit côté, centré, et on rogne
+  /// l'image à son carré. L'image devient carrée, son cadre aussi, et le
+  /// rond reste rond quelle que soit la taille qu'on donne ensuite à la
+  /// photo.
+  img.Image _decouperEnRond(img.Image source) {
+    final cote = source.width < source.height ? source.width : source.height;
+    if (cote < 2) return source.convert(numChannels: 4);
+    final x = ((source.width - cote) / 2).round();
+    final y = ((source.height - cote) / 2).round();
+    final carre =
+        img.copyCrop(source, x: x, y: y, width: cote, height: cote)
+            .convert(numChannels: 4);
+    final centre = (cote - 1) / 2;
+    final rayon = cote / 2;
+    for (var j = 0; j < cote; j++) {
+      for (var i = 0; i < cote; i++) {
+        final dx = i - centre;
+        final dy = j - centre;
+        if (dx * dx + dy * dy > rayon * rayon) {
+          carre.setPixelRgba(i, j, 0, 0, 0, 0);
+        }
+      }
+    }
+    return carre;
+  }
+
+  /// Découpe une image à coins arrondis, du rayon donné.
   /// L'image d'origine n'est pas touchée : c'est une copie qui est percée.
-  img.Image _masquerLImage(img.Image source, {double rayonCoins = 0}) {
+  img.Image _arrondirLesCoins(img.Image source, double rayon) {
     final sortie = source.convert(numChannels: 4);
     final la = sortie.width;
     final ha = sortie.height;
-    if (la < 2 || ha < 2) return sortie;
-    final cx = (la - 1) / 2;
-    final cy = (ha - 1) / 2;
+    if (la < 2 || ha < 2 || rayon <= 0) return sortie;
     for (var y = 0; y < ha; y++) {
       for (var x = 0; x < la; x++) {
-        bool dehors;
-        if (rayonCoins <= 0) {
-          // L'ellipse inscrite : un rond sur une image carrée, un ovale
-          // ajusté sinon. Aucune déformation de la photo.
-          final dx = (x - cx) / (la / 2);
-          final dy = (y - cy) / (ha / 2);
-          dehors = dx * dx + dy * dy > 1.0;
-        } else {
-          final r = rayonCoins;
-          final ecartX =
-              x < r ? r - x : (x > la - 1 - r ? x - (la - 1 - r) : 0.0);
-          final ecartY =
-              y < r ? r - y : (y > ha - 1 - r ? y - (ha - 1 - r) : 0.0);
-          dehors = ecartX > 0 &&
-              ecartY > 0 &&
-              ecartX * ecartX + ecartY * ecartY > r * r;
+        final ecartX = x < rayon
+            ? rayon - x
+            : (x > la - 1 - rayon ? x - (la - 1 - rayon) : 0.0);
+        final ecartY = y < rayon
+            ? rayon - y
+            : (y > ha - 1 - rayon ? y - (ha - 1 - rayon) : 0.0);
+        if (ecartX > 0 &&
+            ecartY > 0 &&
+            ecartX * ecartX + ecartY * ecartY > rayon * rayon) {
+          sortie.setPixelRgba(x, y, 0, 0, 0, 0);
         }
-        if (dehors) sortie.setPixelRgba(x, y, 0, 0, 0, 0);
       }
     }
     return sortie;
@@ -7505,21 +7528,30 @@ class _AccueilState extends State<Accueil> {
       final decodee = img.decodeImage(source);
       if (decodee == null) throw Exception("image illisible");
       img.Image resultat;
+      // Le cadre doit suivre la forme : un disque dans un cadre plus large
+      // que haut laisserait des marges vides à gauche et à droite, et la
+      // photo paraîtrait plus petite qu'elle ne l'est.
+      var rendreCarre = false;
+      var ratioOrigine = mot.ratioSignature;
       switch (forme) {
         case "rond":
-          resultat = _masquerLImage(decodee);
+          resultat = _decouperEnRond(decodee);
+          rendreCarre = true;
           break;
         case "arrondi":
           final cote = decodee.width < decodee.height
               ? decodee.width
               : decodee.height;
-          resultat = _masquerLImage(decodee, rayonCoins: cote * 0.14);
+          resultat = _arrondirLesCoins(decodee, cote * 0.14);
           break;
         case "auto":
           resultat = _detourerLeFond(decodee);
           break;
         default:
           resultat = decodee;
+          if (decodee.width > 0) {
+            ratioOrigine = decodee.height / decodee.width;
+          }
       }
       final octets = Uint8List.fromList(img.encodePng(resultat));
       final avant = await _etatActuel(doc);
@@ -7529,6 +7561,38 @@ class _AccueilState extends State<Accueil> {
         futur.clear();
         mot.imageSource ??= source;
         mot.imageFlottante = octets;
+        if (rendreCarre) {
+          // Le carré du plus petit côté, centré sur la place qu'occupait la
+          // photo : elle ne saute pas d'un bout de la page à l'autre.
+          var cote = mot.zone.width < mot.zone.height
+              ? mot.zone.width
+              : mot.zone.height;
+          if (cote > taillePage.width) cote = taillePage.width;
+          if (cote > taillePage.height) cote = taillePage.height;
+          var gauche = mot.zone.center.dx - cote / 2;
+          var haut = mot.zone.center.dy - cote / 2;
+          if (gauche + cote > taillePage.width) {
+            gauche = taillePage.width - cote;
+          }
+          if (haut + cote > taillePage.height) {
+            haut = taillePage.height - cote;
+          }
+          if (gauche < 0) gauche = 0;
+          if (haut < 0) haut = 0;
+          mot.zone = Rect.fromLTWH(gauche, haut, cote, cote);
+          // Et il le reste : tirer un coin garde le carré, donc le rond.
+          mot.ratioSignature = 1.0;
+        } else if (forme == "rectangle" && ratioOrigine > 0) {
+          mot.ratioSignature = ratioOrigine;
+          var hauteur = mot.zone.width * ratioOrigine;
+          if (mot.zone.top + hauteur > taillePage.height) {
+            hauteur = taillePage.height - mot.zone.top;
+          }
+          if (hauteur > 4) {
+            mot.zone = Rect.fromLTWH(
+                mot.zone.left, mot.zone.top, mot.zone.width, hauteur);
+          }
+        }
         statut = switch (forme) {
           "rond" => "Photo découpée en rond",
           "arrondi" => "Coins arrondis",
