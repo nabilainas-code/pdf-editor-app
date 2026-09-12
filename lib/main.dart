@@ -6365,7 +6365,13 @@ class _AccueilState extends State<Accueil> {
   Future<void> _deplacerSignature(
       MotDetecte mot, double dx, double dy) async {
     final doc = document;
-    if (!mot.estFlottant || doc == null || _occupe) return;
+    if (!mot.estFlottant || doc == null) return;
+    if (_occupe) {
+      setState(() => statut =
+          "Déplacement ignoré : l'application finissait la modification "
+          "précédente — recommencez");
+      return;
+    }
 
     final ancienne = mot.zone;
     var gauche = ancienne.left + dx;
@@ -6403,7 +6409,15 @@ class _AccueilState extends State<Accueil> {
       List<MotDetecte> lignesPrincipales, double dx, double dy) async {
     if (dx == 0 && dy == 0 || lignesPrincipales.isEmpty) return;
     final doc = document;
-    if (doc == null || _occupe) return;
+    if (doc == null) return;
+    // Un déplacement abandonné parce que l'application travaillait encore
+    // ramenait l'objet à sa place sans un mot, et on croyait à un refus.
+    if (_occupe) {
+      setState(() => statut =
+          "Déplacement ignoré : l'application finissait la modification "
+          "précédente — recommencez");
+      return;
+    }
     // Une signature n'est pas une ligne de texte : elle n'a pas de voisines
     // à bousculer ni de puce à emmener, et son encre est du tracé qu'on
     // refait plutôt que de la photographier. Elle a donc son propre
@@ -6412,18 +6426,33 @@ class _AccueilState extends State<Accueil> {
         lignesPrincipales.first.estFlottant) {
       return _deplacerSignature(lignesPrincipales.first, dx, dy);
     }
-    // Chaque ligne emmène avec elle ce qui est sur sa rangée : un tiret ou
-    // une puce détectés à part restaient sinon en arrière.
-    final groupe = <MotDetecte>{
-      ...lignesPrincipales,
-      for (final principal in lignesPrincipales)
-        ...mots.where(
-            (m) => m != principal && _memeRangee(m.zone, principal.zone)),
-    }.toList();
+    // Chaque ligne emmène sa puce, et rien d'autre.
+    //
+    // Emmener toute la rangée paraissait pratique. Sur un document en
+    // colonnes, c'était désastreux : déplacer une photo du bandeau de
+    // gauche emportait les lignes de la colonne de droite posées à la même
+    // hauteur. Dix lignes effacées et redessinées pour un objet déplacé,
+    // avec leurs traces d'effacement — et surtout, il suffisait qu'une
+    // seule d'entre elles touche un bord de page pour que tout le
+    // déplacement soit ramené à zéro : l'objet revenait à sa place, sans
+    // qu'on comprenne pourquoi.
+    final ensemble = <MotDetecte>{...lignesPrincipales};
+    for (final principal in lignesPrincipales) {
+      if (principal.texte.isEmpty || principal.estFlottant) continue;
+      final puce = _puceDe(principal);
+      if (puce != null) ensemble.add(puce);
+    }
+    final groupe = ensemble.toList();
 
+    // Un objet posé — photo, cadre, tampon — ne bouscule personne : il se
+    // pose là où on le met, y compris par-dessus du texte. Seule une ligne
+    // de texte qui descend pousse ses voisines pour garder les interlignes.
+    final deplaceDuTexte =
+        groupe.any((m) => m.texte.isNotEmpty && !m.estFlottant);
     final vises = <MotDetecte, Offset>{
       for (final m in groupe) m: Offset(dx, dy),
-      for (final m in _lignesPoussees(groupe, dx, dy)) m: Offset(0, dy),
+      if (deplaceDuTexte)
+        for (final m in _lignesPoussees(groupe, dx, dy)) m: Offset(0, dy),
     };
 
     // Un seul rectangle par ligne, calculé une fois : photographie,
