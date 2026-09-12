@@ -5149,8 +5149,19 @@ class _AccueilState extends State<Accueil> {
     for (var x = rect.left + pas; x < rect.right - 1; x += pas) {
       final ici = teinteA(x + pas / 2);
       if (ici == null || ici == courante) continue;
-      tranches.add(Rect.fromLTRB(debut, rect.top, x, rect.bottom));
-      debut = x;
+      // La frontière est quelque part dans ce pas de quatre points. On la
+      // resserre au point près : sans cela, jusqu'à quatre points de la
+      // colonne voisine prenaient la couleur de celle-ci, et ces éclats
+      // s'alignaient en pointillé tout le long du couloir.
+      var frontiere = x;
+      for (var f = x - pas + 1; f < x; f += 1) {
+        if (teinteA(f) == ici) {
+          frontiere = f;
+          break;
+        }
+      }
+      tranches.add(Rect.fromLTRB(debut, rect.top, frontiere, rect.bottom));
+      debut = frontiere;
       courante = ici;
     }
     tranches.add(Rect.fromLTRB(debut, rect.top, rect.right, rect.bottom));
@@ -5162,8 +5173,34 @@ class _AccueilState extends State<Accueil> {
     return tranches;
   }
 
+  /// Rogne un rectangle pour qu'il reste dans la colonne où il commence.
+  ///
+  /// Un effacement qui dépasse d'un point sur la colonne voisine y laisse
+  /// un éclat de la mauvaise couleur, et ces éclats s'alignent en pointillé
+  /// le long du couloir.
+  Rect _dansSaColonne(Rect rect) {
+    final couloirs = couloirsColonnes;
+    if (couloirs.isEmpty) return rect;
+    final centre = rect.center.dx;
+    var bordGauche = 0.0;
+    var bordDroite = taillePage.width;
+    for (final couloir in couloirs) {
+      if (couloir <= centre && couloir > bordGauche) bordGauche = couloir;
+      if (couloir > centre && couloir < bordDroite) bordDroite = couloir;
+    }
+    final gauche = rect.left < bordGauche ? bordGauche : rect.left;
+    final droite = rect.right > bordDroite ? bordDroite : rect.right;
+    if (droite - gauche < 0.5) return rect;
+    return Rect.fromLTRB(gauche, rect.top, droite, rect.bottom);
+  }
+
   void _effacerRect(PdfPage page, Rect rect, MotDetecte mot) {
-    for (final tranche in _tranchesDeFond(rect)) {
+    // Une ligne de texte appartient à une colonne, et son effacement ne
+    // doit pas en sortir. Un cadre posé à la main, lui, peut délibérément
+    // couvrir les deux colonnes : on ne le rogne pas, ce sont les tranches
+    // qui lui donnent la bonne couleur de chaque côté.
+    final vise = mot.texte.isEmpty ? rect : _dansSaColonne(rect);
+    for (final tranche in _tranchesDeFond(vise)) {
       _effacerTranche(page, tranche);
     }
   }
