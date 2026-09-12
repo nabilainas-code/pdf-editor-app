@@ -360,6 +360,11 @@ class _Constat {
   });
 }
 
+/// Un millimètre, en points PDF — l'unité du format, à raison de
+/// soixante-douze points par pouce. Une photo d'identité se demande en
+/// millimètres (35 × 45), jamais en points ni en pixels.
+const double pointsParMm = 72 / 25.4;
+
 class Etat {
   final Uint8List octetsDocument;
   final List<MotDetecte> mots;
@@ -752,6 +757,16 @@ class _AccueilState extends State<Accueil> {
   /// cet endroit et ouvrir directement sa modification, plutôt que le geste
   /// à deux temps (appui long puis toucher) qui n'était pas évident.
   bool enAjoutTexte = false;
+
+  /// Photo choisie, en attente de l'endroit où la poser. Le geste est le
+  /// même que pour le texte : on choisit, puis on touche la page à
+  /// l'endroit voulu, et l'objet apparaît là.
+  Uint8List? photoAPoser;
+
+  /// Hauteur divisée par largeur de la photo choisie : c'est ce qui lui
+  /// garde ses proportions à la pose comme au redimensionnement.
+  double ratioPhoto = 1.0;
+  bool enPosePhoto = false;
 
   Offset deplacementGroupeEnCours = Offset.zero;
   bool groupeEnDeplacement = false;
@@ -6178,7 +6193,11 @@ class _AccueilState extends State<Accueil> {
         }
       });
 
-      if (imageDeFond != null) {
+      // Un objet qui flotte au-dessus de la page n'a rien écrit dedans :
+      // refaire l'image du PDF ne montrerait rien de nouveau, et cette
+      // seconde d'attente se voyait à chaque glissement d'une photo.
+      final aTouchePage = deplacements.keys.any((m) => m.texte.isNotEmpty);
+      if (imageDeFond != null && aTouchePage) {
         await _rafraichirApercuOcr(doc);
       }
     } catch (e) {
@@ -6669,6 +6688,311 @@ class _AccueilState extends State<Accueil> {
   /// Tout ce qu'on peut ajouter à la page, derrière un seul ＋. Douze
   /// boutons empilés sur le bord droit cachaient le document ; ici une
   /// liste nommée en clair, qui se referme dès qu'on a choisi.
+  /// Une longueur du document, dite en millimètres.
+  String _enMm(double points) =>
+      (points / pointsParMm).toStringAsFixed(1).replaceAll('.', ',');
+
+  /// Pose une photo sur la page : la photo d'identité d'un CV, un logo, un
+  /// justificatif.
+  ///
+  /// Elle devient un objet indépendant posé au-dessus de la page. La
+  /// déplacer, la retailler ou la retirer ne touche jamais à ce qu'il y a
+  /// dessous : rien du document n'est reconstruit, rien ne se décale. Elle
+  /// n'entre dans le fichier qu'à l'enregistrement.
+  Future<void> _ajouterPhoto() async {
+    if (document == null || _occupe) return;
+    await _refermerLesModes();
+    if (!mounted) return;
+
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  "Ajouter une photo",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text("Depuis le téléphone"),
+              subtitle: const Text("Galerie et fichiers de l'appareil"),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text("Prendre une photo"),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (source == null || !mounted) return;
+
+    setState(() => _occupe = true);
+    try {
+      final choisie = await ImagePicker().pickImage(
+        source: source,
+        // Assez fin pour une impression nette : une photo d'identité de
+        // 35 × 45 mm demande environ 530 points de haut à 300 points par
+        // pouce. Assez sobre pour ne pas charger vingt mégaoctets en
+        // mémoire sur un téléphone.
+        maxWidth: 2400,
+        maxHeight: 2400,
+      );
+      if (choisie == null) return;
+      final octets = await choisie.readAsBytes();
+      final decodee = img.decodeImage(octets);
+      if (decodee == null || decodee.width <= 0 || decodee.height <= 0) {
+        if (mounted) setState(() => statut = "Photo illisible");
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        photoAPoser = octets;
+        ratioPhoto = decodee.height / decodee.width;
+        enPosePhoto = true;
+        enCollage = false;
+        enAjoutTexte = false;
+        selection.clear();
+        statut = "Touchez l'endroit où poser la photo";
+      });
+    } catch (e) {
+      if (mounted) setState(() => statut = "Photo impossible à ouvrir : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Pose la photo choisie à l'endroit touché, centrée sur le doigt.
+  Future<void> _poserPhoto(double xPage, double yPage) async {
+    final doc = document;
+    final octets = photoAPoser;
+    if (doc == null || octets == null || _occupe) return;
+
+    // Quarante millimètres de large par défaut : la largeur d'une photo de
+    // CV. Assez grande pour se voir, assez petite pour ne rien recouvrir.
+    var largeur = 40 * pointsParMm;
+    if (largeur > taillePage.width * 0.6) largeur = taillePage.width * 0.6;
+    var hauteur = largeur * ratioPhoto;
+    if (hauteur > taillePage.height * 0.6) {
+      hauteur = taillePage.height * 0.6;
+      if (ratioPhoto > 0) largeur = hauteur / ratioPhoto;
+    }
+
+    var gauche = xPage - largeur / 2;
+    var haut = yPage - hauteur / 2;
+    if (gauche + largeur > taillePage.width) {
+      gauche = taillePage.width - largeur;
+    }
+    if (haut + hauteur > taillePage.height) {
+      haut = taillePage.height - hauteur;
+    }
+    if (gauche < 0) gauche = 0;
+    if (haut < 0) haut = 0;
+
+    final avant = await _etatActuel(doc);
+    if (!mounted) return;
+    final posee = MotDetecte(
+      "",
+      Rect.fromLTWH(gauche, haut, largeur, hauteur),
+      imageFlottante: octets,
+      ratioSignature: ratioPhoto,
+    );
+    setState(() {
+      historique.add(avant);
+      futur.clear();
+      mots = [...mots, posee];
+      selection
+        ..clear()
+        ..add(posee);
+      enPosePhoto = false;
+      photoAPoser = null;
+      statut = "Photo posée (${_enMm(largeur)} × ${_enMm(hauteur)} mm) — "
+          "glissez-la, ou tirez un coin";
+    });
+  }
+
+  /// Donne à une photo une taille au millimètre près. Une photo d'identité
+  /// se demande en 35 × 45 mm : la tirer au doigt jusqu'à tomber juste
+  /// n'est pas une méthode.
+  Future<void> _tailleExacte(MotDetecte mot) async {
+    if (document == null || _occupe) return;
+    final ratioOrigine = mot.ratioSignature > 0
+        ? mot.ratioSignature
+        : (mot.zone.width > 0 ? mot.zone.height / mot.zone.width : 1.0);
+    var largeurMm = mot.zone.width / pointsParMm;
+    var hauteurMm = mot.zone.height / pointsParMm;
+    var verrou = true;
+    final champLargeur =
+        TextEditingController(text: largeurMm.toStringAsFixed(1));
+    final champHauteur =
+        TextEditingController(text: hauteurMm.toStringAsFixed(1));
+
+    final valide = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, refaire) {
+          void poser(double l, double h) {
+            largeurMm = l;
+            hauteurMm = h;
+            champLargeur.text = l.toStringAsFixed(1);
+            champHauteur.text = h.toStringAsFixed(1);
+            refaire(() {});
+          }
+
+          return AlertDialog(
+            title: const Text("Taille exacte"),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: champLargeur,
+                          keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true),
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            labelText: "Largeur (mm)",
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (v) {
+                            final l = double.tryParse(v.replaceAll(',', '.'));
+                            if (l == null || l <= 0) return;
+                            largeurMm = l;
+                            if (verrou) {
+                              hauteurMm = l * ratioOrigine;
+                              champHauteur.text =
+                                  hauteurMm.toStringAsFixed(1);
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextField(
+                          controller: champHauteur,
+                          keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true),
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            labelText: "Hauteur (mm)",
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (v) {
+                            final h = double.tryParse(v.replaceAll(',', '.'));
+                            if (h == null || h <= 0) return;
+                            hauteurMm = h;
+                            if (verrou && ratioOrigine > 0) {
+                              largeurMm = h / ratioOrigine;
+                              champLargeur.text =
+                                  largeurMm.toStringAsFixed(1);
+                            }
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    dense: true,
+                    value: verrou,
+                    onChanged: (v) => refaire(() => verrou = v ?? true),
+                    title: const Text(
+                      "Garder les proportions de la photo",
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      OutlinedButton(
+                        onPressed: () {
+                          verrou = false;
+                          poser(35, 45);
+                        },
+                        child: const Text("Photo d'identité 35 × 45"),
+                      ),
+                      OutlinedButton(
+                        onPressed: () {
+                          verrou = false;
+                          poser(largeurMm, largeurMm);
+                        },
+                        child: const Text("Carré"),
+                      ),
+                      OutlinedButton(
+                        onPressed: () {
+                          verrou = true;
+                          poser(largeurMm, largeurMm * ratioOrigine);
+                        },
+                        child: const Text("Proportions d'origine"),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text("Annuler"),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text("Appliquer"),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    champLargeur.dispose();
+    champHauteur.dispose();
+    if (valide != true || !mounted) return;
+
+    final doc = document;
+    if (doc == null) return;
+    var l = largeurMm * pointsParMm;
+    var h = hauteurMm * pointsParMm;
+    if (l < 8) l = 8;
+    if (h < 8) h = 8;
+    if (l > taillePage.width) l = taillePage.width;
+    if (h > taillePage.height) h = taillePage.height;
+    // La photo garde son coin haut gauche : on change sa taille, pas sa
+    // place. Elle rentre seulement si elle dépassait du bord.
+    var gauche = mot.zone.left;
+    var haut = mot.zone.top;
+    if (gauche + l > taillePage.width) gauche = taillePage.width - l;
+    if (haut + h > taillePage.height) haut = taillePage.height - h;
+    if (gauche < 0) gauche = 0;
+    if (haut < 0) haut = 0;
+
+    final avant = await _etatActuel(doc);
+    if (!mounted) return;
+    setState(() {
+      historique.add(avant);
+      futur.clear();
+      mot.zone = Rect.fromLTWH(gauche, haut, l, h);
+      if (l > 0) mot.ratioSignature = h / l;
+      statut = "Taille : ${_enMm(l)} × ${_enMm(h)} mm";
+    });
+  }
+
   Future<void> _feuilleAjouter() async {
     final choix = await showModalBottomSheet<String>(
       context: context,
@@ -6682,6 +7006,14 @@ class _AccueilState extends State<Accueil> {
               title: const Text("Texte"),
               subtitle: const Text("Touchez ensuite l'endroit où écrire"),
               onTap: () => Navigator.pop(ctx, "texte"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.add_photo_alternate_outlined),
+              title: const Text("Photo"),
+              subtitle: const Text(
+                  "Photo d'identité, logo — posée par-dessus, sans rien "
+                  "déplacer"),
+              onTap: () => Navigator.pop(ctx, "photo"),
             ),
             ListTile(
               leading: const Icon(Icons.draw),
@@ -6749,6 +7081,9 @@ class _AccueilState extends State<Accueil> {
           selection.clear();
           statut = "Touchez la page pour écrire à cet endroit";
         });
+        break;
+      case "photo":
+        _ajouterPhoto();
         break;
       case "signature":
         _choisirSignature();
@@ -7088,6 +7423,8 @@ class _AccueilState extends State<Accueil> {
       cadreTampon = null;
       enAjoutTexte = false;
       enCollage = false;
+      enPosePhoto = false;
+      photoAPoser = null;
     });
   }
 
@@ -8235,6 +8572,20 @@ class _AccueilState extends State<Accueil> {
                   _dupliquerSignature(mot);
                 },
               ),
+            // Une photo d'identité se demande en millimètres : la tirer au
+            // doigt jusqu'à tomber juste n'est pas une méthode.
+            if (mot.imageFlottante != null)
+              ListTile(
+                leading: const Icon(Icons.straighten),
+                title: const Text("Taille exacte"),
+                subtitle: Text(
+                    "${_enMm(mot.zone.width)} × ${_enMm(mot.zone.height)} mm "
+                    "— photo d'identité, carré, ou au millimètre"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _tailleExacte(mot);
+                },
+              ),
             // Un paragraphe se prend d'un seul geste : quatre lignes
             // serrées les unes sous les autres sont une idée, pas quatre.
             // On les déplace, on les supprime ou on les habille ensemble,
@@ -9326,6 +9677,13 @@ class _AccueilState extends State<Accueil> {
                                               ], outilTrace!);
                                             } else if (enCollage) {
                                               _collerA(
+                                                details.localPosition.dx /
+                                                    echelle,
+                                                details.localPosition.dy /
+                                                    echelle,
+                                              );
+                                            } else if (enPosePhoto) {
+                                              _poserPhoto(
                                                 details.localPosition.dx /
                                                     echelle,
                                                 details.localPosition.dy /
