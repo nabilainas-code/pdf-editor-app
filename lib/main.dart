@@ -255,6 +255,12 @@ class MotDetecte {
   /// redimensionne sans jamais rien abîmer dessous.
   Uint8List? imageFlottante;
 
+  /// L'image telle qu'elle a été découpée ou importée, avant toute mise en
+  /// forme. La garder rend les formes non destructives : passer en rond
+  /// puis revenir au rectangle ne perd pas un pixel, et changer de forme
+  /// repart toujours de l'original plutôt que d'empiler les découpes.
+  Uint8List? imageSource;
+
   /// Taille qu'avait le cadre la première fois qu'on y a touché.
   ///
   /// Sert à reconnaître qu'on est en train de l'étirer bien au-delà de la
@@ -301,6 +307,7 @@ class MotDetecte {
       this.tailleAuto,
       this.traitsSignature,
       this.imageFlottante,
+      this.imageSource,
       this.ratioSignature = 0.4,
       this.depuisOcr = false,
       this.pixelsSource,
@@ -328,6 +335,7 @@ MotDetecte copieDe(MotDetecte m) => MotDetecte(
       tailleAuto: m.tailleAuto,
       traitsSignature: m.traitsSignature,
       imageFlottante: m.imageFlottante,
+      imageSource: m.imageSource,
       ratioSignature: m.ratioSignature,
       depuisOcr: m.depuisOcr,
       pixelsSource: m.pixelsSource,
@@ -7370,6 +7378,224 @@ class _AccueilState extends State<Accueil> {
     });
   }
 
+  /// Rend transparent le fond uni qui entoure une image découpée.
+  ///
+  /// On part des quatre bords et on avance tant qu'on retrouve la couleur
+  /// du bord. C'est ce qui détache une photo ronde de l'aplat sur lequel
+  /// elle était posée — sans avoir à deviner sa forme. Le fond s'en va, la
+  /// forme reste, ronde, carrée ou quelconque.
+  ///
+  /// Si les quatre coins ne se ressemblent pas, il n'y a pas d'aplat à
+  /// retirer et l'image revient telle quelle : mieux vaut ne rien faire que
+  /// de trouer une photo au hasard.
+  img.Image _detourerLeFond(img.Image source) {
+    final sortie = source.convert(numChannels: 4);
+    final la = sortie.width;
+    final ha = sortie.height;
+    if (la < 3 || ha < 3) return sortie;
+
+    final coins = [
+      sortie.getPixel(0, 0),
+      sortie.getPixel(la - 1, 0),
+      sortie.getPixel(0, ha - 1),
+      sortie.getPixel(la - 1, ha - 1),
+    ];
+    var fondR = 0.0;
+    var fondV = 0.0;
+    var fondB = 0.0;
+    for (final p in coins) {
+      fondR += p.r.toDouble();
+      fondV += p.g.toDouble();
+      fondB += p.b.toDouble();
+    }
+    fondR /= 4;
+    fondV /= 4;
+    fondB /= 4;
+    for (final p in coins) {
+      final ecart = (p.r - fondR).abs() +
+          (p.g - fondV).abs() +
+          (p.b - fondB).abs();
+      if (ecart > 60) return sortie;
+    }
+
+    const tolerance = 48.0;
+    final vus = Uint8List(la * ha);
+    final pile = <int>[];
+
+    void proposer(int x, int y) {
+      if (x < 0 || y < 0 || x >= la || y >= ha) return;
+      final i = y * la + x;
+      if (vus[i] != 0) return;
+      vus[i] = 1;
+      final p = sortie.getPixel(x, y);
+      final ecart = (p.r - fondR).abs() +
+          (p.g - fondV).abs() +
+          (p.b - fondB).abs();
+      if (ecart > tolerance) return;
+      pile.add(i);
+    }
+
+    for (var x = 0; x < la; x++) {
+      proposer(x, 0);
+      proposer(x, ha - 1);
+    }
+    for (var y = 0; y < ha; y++) {
+      proposer(0, y);
+      proposer(la - 1, y);
+    }
+
+    while (pile.isNotEmpty) {
+      final i = pile.removeLast();
+      final x = i % la;
+      final y = i ~/ la;
+      sortie.setPixelRgba(x, y, 0, 0, 0, 0);
+      proposer(x - 1, y);
+      proposer(x + 1, y);
+      proposer(x, y - 1);
+      proposer(x, y + 1);
+    }
+    return sortie;
+  }
+
+  /// Découpe une image en rond, ou à coins arrondis si un rayon est donné.
+  /// L'image d'origine n'est pas touchée : c'est une copie qui est percée.
+  img.Image _masquerLImage(img.Image source, {double rayonCoins = 0}) {
+    final sortie = source.convert(numChannels: 4);
+    final la = sortie.width;
+    final ha = sortie.height;
+    if (la < 2 || ha < 2) return sortie;
+    final cx = (la - 1) / 2;
+    final cy = (ha - 1) / 2;
+    for (var y = 0; y < ha; y++) {
+      for (var x = 0; x < la; x++) {
+        bool dehors;
+        if (rayonCoins <= 0) {
+          // L'ellipse inscrite : un rond sur une image carrée, un ovale
+          // ajusté sinon. Aucune déformation de la photo.
+          final dx = (x - cx) / (la / 2);
+          final dy = (y - cy) / (ha / 2);
+          dehors = dx * dx + dy * dy > 1.0;
+        } else {
+          final r = rayonCoins;
+          final ecartX =
+              x < r ? r - x : (x > la - 1 - r ? x - (la - 1 - r) : 0.0);
+          final ecartY =
+              y < r ? r - y : (y > ha - 1 - r ? y - (ha - 1 - r) : 0.0);
+          dehors = ecartX > 0 &&
+              ecartY > 0 &&
+              ecartX * ecartX + ecartY * ecartY > r * r;
+        }
+        if (dehors) sortie.setPixelRgba(x, y, 0, 0, 0, 0);
+      }
+    }
+    return sortie;
+  }
+
+  /// Applique une forme à une photo posée. Toujours depuis l'image
+  /// d'origine : on ne découpe jamais une découpe.
+  Future<void> _formeDeLImage(MotDetecte mot, String forme) async {
+    final doc = document;
+    final source = mot.imageSource ?? mot.imageFlottante;
+    if (doc == null || source == null || _occupe) return;
+    setState(() {
+      _occupe = true;
+      statut = "Découpe en cours...";
+    });
+    try {
+      final decodee = img.decodeImage(source);
+      if (decodee == null) throw Exception("image illisible");
+      img.Image resultat;
+      switch (forme) {
+        case "rond":
+          resultat = _masquerLImage(decodee);
+          break;
+        case "arrondi":
+          final cote = decodee.width < decodee.height
+              ? decodee.width
+              : decodee.height;
+          resultat = _masquerLImage(decodee, rayonCoins: cote * 0.14);
+          break;
+        case "auto":
+          resultat = _detourerLeFond(decodee);
+          break;
+        default:
+          resultat = decodee;
+      }
+      final octets = Uint8List.fromList(img.encodePng(resultat));
+      final avant = await _etatActuel(doc);
+      if (!mounted) return;
+      setState(() {
+        historique.add(avant);
+        futur.clear();
+        mot.imageSource ??= source;
+        mot.imageFlottante = octets;
+        statut = switch (forme) {
+          "rond" => "Photo découpée en rond",
+          "arrondi" => "Coins arrondis",
+          "auto" => "Fond retiré",
+          _ => "Forme d'origine rétablie",
+        };
+      });
+    } catch (e) {
+      if (mounted) setState(() => statut = "Découpe impossible : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Le choix de la forme, en une feuille : quatre décisions simples.
+  Future<void> _feuilleForme(MotDetecte mot) async {
+    final choix = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  "Forme de la photo",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.auto_fix_high),
+              title: const Text("Détourer le fond"),
+              subtitle: const Text(
+                  "Retire l'aplat autour de la photo, quelle que soit sa "
+                  "forme — ronde, carrée ou découpée"),
+              onTap: () => Navigator.pop(ctx, "auto"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.circle_outlined),
+              title: const Text("Découper en rond"),
+              subtitle: const Text("Pour une photo de profil"),
+              onTap: () => Navigator.pop(ctx, "rond"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.rounded_corner),
+              title: const Text("Coins arrondis"),
+              onTap: () => Navigator.pop(ctx, "arrondi"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.crop_square),
+              title: const Text("Rectangle d'origine"),
+              subtitle: const Text("Rien n'est perdu : on repart de l'image "
+                  "telle qu'elle est arrivée"),
+              onTap: () => Navigator.pop(ctx, "rectangle"),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (choix == null || !mounted) return;
+    await _formeDeLImage(mot, choix);
+  }
+
   Future<void> _feuilleAjouter() async {
     final choix = await showModalBottomSheet<String>(
       context: context,
@@ -9077,6 +9303,17 @@ class _AccueilState extends State<Accueil> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _dupliquerSignature(mot);
+                },
+              ),
+            if (mot.imageFlottante != null)
+              ListTile(
+                leading: const Icon(Icons.interests_outlined),
+                title: const Text("Forme de la photo"),
+                subtitle: const Text(
+                    "Détourer le fond, rond, coins arrondis, rectangle"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _feuilleForme(mot);
                 },
               ),
             // Une photo d'identité se demande en millimètres : la tirer au
