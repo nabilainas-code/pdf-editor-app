@@ -4335,6 +4335,76 @@ class _AccueilState extends State<Accueil> {
     return [r, g, b];
   }
 
+  /// Couleur du fond d'une bande à effacer, relevée juste au-dessus et
+  /// juste au-dessous d'elle, sur sa propre largeur.
+  ///
+  /// Deux différences avec le relevé du pourtour, et ce sont elles qui
+  /// comptent sur un CV à colonne sombre.
+  ///
+  /// On ne relève rien sur les côtés : à gauche et à droite d'une ligne, on
+  /// est déjà dans la colonne voisine, d'un autre fond. Au-dessus et
+  /// au-dessous, on est dans l'interligne, donc dans le bon aplat.
+  ///
+  /// Et on prend la teinte la plus fréquente, sans jamais préférer la
+  /// claire. C'est cette préférence qui peignait des barres blanches en
+  /// travers du bandeau sombre : il suffisait que quelques pixels de papier
+  /// blanc entrent dans le pourtour pour que le blanc l'emporte.
+  List<int>? _fondAuDessusEtDessous(Rect rect) {
+    final image = imageDecodee;
+    if (image == null) return null;
+    final e = echelleOcr;
+    final xDebut = (rect.left * e).round().clamp(0, image.width - 1);
+    var xFin = (rect.right * e).round();
+    if (xFin <= xDebut) xFin = xDebut + 1;
+    if (xFin > image.width) xFin = image.width;
+
+    final comptes = <int, int>{};
+    final sommes = <int, List<int>>{};
+    var total = 0;
+    for (final cote in const [-1, 1]) {
+      for (var ecart = 2; ecart <= 6; ecart++) {
+        final yPdf =
+            cote < 0 ? rect.top - ecart : rect.bottom + ecart;
+        final y = (yPdf * e).round();
+        if (y < 0 || y >= image.height) continue;
+        for (var x = xDebut; x < xFin; x += 2) {
+          final p = image.getPixel(x, y);
+          // Le transparent du rendu est du papier blanc à l'écran.
+          final r = p.a == 0 ? 255 : p.r.toInt();
+          final g = p.a == 0 ? 255 : p.g.toInt();
+          final b = p.a == 0 ? 255 : p.b.toInt();
+          final cle = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+          comptes[cle] = (comptes[cle] ?? 0) + 1;
+          final somme = sommes.putIfAbsent(cle, () => [0, 0, 0, 0]);
+          somme[0] += r;
+          somme[1] += g;
+          somme[2] += b;
+          somme[3] += 1;
+          total++;
+        }
+      }
+    }
+    if (total < 4) return null;
+
+    var cleGagnante = comptes.keys.first;
+    var maxCompte = comptes[cleGagnante]!;
+    for (final entree in comptes.entries) {
+      if (entree.value > maxCompte) {
+        maxCompte = entree.value;
+        cleGagnante = entree.key;
+      }
+    }
+    // La teinte n'est pas celle du casier arrondi mais la moyenne réelle de
+    // ses pixels : un aplat reste ainsi exactement de sa couleur.
+    final somme = sommes[cleGagnante];
+    if (somme == null || somme[3] == 0) return null;
+    final r = (somme[0] / somme[3]).round().clamp(0, 255);
+    final g = (somme[1] / somme[3]).round().clamp(0, 255);
+    final b = (somme[2] / somme[3]).round().clamp(0, 255);
+    if (r >= 248 && g >= 248 && b >= 248) return const [255, 255, 255];
+    return [r, g, b];
+  }
+
   /// Couleur du papier autour d'une zone. À défaut, du blanc — et non la
   /// couleur dominante de la page : sur un document à large bandeau de
   /// couleur, cette dominante est celle du bandeau, et « effacer » une ligne
@@ -4349,6 +4419,13 @@ class _AccueilState extends State<Accueil> {
   /// autour de la ligne, donc invisible sur fond blanc. L'aspect du document
   /// ne change pas quand on passe en modification.
   Color _couleurPapierEcran(Rect zonePdf) {
+    // Même relevé que l'effacement : sur le bandeau sombre d'un CV, le
+    // pourtour ramenait du blanc, et le champ d'écriture posait un
+    // rectangle blanc sur la colonne dès qu'on touchait une ligne.
+    final proche = _fondAuDessusEtDessous(zonePdf);
+    if (proche != null) {
+      return Color.fromARGB(255, proche[0], proche[1], proche[2]);
+    }
     final fond = _fondAutour(zonePdf);
     if (fond == null) return Colors.white;
     return Color.fromARGB(255, fond[0], fond[1], fond[2]);
@@ -5110,11 +5187,16 @@ class _AccueilState extends State<Accueil> {
         y += hauteurBande;
       }
     } else {
-      // La couleur est relevée autour de cette tranche, et non autour de la
-      // ligne entière : c'est ce qui donne du sombre sur la colonne sombre
-      // et du blanc sur le papier, dans le même effacement.
+      // Relevé juste au-dessus et juste au-dessous de cette tranche, sur sa
+      // propre largeur : c'est ce qui donne du sombre sur la colonne sombre
+      // et du blanc sur le papier, dans le même effacement. Le pourtour ne
+      // sert plus que de dernier recours.
+      final proche = _fondAuDessusEtDessous(rect);
+      final fond = proche == null
+          ? _couleurLocale(rect)
+          : PdfColor(proche[0], proche[1], proche[2]);
       page.graphics.drawRectangle(
-        brush: PdfSolidBrush(_couleurLocale(rect)),
+        brush: PdfSolidBrush(fond),
         bounds: rect,
       );
     }
