@@ -7543,6 +7543,109 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Demande sur quelle page envoyer quelque chose. La page ouverte est
+  /// montrée mais pas choisissable : l'y envoyer ne voudrait rien dire.
+  Future<int?> _choisirUnePage(String titre) async {
+    if (nbPages <= 1) return null;
+    return showModalBottomSheet<int>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  titre,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: nbPages,
+                itemBuilder: (c, i) => ListTile(
+                  dense: true,
+                  enabled: i != pageActive,
+                  leading: const Icon(Icons.description_outlined),
+                  title: Text("Page ${i + 1}"),
+                  subtitle:
+                      i == pageActive ? const Text("la page ouverte") : null,
+                  onTap: () => Navigator.pop(ctx, i),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Envoie un objet posé — photo, signature, cachet détaché — sur une
+  /// autre page du document.
+  ///
+  /// Un objet flottant appartient à la page où il a été posé, et changer de
+  /// page le laissait derrière. Le faire passer sur une autre demandait de
+  /// le copier, de changer de page, de coller, puis de revenir supprimer
+  /// l'original — quatre gestes pour un déplacement.
+  Future<void> _envoyerVersUnePage(MotDetecte mot) async {
+    if (!mot.estFlottant || nbPages <= 1 || _occupe) return;
+    final cible = await _choisirUnePage("Envoyer sur quelle page ?");
+    if (cible == null || !mounted) return;
+    if (cible < 0 || cible >= nbPages || cible == pageActive) return;
+    final doc = document;
+    if (doc == null) return;
+
+    final avant = await _etatActuel(doc);
+    if (!mounted) return;
+    setState(() {
+      historique.add(avant);
+      futur.clear();
+      mots = mots.where((m) => !identical(m, mot)).toList();
+      selection.remove(mot);
+      motsParPage[pageActive] = mots;
+      final destination = motsParPage[cible] ?? <MotDetecte>[];
+      motsParPage[cible] = [...destination, mot];
+    });
+
+    await _allerPage(cible);
+    if (!mounted) return;
+
+    // La page d'arrivée a pu être analysée à l'ouverture, ce qui remplace
+    // sa liste de lignes : on remet l'objet dedans plutôt que de le perdre
+    // en route.
+    setState(() {
+      if (!mots.any((m) => identical(m, mot))) {
+        mots = [...mots, mot];
+      }
+      // La page d'arrivée peut être plus petite : on ramène l'objet dedans
+      // plutôt que de le laisser hors du papier.
+      var gauche = mot.zone.left;
+      var haut = mot.zone.top;
+      final largeur = mot.zone.width;
+      final hauteur = mot.zone.height;
+      if (gauche + largeur > taillePage.width) {
+        gauche = taillePage.width - largeur;
+      }
+      if (haut + hauteur > taillePage.height) {
+        haut = taillePage.height - hauteur;
+      }
+      if (gauche < 0) gauche = 0;
+      if (haut < 0) haut = 0;
+      mot.zone = Rect.fromLTWH(gauche, haut, largeur, hauteur);
+      motsParPage[pageActive] = mots;
+      selection
+        ..clear()
+        ..add(mot);
+      statut = "Posé sur la page ${cible + 1} — glissez-le à sa place";
+    });
+  }
+
   /// Le choix de la forme, en une feuille : quatre décisions simples.
   Future<void> _feuilleForme(MotDetecte mot) async {
     final choix = await showModalBottomSheet<String>(
@@ -9303,6 +9406,20 @@ class _AccueilState extends State<Accueil> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _dupliquerSignature(mot);
+                },
+              ),
+            // Un objet posé appartient à sa page : sans ce geste, il
+            // fallait le copier, changer de page, coller, puis revenir
+            // supprimer l'original.
+            if (estSignature && nbPages > 1)
+              ListTile(
+                leading: const Icon(Icons.move_down),
+                title: const Text("Envoyer sur une autre page"),
+                subtitle: const Text(
+                    "L'objet quitte cette page et vous y suit"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _envoyerVersUnePage(mot);
                 },
               ),
             if (mot.imageFlottante != null)
