@@ -365,6 +365,54 @@ class _Constat {
 /// millimètres (35 × 45), jamais en points ni en pixels.
 const double pointsParMm = 72 / 25.4;
 
+/// Les traits d'alignement montrés pendant qu'on déplace un objet.
+///
+/// Sans eux, l'objet se collerait tout seul sans qu'on sache pourquoi :
+/// le trait dit sur quoi il vient de se caler.
+class _Guides extends CustomPainter {
+  final List<double> x;
+  final List<double> y;
+  final double echelle;
+
+  const _Guides({required this.x, required this.y, required this.echelle});
+
+  @override
+  void paint(Canvas toile, Size taille) {
+    if (x.isEmpty && y.isEmpty) return;
+    final pinceau = Paint()
+      ..color = const Color(0xFFE91E63)
+      ..strokeWidth = 1.2;
+    for (final position in x) {
+      _pointille(toile, pinceau, Offset(position * echelle, 0),
+          Offset(position * echelle, taille.height));
+    }
+    for (final position in y) {
+      _pointille(toile, pinceau, Offset(0, position * echelle),
+          Offset(taille.width, position * echelle));
+    }
+  }
+
+  /// Un trait pointillé : plein, il se confondrait avec un trait du
+  /// document.
+  void _pointille(Canvas toile, Paint pinceau, Offset debut, Offset fin) {
+    const trait = 7.0;
+    const vide = 5.0;
+    final total = (fin - debut).distance;
+    if (total <= 0) return;
+    final pas = (fin - debut) / total;
+    var parcouru = 0.0;
+    while (parcouru < total) {
+      final bout = parcouru + trait > total ? total : parcouru + trait;
+      toile.drawLine(debut + pas * parcouru, debut + pas * bout, pinceau);
+      parcouru = bout + vide;
+    }
+  }
+
+  @override
+  bool shouldRepaint(_Guides ancien) =>
+      ancien.x != x || ancien.y != y || ancien.echelle != echelle;
+}
+
 class Etat {
   final Uint8List octetsDocument;
   final List<MotDetecte> mots;
@@ -770,6 +818,24 @@ class _AccueilState extends State<Accueil> {
 
   Offset deplacementGroupeEnCours = Offset.zero;
   bool groupeEnDeplacement = false;
+
+  /// Le déplacement tel que le doigt l'a fait, avant aimantation.
+  ///
+  /// Le garder à part est ce qui rend l'aimant vivable : l'objet affiché se
+  /// colle au repère, mais le doigt continue d'avancer sur sa propre
+  /// trajectoire. Si l'on corrigeait directement le déplacement affiché,
+  /// chaque correction s'ajouterait à la suivante et l'objet finirait à
+  /// plusieurs centimètres du doigt.
+  Offset deplacementBrut = Offset.zero;
+
+  /// Repères sur lesquels l'objet déplacé vient de se coller, en points de
+  /// la page. Ils ne sont dessinés que pendant le geste.
+  List<double> guidesX = const [];
+  List<double> guidesY = const [];
+
+  /// L'aimantation, qu'on peut couper depuis le menu ⋮ quand on veut poser
+  /// quelque chose exactement là où on l'a mis, repère ou pas.
+  bool aimantation = true;
 
   /// Redimensionnement en cours par une poignée de coin : le rectangle suivi
   /// du doigt, appliqué seulement au relâchement.
@@ -5992,6 +6058,99 @@ class _AccueilState extends State<Accueil> {
     return concernees.where((m) => !groupe.contains(m)).toList();
   }
 
+  /// Colle l'objet déplacé sur les repères de la page quand il en approche,
+  /// et retient lesquels pour les dessiner.
+  ///
+  /// Les repères sont ceux qu'on cherche à l'œil en mettant en page : les
+  /// bords et le centre de la page, la marge du texte, et les bords et
+  /// centres des autres objets. Aligner une photo sur la marge d'un CV
+  /// demandait jusqu'ici de la tirer au dixième de millimètre en zoomant.
+  Offset _aimanter(Offset brut, double echelle) {
+    var trouvesX = const <double>[];
+    var trouvesY = const <double>[];
+    if (!aimantation || selection.isEmpty || echelle <= 0) {
+      guidesX = trouvesX;
+      guidesY = trouvesY;
+      return brut;
+    }
+
+    final dx0 = brut.dx / echelle;
+    final dy0 = brut.dy / echelle;
+
+    Rect? bloc;
+    for (final m in selection) {
+      final r = m.zone.shift(Offset(dx0, dy0));
+      bloc = bloc == null ? r : bloc.expandToInclude(r);
+    }
+    if (bloc == null) {
+      guidesX = trouvesX;
+      guidesY = trouvesY;
+      return brut;
+    }
+
+    // Le seuil est donné en points d'écran, puis ramené en points de page :
+    // l'aimant garde ainsi la même force sous le doigt, qu'on soit à 50 %
+    // ou à 400 % de zoom.
+    final zoom = _transformation.value.getMaxScaleOnAxis();
+    var seuil = 8.0 / (echelle * (zoom <= 0 ? 1 : zoom));
+    if (seuil < 1.0) seuil = 1.0;
+    if (seuil > 16) seuil = 16;
+
+    final reperesX = <double>{
+      0,
+      taillePage.width / 2,
+      taillePage.width,
+      _margeGauche,
+    };
+    final reperesY = <double>{
+      0,
+      taillePage.height / 2,
+      taillePage.height,
+    };
+    for (final m in mots) {
+      if (selection.contains(m)) continue;
+      if (m.texte.isEmpty && !m.estFlottant) continue;
+      reperesX
+        ..add(m.zone.left)
+        ..add(m.zone.center.dx)
+        ..add(m.zone.right);
+      reperesY
+        ..add(m.zone.top)
+        ..add(m.zone.center.dy)
+        ..add(m.zone.bottom);
+    }
+
+    double corrX = 0;
+    var meilleurX = seuil;
+    for (final repere in reperesX) {
+      for (final bord in [bloc.left, bloc.center.dx, bloc.right]) {
+        final ecart = repere - bord;
+        if (ecart.abs() < meilleurX) {
+          meilleurX = ecart.abs();
+          corrX = ecart;
+          trouvesX = [repere];
+        }
+      }
+    }
+
+    double corrY = 0;
+    var meilleurY = seuil;
+    for (final repere in reperesY) {
+      for (final bord in [bloc.top, bloc.center.dy, bloc.bottom]) {
+        final ecart = repere - bord;
+        if (ecart.abs() < meilleurY) {
+          meilleurY = ecart.abs();
+          corrY = ecart;
+          trouvesY = [repere];
+        }
+      }
+    }
+
+    guidesX = trouvesX;
+    guidesY = trouvesY;
+    return Offset((dx0 + corrX) * echelle, (dy0 + corrY) * echelle);
+  }
+
   Future<void> _deplacerLigne(MotDetecte mot, double dx, double dy) =>
       _deplacerGroupe([mot], dx, dy);
 
@@ -8355,6 +8514,14 @@ class _AccueilState extends State<Accueil> {
           case "fermer":
             _fermerDocument();
             break;
+          case "aimant":
+            setState(() {
+              aimantation = !aimantation;
+              statut = aimantation
+                  ? "Aimantation activée"
+                  : "Aimantation coupée — l'objet reste où vous le posez";
+            });
+            break;
           case "affichage":
             modeAffichage.value = modeAffichage.value == ThemeMode.dark
                 ? ThemeMode.light
@@ -8406,6 +8573,19 @@ class _AccueilState extends State<Accueil> {
         ),
         // Le document garde son papier blanc dans les deux cas : c'est une
         // feuille qu'on regarde. Seul ce qui l'entoure change.
+        if (document != null)
+          PopupMenuItem(
+            value: "aimant",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(aimantation ? Icons.grid_on : Icons.grid_off),
+              title: Text(aimantation
+                  ? "Aimantation : activée"
+                  : "Aimantation : coupée"),
+              subtitle: const Text(
+                  "Colle l'objet déplacé sur les marges et sur les autres"),
+            ),
+          ),
         PopupMenuItem(
           value: "affichage",
           child: ListTile(
@@ -9742,6 +9922,7 @@ class _AccueilState extends State<Accueil> {
                               if (!modeNavigation &&
                                   !enCollage &&
                                   !enAjoutTexte &&
+                                  !enPosePhoto &&
                                   outilTrace == null &&
                                   !modeRemplissage)
                                 for (final mot in mots)
@@ -9898,6 +10079,9 @@ class _AccueilState extends State<Accueil> {
                                           groupeEnDeplacement = true;
                                           deplacementGroupeEnCours =
                                               Offset.zero;
+                                          deplacementBrut = Offset.zero;
+                                          guidesX = const [];
+                                          guidesY = const [];
                                         });
                                         return;
                                       }
@@ -9935,8 +10119,9 @@ class _AccueilState extends State<Accueil> {
                                       }
                                       if (!groupeEnDeplacement) return;
                                       setState(() {
-                                        deplacementGroupeEnCours +=
-                                            details.delta;
+                                        deplacementBrut += details.delta;
+                                        deplacementGroupeEnCours =
+                                            _aimanter(deplacementBrut, echelle);
                                       });
                                     },
                                     onPanEnd: (_) async {
@@ -9964,6 +10149,9 @@ class _AccueilState extends State<Accueil> {
                                       setState(() {
                                         groupeEnDeplacement = false;
                                         deplacementGroupeEnCours = Offset.zero;
+                                        deplacementBrut = Offset.zero;
+                                        guidesX = const [];
+                                        guidesY = const [];
                                       });
                                       await _deplacerGroupe(
                                           selection.toList(), dx, dy);
@@ -10244,6 +10432,22 @@ class _AccueilState extends State<Accueil> {
                                                   : null,
                                             ),
                                           ),
+                                  ),
+                                // Par-dessus tout le reste : les traits
+                                // doivent se voir même sur une photo sombre.
+                                if (groupeEnDeplacement &&
+                                    (guidesX.isNotEmpty ||
+                                        guidesY.isNotEmpty))
+                                  Positioned.fill(
+                                    child: IgnorePointer(
+                                      child: CustomPaint(
+                                        painter: _Guides(
+                                          x: guidesX,
+                                          y: guidesY,
+                                          echelle: echelle,
+                                        ),
+                                      ),
+                                    ),
                                   ),
                               ],
                             ),
