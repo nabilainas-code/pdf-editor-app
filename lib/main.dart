@@ -7657,6 +7657,102 @@ class _AccueilState extends State<Accueil> {
   }
 
   /// Écrit le document de travail s'il a changé depuis la dernière fois.
+  /// Retire un document de la liste des récents, et efface la copie que
+  /// l'application en gardait.
+  Future<void> _oublierRecent(Map<String, dynamic> entree) async {
+    try {
+      final chemin = entree['chemin'] as String?;
+      if (chemin != null) {
+        final fichier = File(chemin);
+        if (await fichier.exists()) await fichier.delete();
+      }
+      final restants = [
+        for (final e in recents)
+          if (e['chemin'] != entree['chemin']) e
+      ];
+      final dossier = await _dossierApp();
+      await File('${dossier.path}/recents.json')
+          .writeAsString(jsonEncode(restants), flush: true);
+      if (!mounted) return;
+      setState(() {
+        recents = restants;
+        statut = "Document retiré des récents";
+      });
+    } catch (e) {
+      if (mounted) setState(() => statut = "Effacement impossible : $e");
+    }
+  }
+
+  /// Efface tout ce que l'application garde sur le téléphone : les copies
+  /// des dix derniers documents, et celle du travail en cours.
+  ///
+  /// C'est le pendant de l'export aplati, et il ne faut pas confondre les
+  /// deux. L'aplatissement protège ce qu'il y a dans le fichier qu'on
+  /// envoie ; ceci efface ce qui dort sur le téléphone. Deux choses
+  /// différentes, deux gestes différents.
+  Future<void> _effacerLesRecents() async {
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Effacer les documents gardés ?"),
+        content: const Text(
+          "L'application garde une copie complète des dix derniers "
+          "documents ouverts, et une copie du travail en cours. Tout cela "
+          "sera effacé du téléphone.\n\n"
+          "Vos fichiers d'origine ne sont pas touchés : ce ne sont que les "
+          "copies de l'application. La reprise ne sera plus proposée.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Annuler"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Effacer"),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true || !mounted) return;
+
+    var effaces = 0;
+    try {
+      final dossier = await _dossierApp();
+      final coin = Directory('${dossier.path}/recents');
+      if (await coin.exists()) {
+        await for (final entite in coin.list()) {
+          if (entite is File) {
+            await entite.delete();
+            effaces++;
+          }
+        }
+      }
+      for (final nom in const [
+        'recents.json',
+        'travail_en_cours.pdf',
+        'travail_en_cours.json',
+      ]) {
+        final fichier = File('${dossier.path}/$nom');
+        if (await fichier.exists()) await fichier.delete();
+      }
+    } catch (e) {
+      if (mounted) setState(() => statut = "Effacement incomplet : $e");
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      recents = [];
+      travailEnCours = null;
+      // Sans cela, la sauvegarde automatique récrirait le travail en cours
+      // dans les vingt secondes, et l'effacement n'aurait servi à rien.
+      _etapesSauvegardees = historique.length;
+      statut = effaces == 0
+          ? "Rien n'était gardé sur le téléphone"
+          : "$effaces copie(s) effacée(s) du téléphone";
+    });
+  }
+
   Future<void> _sauvegardeAuto() async {
     final doc = document;
     if (doc == null || modeLecture || _sauvegardeEnCours || _occupe) return;
@@ -8514,6 +8610,9 @@ class _AccueilState extends State<Accueil> {
           case "fermer":
             _fermerDocument();
             break;
+          case "oublier":
+            _effacerLesRecents();
+            break;
           case "aimant":
             setState(() {
               aimantation = !aimantation;
@@ -8573,6 +8672,16 @@ class _AccueilState extends State<Accueil> {
         ),
         // Le document garde son papier blanc dans les deux cas : c'est une
         // feuille qu'on regarde. Seul ce qui l'entoure change.
+        if (recents.isNotEmpty || travailEnCours != null)
+          const PopupMenuItem(
+            value: "oublier",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.delete_sweep_outlined),
+              title: Text("Effacer les documents gardés"),
+              subtitle: Text("Les copies qui dorment sur le téléphone"),
+            ),
+          ),
         if (document != null)
           PopupMenuItem(
             value: "aimant",
@@ -9078,6 +9187,11 @@ class _AccueilState extends State<Accueil> {
                       maxLines: 1, overflow: TextOverflow.ellipsis),
                   subtitle: Text(_ilYA(e['date'] as String?)),
                   onTap: _occupe ? null : () => _ouvrirRecent(e),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    tooltip: "Retirer des récents et effacer la copie",
+                    onPressed: _occupe ? null : () => _oublierRecent(e),
+                  ),
                 ),
             ],
             const SizedBox(height: 8),
