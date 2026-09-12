@@ -4246,8 +4246,6 @@ class _AccueilState extends State<Accueil> {
   /// pour coller aux petites variations locales du fond (scan pas
   /// parfaitement uniforme), et on se rabat sur la couleur dominante de
   /// toute la page si l'entourage est trop couvert d'encre pour être fiable.
-  PdfColor _couleurDeFond(MotDetecte mot) => _couleurLocale(mot.zone);
-
   /// Fond réel autour d'une zone, lu dans l'image de la page, en [r, g, b].
   ///
   /// Deux passes : d'abord la teinte claire la plus fréquente (le papier),
@@ -4637,8 +4635,18 @@ class _AccueilState extends State<Accueil> {
     // ligne normale ; la largeur fixe de la boîte pour une zone libre, dont
     // le cadre ne s'agrandit jamais au contenu (c'est ce qui permet de
     // centrer ou d'aligner à droite dedans).
+    // Sur un document en colonnes, une ligne ne dispose que de la sienne.
+    // La laisser s'étaler jusqu'au bord de la page donne un rectangle de
+    // mesure qui traverse le couloir, et l'effacement de ce rectangle vient
+    // barrer la colonne d'à côté — une bande sombre en travers du blanc.
+    var bordDroite = taillePage.width;
+    for (final couloir in couloirsColonnes) {
+      if (couloir > zone.left + 1 && couloir < bordDroite) {
+        bordDroite = couloir;
+      }
+    }
     final largeurDispo =
-        mot.boiteLibre ? zone.width - 4 : taillePage.width - zone.left - 2;
+        mot.boiteLibre ? zone.width - 4 : bordDroite - zone.left - 2;
 
     // Nombre de lignes que le texte occupera dans la boîte.
     //
@@ -5024,7 +5032,66 @@ class _AccueilState extends State<Accueil> {
 
   /// Efface une zone : avec du papier prélevé à côté si on en trouve, sinon
   /// avec la couleur de fond estimée.
+  /// Découpe un rectangle à effacer en tranches verticales de fond
+  /// homogène. Une seule tranche dans le cas ordinaire.
+  ///
+  /// Un même rectangle peut couvrir deux fonds : la colonne sombre d'un CV
+  /// et le papier blanc à côté. Peint d'une seule couleur, il en barrait un
+  /// des deux — une bande sombre en travers du blanc, ou une bande blanche
+  /// en travers du sombre.
+  List<Rect> _tranchesDeFond(Rect rect) {
+    final image = imageDecodee;
+    // Quatre points de pas : assez fin pour trouver le bord d'une colonne,
+    // assez large pour ne pas découper le rectangle en cent morceaux.
+    const pas = 4.0;
+    if (image == null || rect.width <= pas * 2) return [rect];
+
+    /// La teinte du fond sous une abscisse, relevée juste au-dessus et
+    /// juste au-dessous du rectangle : ce qu'il y a dedans est l'encre
+    /// qu'on efface, pas le fond.
+    int? teinteA(double x) {
+      final e = echelleOcr;
+      final xi = (x * e).round().clamp(0, image.width - 1);
+      for (final y in [rect.top - 4, rect.bottom + 4]) {
+        final yi = (y * e).round();
+        if (yi < 0 || yi >= image.height) continue;
+        final p = image.getPixel(xi, yi);
+        if (p.a == 0) return 0x7FFF;
+        // Teinte arrondie au trente-deuxième : deux pixels d'un même aplat
+        // ne diffèrent que du bruit du rendu.
+        return ((p.r.toInt() >> 5) << 10) |
+            ((p.g.toInt() >> 5) << 5) |
+            (p.b.toInt() >> 5);
+      }
+      return null;
+    }
+
+    final tranches = <Rect>[];
+    var debut = rect.left;
+    var courante = teinteA(rect.left + pas / 2);
+    for (var x = rect.left + pas; x < rect.right - 1; x += pas) {
+      final ici = teinteA(x + pas / 2);
+      if (ici == null || ici == courante) continue;
+      tranches.add(Rect.fromLTRB(debut, rect.top, x, rect.bottom));
+      debut = x;
+      courante = ici;
+    }
+    tranches.add(Rect.fromLTRB(debut, rect.top, rect.right, rect.bottom));
+
+    // Deux ou trois tranches, c'est une frontière de colonne. Dix, c'est
+    // une photo ou un dégradé : les découper une à une coûterait cher pour
+    // un résultat qui ne serait pas meilleur.
+    if (tranches.length > 6) return [rect];
+    return tranches;
+  }
+
   void _effacerRect(PdfPage page, Rect rect, MotDetecte mot) {
+    for (final tranche in _tranchesDeFond(rect)) {
+      _effacerTranche(page, tranche);
+    }
+  }
+
+  void _effacerTranche(PdfPage page, Rect rect) {
     final papier = _papierProche(rect);
     if (papier != null) {
       // La bande de papier prélevée fait six points de haut. Étirée sur
@@ -5043,8 +5110,11 @@ class _AccueilState extends State<Accueil> {
         y += hauteurBande;
       }
     } else {
+      // La couleur est relevée autour de cette tranche, et non autour de la
+      // ligne entière : c'est ce qui donne du sombre sur la colonne sombre
+      // et du blanc sur le papier, dans le même effacement.
       page.graphics.drawRectangle(
-        brush: PdfSolidBrush(_couleurDeFond(mot)),
+        brush: PdfSolidBrush(_couleurLocale(rect)),
         bounds: rect,
       );
     }
