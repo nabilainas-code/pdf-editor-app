@@ -112,6 +112,20 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
   final bandeX = plusLongueBande(partColonnes, 0.5);
   if (bandeY[0] < 0 || bandeX[0] < 0) return null;
 
+  // Les bandes sont cherchées séparément en lignes et en colonnes : deux
+  // objets clairs posés en équerre — le haut d'une nappe et la gauche d'une
+  // feuille — donnent chacun leur bande, et leur croisement désigne un
+  // rectangle qui n'est ni l'un ni l'autre. On vérifie donc que ce
+  // rectangle est bien clair sur toute sa surface avant de le proposer.
+  var dedans = 0, surface = 0;
+  for (var y = bandeY[0]; y <= bandeY[1]; y++) {
+    for (var x = bandeX[0]; x <= bandeX[1]; x++) {
+      surface++;
+      if (clarte[y * la + x] >= seuil) dedans++;
+    }
+  }
+  if (surface == 0 || dedans / surface < 0.75) return null;
+
   final hauteurTrouvee = bandeY[1] - bandeY[0] + 1;
   final largeurTrouvee = bandeX[1] - bandeX[0] + 1;
   // Trop petit : ce n'est pas le document mais un reflet. Trop grand : il
@@ -2519,8 +2533,18 @@ class _AccueilState extends State<Accueil> {
     for (var y = 0; y < ha; y++) {
       for (var x = 0; x < la; x++) {
         final pixel = petite.getPixel(x, y);
+        final r = pixel.r.toDouble();
+        final v = pixel.g.toDouble();
+        final b = pixel.b.toDouble();
+        // Comme dans le viseur : ce qui est coloré n'est pas du papier,
+        // même quand c'est clair. Une nappe verte ou un plateau de bois
+        // perdent ainsi les points qui les mettaient au niveau de la
+        // feuille.
+        final haut = r > v ? (r > b ? r : b) : (v > b ? v : b);
+        final bas = r < v ? (r < b ? r : b) : (v < b ? v : b);
+        final couleur = haut - bas;
         clarte[y * la + x] =
-            (0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b)
+            (0.299 * r + 0.587 * v + 0.114 * b - couleur * 2)
                 .round()
                 .clamp(0, 255);
       }
@@ -12155,12 +12179,40 @@ class _EcranViseurState extends State<EcranViseur> {
       final la = (image.width / pas).floor();
       final ha = (image.height / pas).floor();
       if (la < 20 || ha < 20) return;
+
+      // Les deux plans de couleur, quand l'appareil les fournit — ils sont
+      // deux fois moins fins que la luminance, d'où les divisions par deux.
+      //
+      // La clarté seule ne suffit pas : une nappe vert clair est aussi
+      // lumineuse qu'une feuille, et le cadre finissait par englober les
+      // deux. Le papier a une propriété que la nappe n'a pas : il est
+      // neutre, ses deux valeurs de couleur restent près de 128. On retire
+      // donc à chaque point ce qui l'éloigne du gris, et la nappe passe
+      // d'un coup sous le papier.
+      final planU = image.planes.length > 1 ? image.planes[1] : null;
+      final planV = image.planes.length > 2 ? image.planes[2] : null;
+      final ecartUV = planU?.bytesPerPixel ?? 1;
+
       final clarte = Uint8List(la * ha);
       for (var y = 0; y < ha; y++) {
         final ligne = (y * pas) * plan.bytesPerRow;
+        final ligneUV =
+            planU == null ? 0 : ((y * pas) >> 1) * planU.bytesPerRow;
         for (var x = 0; x < la; x++) {
           final i = ligne + x * pas * ecart;
-          clarte[y * la + x] = i < plan.bytes.length ? plan.bytes[i] : 0;
+          var valeur = i < plan.bytes.length ? plan.bytes[i] : 0;
+          if (planU != null && planV != null) {
+            final j = ligneUV + ((x * pas) >> 1) * ecartUV;
+            if (j < planU.bytes.length && j < planV.bytes.length) {
+              final couleur =
+                  (planU.bytes[j] - 128).abs() + (planV.bytes[j] - 128).abs();
+              // Deux fois l'écart au gris : une couleur franche perd assez
+              // de points pour passer derrière le papier, une simple
+              // dominante d'éclairage n'y change presque rien.
+              valeur -= couleur * 2;
+            }
+          }
+          clarte[y * la + x] = valeur.clamp(0, 255);
         }
       }
       final trouve = cadreClair(clarte, la, ha);
