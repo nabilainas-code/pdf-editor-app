@@ -185,6 +185,41 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
   return retenu;
 }
 
+/// Fait faire un quart de tour à une image, dans le sens demandé.
+///
+/// Écrit ici plutôt que repris de la bibliothèque d'images : celle-ci ne
+/// dit pas dans quel sens elle tourne pour un angle positif. Or le
+/// recadrage doit tourner exactement comme la photo, au point près — un
+/// sens deviné à l'envers aurait décalé la découpe sans prévenir.
+///
+/// Vers la droite, le point (x, y) va en (hauteur - 1 - y, x) ; vers la
+/// gauche, en (y, largeur - 1 - x).
+img.Image quartDeTour(img.Image source, {required bool versLaDroite}) {
+  final largeur = source.width;
+  final hauteur = source.height;
+  final sortie = img.Image(
+      width: hauteur, height: largeur, numChannels: source.numChannels);
+  for (var y = 0; y < hauteur; y++) {
+    for (var x = 0; x < largeur; x++) {
+      final point = source.getPixel(x, y);
+      if (versLaDroite) {
+        sortie.setPixel(hauteur - 1 - y, x, point);
+      } else {
+        sortie.setPixel(y, largeur - 1 - x, point);
+      }
+    }
+  }
+  return sortie;
+}
+
+/// Le même rectangle, vu après ce quart de tour.
+Rect rectApresQuartDeTour(Rect zone, int largeur, int hauteur,
+    {required bool versLaDroite}) {
+  return versLaDroite
+      ? Rect.fromLTWH(hauteur - zone.bottom, zone.left, zone.height, zone.width)
+      : Rect.fromLTWH(zone.top, largeur - zone.right, zone.height, zone.width);
+}
+
 /// Découpe une image sur un rectangle, sans jamais sortir de ses bords :
 /// un rectangle arrondi au point près peut déborder d'une unité, et la
 /// bibliothèque d'images, elle, ne pardonne pas.
@@ -8228,6 +8263,122 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Fait pivoter d'un quart de tour une photo posée dans la page.
+  ///
+  /// Quatre quarts de tour ramènent exactement la photo de départ : un
+  /// quart de tour ne perd rien, il ne fait que déplacer des points.
+  ///
+  /// L'original mis de côté et le recadrage tournent avec elle. Sans cela,
+  /// rouvrir le recadrage après une rotation serait reparti d'une image
+  /// droite, et la rotation aurait disparu d'un coup.
+  Future<void> _pivoterImage(MotDetecte mot, bool versLaDroite) async {
+    final doc = document;
+    final visible = mot.imageFlottante;
+    if (doc == null || visible == null || _occupe) return;
+    setState(() {
+      _occupe = true;
+      statut = "Rotation...";
+    });
+    try {
+      final decodee = img.decodeImage(visible);
+      if (decodee == null) throw Exception("photo illisible");
+      final resultat = quartDeTour(decodee, versLaDroite: versLaDroite);
+      final octets = Uint8List.fromList(img.encodePng(resultat));
+
+      var origine = mot.imageSource;
+      var coupe = mot.recadrage;
+      if (origine != null) {
+        final source = img.decodeImage(origine);
+        if (source != null) {
+          if (coupe != null) {
+            coupe = rectApresQuartDeTour(coupe, source.width, source.height,
+                versLaDroite: versLaDroite);
+          }
+          origine = Uint8List.fromList(img.encodePng(
+              quartDeTour(source, versLaDroite: versLaDroite)));
+        }
+      }
+
+      final avant = await _etatActuel(doc);
+      if (!mounted) return;
+      setState(() {
+        historique.add(avant);
+        futur.clear();
+        mot.imageFlottante = octets;
+        if (origine != null) mot.imageSource = origine;
+        mot.recadrage = coupe;
+        if (resultat.width > 0) {
+          mot.ratioSignature = resultat.height / resultat.width;
+          // Le cadre pivote avec la photo : sa largeur devient sa hauteur,
+          // autour du même centre. Une photo couchée qu'on redresse ne
+          // doit pas rester écrasée dans un cadre resté large.
+          final centre = mot.zone.center;
+          var largeur = mot.zone.height;
+          var hauteur = mot.zone.width;
+          if (largeur > taillePage.width) largeur = taillePage.width;
+          if (hauteur > taillePage.height) hauteur = taillePage.height;
+          var gauche = centre.dx - largeur / 2;
+          var haut = centre.dy - hauteur / 2;
+          if (gauche + largeur > taillePage.width) {
+            gauche = taillePage.width - largeur;
+          }
+          if (haut + hauteur > taillePage.height) {
+            haut = taillePage.height - hauteur;
+          }
+          if (gauche < 0) gauche = 0;
+          if (haut < 0) haut = 0;
+          mot.zone = Rect.fromLTWH(gauche, haut, largeur, hauteur);
+        }
+        statut = versLaDroite
+            ? "Photo pivotée vers la droite"
+            : "Photo pivotée vers la gauche";
+      });
+    } catch (e) {
+      if (mounted) setState(() => statut = "Rotation impossible : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Deux gestes, un par sens. Pas de champ d'angle : une photo posée de
+  /// travers se redresse par quarts de tour, et un demi-tour se demande en
+  /// deux fois plutôt qu'en tapant « 180 ».
+  Future<void> _feuilleRotation(MotDetecte mot) async {
+    final versLaDroite = await showModalBottomSheet<bool>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  "Faire pivoter la photo",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.rotate_90_degrees_ccw_outlined),
+              title: const Text("Un quart de tour vers la gauche"),
+              onTap: () => Navigator.pop(ctx, false),
+            ),
+            ListTile(
+              leading: const Icon(Icons.rotate_90_degrees_cw_outlined),
+              title: const Text("Un quart de tour vers la droite"),
+              onTap: () => Navigator.pop(ctx, true),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (versLaDroite == null || !mounted) return;
+    await _pivoterImage(mot, versLaDroite);
+  }
+
   Future<void> _formeDeLImage(MotDetecte mot, String forme) async {
     final doc = document;
     final source = mot.imageSource ?? mot.imageFlottante;
@@ -10213,6 +10364,16 @@ class _AccueilState extends State<Accueil> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _recadrerImage(mot);
+                },
+              ),
+            if (mot.imageFlottante != null)
+              ListTile(
+                leading: const Icon(Icons.rotate_right),
+                title: const Text("Faire pivoter"),
+                subtitle: const Text("Un quart de tour, à gauche ou à droite"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _feuilleRotation(mot);
                 },
               ),
             if (mot.imageFlottante != null)
