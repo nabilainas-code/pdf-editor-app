@@ -3103,9 +3103,12 @@ class _AccueilState extends State<Accueil> {
   /// revanche il demande les services Google Play, et il n'est pas garanti
   /// sur tous les appareils : c'est pourquoi il s'ajoute au scanner
   /// existant au lieu de le remplacer.
-  Future<void> _scanIntelligent() async {
-    if (_occupe) return;
-    setState(() => statut = "Ouverture du scanner...");
+  /// Capture par le moteur de Google, jusqu'à [pages] pages.
+  ///
+  /// Rend une liste vide si l'on renonce dans son écran, et lève si le
+  /// moteur n'est pas disponible sur l'appareil — à l'appelant de retomber
+  /// alors sur la prise de vue classique.
+  Future<List<img.Image>> _capturerAvecGoogle(int pages) async {
     DocumentScanner? scanner;
     try {
       scanner = DocumentScanner(
@@ -3114,30 +3117,40 @@ class _AccueilState extends State<Accueil> {
           // Le mode complet : bords, filtres et retouche, plutôt que la
           // seule prise de vue.
           mode: ScannerMode.filter,
-          pageLimit: 30,
+          pageLimit: pages,
           isGalleryImport: true,
         ),
       );
       final resultat = await scanner.scanDocument();
-      final chemins = resultat.images;
-      if (chemins.isEmpty) {
-        if (mounted) setState(() => statut = "Scan annulé");
+      final images = <img.Image>[];
+      for (final chemin in resultat.images) {
+        final decodee = img.decodeImage(await File(chemin).readAsBytes());
+        if (decodee != null) images.add(decodee);
+      }
+      return images;
+    } finally {
+      try {
+        await scanner?.close();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _scanIntelligent() async {
+    if (_occupe) return;
+    setState(() => statut = "Ouverture du scanner...");
+    try {
+      final pages = await _capturerAvecGoogle(30);
+      if (!mounted) return;
+      if (pages.isEmpty) {
+        setState(() => statut = "Scan annulé");
         return;
       }
-      if (!mounted) return;
       setState(() {
         _occupe = true;
-        statut = chemins.length == 1
+        statut = pages.length == 1
             ? "Assemblage du document..."
-            : "Assemblage des ${chemins.length} pages...";
+            : "Assemblage des ${pages.length} pages...";
       });
-      final pages = <img.Image>[];
-      for (final chemin in chemins) {
-        final octets = await File(chemin).readAsBytes();
-        final image = img.decodeImage(octets);
-        if (image != null) pages.add(image);
-      }
-      if (pages.isEmpty) throw Exception("images illisibles");
       // Les pages arrivent déjà redressées et nettoyées : on ne leur
       // applique aucun traitement de plus, qui ne ferait que les abîmer.
       await _ouvrirDepuisImages(pages, "document");
@@ -3148,9 +3161,6 @@ class _AccueilState extends State<Accueil> {
             "utilisez « Prendre une photo »");
       }
     } finally {
-      try {
-        await scanner?.close();
-      } catch (_) {}
       if (mounted) setState(() => _occupe = false);
     }
   }
@@ -3321,6 +3331,38 @@ class _AccueilState extends State<Accueil> {
   /// souhaite, posés tous deux sur une seule page.
   Future<void> _scannerIdentite(ImageSource source) async {
     if (_occupe) return;
+
+    // Le moteur de Google d'abord. Une carte posée sur une nappe de la même
+    // couleur qu'elle est exactement le cas que le repérage maison ne sait
+    // pas traiter — il cherche un objet clair sur fond sombre — et que lui
+    // suit en direct, coins compris, en redressant la perspective. Le recto
+    // et le verso se prennent l'un après l'autre dans son écran, et
+    // ressortent ici pour être posés tous deux sur une seule feuille, comme
+    // les administrations le demandent.
+    try {
+      setState(() => statut = "Recto, puis verso : deux pages");
+      final prises = await _capturerAvecGoogle(2);
+      if (!mounted) return;
+      if (prises.isEmpty) {
+        setState(() => statut = "Scan annulé");
+        return;
+      }
+      setState(() {
+        _occupe = true;
+        statut = "Composition de la page...";
+      });
+      try {
+        await _ouvrirDepuisImages(prises, "identite");
+      } finally {
+        if (mounted) setState(() => _occupe = false);
+      }
+      return;
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => statut =
+          "Scanner de Google indisponible — prise de vue classique");
+    }
+
     setState(() => statut = "Photographiez le recto");
     final recto = await _photoTraitee(source, "identite");
     if (recto == null) return;
