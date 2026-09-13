@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:google_mlkit_document_scanner/google_mlkit_document_scanner.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -3088,6 +3089,72 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Le scanner de documents de Google, intégré à Android et exécuté
+  /// entièrement sur l'appareil.
+  ///
+  /// Il fait ce qu'un repérage écrit à la main ne fera jamais aussi bien :
+  /// il suit les quatre coins en direct même sur un fond de la même couleur
+  /// que le document, déclenche tout seul quand l'image est stable,
+  /// redresse la perspective d'un papier photographié de biais, remet le
+  /// document dans le bon sens, enchaîne les pages, et propose un cadrage
+  /// manuel quand il n'est pas sûr.
+  ///
+  /// Rien ne sort du téléphone, comme le reste de l'application. En
+  /// revanche il demande les services Google Play, et il n'est pas garanti
+  /// sur tous les appareils : c'est pourquoi il s'ajoute au scanner
+  /// existant au lieu de le remplacer.
+  Future<void> _scanIntelligent() async {
+    if (_occupe) return;
+    setState(() => statut = "Ouverture du scanner...");
+    DocumentScanner? scanner;
+    try {
+      scanner = DocumentScanner(
+        options: DocumentScannerOptions(
+          documentFormats: const {DocumentFormat.jpeg},
+          // Le mode complet : bords, filtres et retouche, plutôt que la
+          // seule prise de vue.
+          mode: ScannerMode.filter,
+          pageLimit: 30,
+          isGalleryImport: true,
+        ),
+      );
+      final resultat = await scanner.scanDocument();
+      final chemins = resultat.images;
+      if (chemins.isEmpty) {
+        if (mounted) setState(() => statut = "Scan annulé");
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _occupe = true;
+        statut = chemins.length == 1
+            ? "Assemblage du document..."
+            : "Assemblage des ${chemins.length} pages...";
+      });
+      final pages = <img.Image>[];
+      for (final chemin in chemins) {
+        final octets = await File(chemin).readAsBytes();
+        final image = img.decodeImage(octets);
+        if (image != null) pages.add(image);
+      }
+      if (pages.isEmpty) throw Exception("images illisibles");
+      // Les pages arrivent déjà redressées et nettoyées : on ne leur
+      // applique aucun traitement de plus, qui ne ferait que les abîmer.
+      await _ouvrirDepuisImages(pages, "document");
+    } catch (e) {
+      if (mounted) {
+        setState(() => statut =
+            "Scan intelligent indisponible sur cet appareil ($e) — "
+            "utilisez « Prendre une photo »");
+      }
+    } finally {
+      try {
+        await scanner?.close();
+      } catch (_) {}
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
   /// Scan d'un dossier : on photographie page après page, et l'ensemble
   /// devient un seul document.
   ///
@@ -3492,6 +3559,19 @@ class _AccueilState extends State<Accueil> {
                       fontSize: 13, color: Theme.of(context).colorScheme.onSurfaceVariant),
                 ),
                 const SizedBox(height: 8),
+                const Divider(height: 1),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.auto_awesome),
+                  title: const Text("Scan intelligent"),
+                  subtitle: const Text(
+                      "Suit les bords en direct, redresse, enchaîne les "
+                      "pages. Ignore le mode choisi, il a le sien."),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _scanIntelligent();
+                  },
+                ),
                 const Divider(height: 1),
                 ListTile(
                   contentPadding: EdgeInsets.zero,
