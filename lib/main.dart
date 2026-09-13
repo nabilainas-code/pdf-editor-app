@@ -132,6 +132,132 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
   return Rect.fromLTRB(gauche, haut, droite, bas);
 }
 
+/// Cherche le document par sa couleur, quand sa clarté ne suffit pas à le
+/// distinguer.
+///
+/// La méthode par le clair cherche un objet lumineux sur un fond sombre.
+/// Elle marche pour une feuille blanche sur une table en bois, et échoue
+/// sur une carte d'identité lilas posée sur une nappe beige : les deux ont
+/// la même clarté, et rien ne se détache. Leurs couleurs, elles, sont
+/// franchement différentes.
+///
+/// On relève donc la teinte du pourtour de l'image — qui est le fond, un
+/// document n'étant jamais collé aux quatre bords à la fois — et on garde
+/// tout ce qui s'en écarte. La couverture demandée est plus basse que pour
+/// une feuille : une carte d'identité n'occupe qu'un tiers de la photo.
+Rect? cadreParCouleur(img.Image petite) {
+  final la = petite.width;
+  final ha = petite.height;
+  if (la < 40 || ha < 40) return null;
+
+  final bande = (la < ha ? la : ha) ~/ 16 + 1;
+  var fondR = 0.0, fondV = 0.0, fondB = 0.0;
+  var comptes = 0;
+  for (var y = 0; y < ha; y++) {
+    final ligneAuBord = y < bande || y >= ha - bande;
+    for (var x = 0; x < la; x++) {
+      if (!ligneAuBord && x >= bande && x < la - bande) continue;
+      final p = petite.getPixel(x, y);
+      fondR += p.r.toDouble();
+      fondV += p.g.toDouble();
+      fondB += p.b.toDouble();
+      comptes++;
+    }
+  }
+  if (comptes == 0) return null;
+  fondR /= comptes;
+  fondV /= comptes;
+  fondB /= comptes;
+
+  final ecarts = Uint8List(la * ha);
+  final histogramme = List<int>.filled(256, 0);
+  for (var y = 0; y < ha; y++) {
+    for (var x = 0; x < la; x++) {
+      final p = petite.getPixel(x, y);
+      var d = ((p.r - fondR).abs() +
+              (p.g - fondV).abs() +
+              (p.b - fondB).abs()) /
+          3;
+      if (d > 255) d = 255;
+      final v = d.round();
+      ecarts[y * la + x] = v;
+      histogramme[v]++;
+    }
+  }
+
+  final seuil = seuilOtsu(histogramme, la * ha);
+  // Un seuil minuscule veut dire que rien ne se détache : on préfère ne
+  // rien proposer plutôt qu'un cadre pris dans le bruit du tissu.
+  if (seuil < 10) return null;
+
+  var differents = 0;
+  for (var i = 0; i < la * ha; i++) {
+    if (ecarts[i] >= seuil) differents++;
+  }
+  final part = differents / (la * ha);
+  if (part < 0.03 || part > 0.85) return null;
+
+  List<int> plusLongue(List<double> parts, double minimum) {
+    var meilleurDebut = -1, meilleureFin = -2;
+    var debut = -1;
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] >= minimum) {
+        if (debut < 0) debut = i;
+        if (i - debut > meilleureFin - meilleurDebut) {
+          meilleurDebut = debut;
+          meilleureFin = i;
+        }
+      } else {
+        debut = -1;
+      }
+    }
+    return [meilleurDebut, meilleureFin];
+  }
+
+  final partLignes = <double>[];
+  for (var y = 0; y < ha; y++) {
+    var n = 0;
+    for (var x = 0; x < la; x++) {
+      if (ecarts[y * la + x] >= seuil) n++;
+    }
+    partLignes.add(n / la);
+  }
+  final partColonnes = <double>[];
+  for (var x = 0; x < la; x++) {
+    var n = 0;
+    for (var y = 0; y < ha; y++) {
+      if (ecarts[y * la + x] >= seuil) n++;
+    }
+    partColonnes.add(n / ha);
+  }
+
+  // Un quart des pixels de la ligne suffit : une carte posée de travers ou
+  // au milieu d'une grande photo n'en couvre jamais la moitié.
+  final bandeY = plusLongue(partLignes, 0.25);
+  final bandeX = plusLongue(partColonnes, 0.25);
+  if (bandeY[0] < 0 || bandeX[0] < 0) return null;
+
+  final hauteurTrouvee = bandeY[1] - bandeY[0] + 1;
+  final largeurTrouvee = bandeX[1] - bandeX[0] + 1;
+  // Un huitième de la photo au minimum : en dessous c'est un reflet ou une
+  // tache, pas un document. Et s'il occupe déjà tout, il n'y a rien à
+  // retirer.
+  if (hauteurTrouvee < ha * 0.12 || largeurTrouvee < la * 0.12) return null;
+  if (hauteurTrouvee > ha * 0.97 && largeurTrouvee > la * 0.97) return null;
+
+  final marge = la * 0.012;
+  var gauche = bandeX[0] - marge;
+  var haut = bandeY[0] - marge;
+  var droite = bandeX[1] + 1 + marge;
+  var bas = bandeY[1] + 1 + marge;
+  if (gauche < 0) gauche = 0;
+  if (haut < 0) haut = 0;
+  if (droite > la) droite = la.toDouble();
+  if (bas > ha) bas = ha.toDouble();
+  if (droite - gauche < 10 || bas - haut < 10) return null;
+  return Rect.fromLTRB(gauche, haut, droite, bas);
+}
+
 /// Numéro de la compilation, remplacé au moment de fabriquer l'APK.
 ///
 /// Sans lui, impossible de savoir laquelle des versions est installée :
@@ -2387,7 +2513,11 @@ class _AccueilState extends State<Accueil> {
       }
     }
 
-    final trouve = cadreClair(clarte, la, ha);
+    // D'abord la clarté, qui marche bien pour une feuille blanche sur une
+    // table sombre. Si elle ne trouve rien, la couleur : une carte lilas
+    // sur une nappe beige a la même clarté que son fond, mais pas la même
+    // teinte.
+    final trouve = cadreClair(clarte, la, ha) ?? cadreParCouleur(petite);
     if (trouve == null) return null;
     return Rect.fromLTRB(
       trouve.left * reduction,
@@ -12049,7 +12179,8 @@ class _EcranViseurState extends State<EcranViseur> {
                         "vérifie après la photo"
                     : _cadre != null
                         ? "Document repéré — vous pouvez prendre la photo"
-                        : "Posez le document sur un fond plus sombre",
+                        : "Pas de cadre en direct ici : prenez la photo, le "
+                            "cadrage se règle juste après",
                 style: TextStyle(
                   color: (_cadre != null && !_sansCadreDirect)
                       ? const Color(0xFFFFC107)
