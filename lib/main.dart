@@ -941,6 +941,18 @@ class _AccueilState extends State<Accueil> {
   /// à deux temps (appui long puis toucher) qui n'était pas évident.
   bool enAjoutTexte = false;
 
+  /// Vrai dès qu'on a constaté que le moteur de scan de Google n'est pas
+  /// disponible sur cet appareil — il demande les services Google Play, que
+  /// tous les téléphones n'ont pas.
+  ///
+  /// On le retient pour deux raisons. L'entrée « Scan intelligent »
+  /// disparaît alors du menu au lieu d'échouer à chaque fois, et la pièce
+  /// d'identité repart directement sur la prise de vue classique sans
+  /// perdre une seconde à réessayer. L'application garde ainsi toutes ses
+  /// fonctions sur un appareil sans Google, celles qui reposent sur lui en
+  /// moins.
+  bool _scanGoogleIndisponible = false;
+
   /// Photo choisie, en attente de l'endroit où la poser. Le geste est le
   /// même que pour le texte : on choisit, puis on touche la page à
   /// l'endroit voulu, et l'objet apparaît là.
@@ -3159,9 +3171,11 @@ class _AccueilState extends State<Accueil> {
       await _ouvrirDepuisImages(pages, "document");
     } catch (e) {
       if (mounted) {
-        setState(() => statut =
-            "Scan intelligent indisponible sur cet appareil ($e) — "
-            "utilisez « Prendre une photo »");
+        setState(() {
+          _scanGoogleIndisponible = true;
+          statut = "Scan intelligent indisponible sur cet appareil — "
+              "utilisez « Prendre une photo », tout le reste fonctionne";
+        });
       }
     } finally {
       if (mounted) setState(() => _occupe = false);
@@ -3342,6 +3356,7 @@ class _AccueilState extends State<Accueil> {
     // et le verso se prennent l'un après l'autre dans son écran, et
     // ressortent ici pour être posés tous deux sur une seule feuille, comme
     // les administrations le demandent.
+    if (!_scanGoogleIndisponible) {
     try {
       setState(() => statut = "Recto, puis verso : deux pages");
       final prises = await _capturerAvecGoogle(2);
@@ -3362,8 +3377,11 @@ class _AccueilState extends State<Accueil> {
       return;
     } catch (_) {
       if (!mounted) return;
-      setState(() => statut =
-          "Scanner de Google indisponible — prise de vue classique");
+      setState(() {
+        _scanGoogleIndisponible = true;
+        statut = "Scanner de Google indisponible — prise de vue classique";
+      });
+    }
     }
 
     setState(() => statut = "Photographiez le recto");
@@ -3605,19 +3623,21 @@ class _AccueilState extends State<Accueil> {
                 ),
                 const SizedBox(height: 8),
                 const Divider(height: 1),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.auto_awesome),
-                  title: const Text("Scan intelligent"),
-                  subtitle: const Text(
-                      "Suit les bords en direct, redresse, enchaîne les "
-                      "pages. Ignore le mode choisi, il a le sien."),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _scanIntelligent();
-                  },
-                ),
-                const Divider(height: 1),
+                if (!_scanGoogleIndisponible) ...[
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.auto_awesome),
+                    title: const Text("Scan intelligent"),
+                    subtitle: const Text(
+                        "Suit les bords en direct, redresse, enchaîne les "
+                        "pages. Ignore le mode choisi, il a le sien."),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _scanIntelligent();
+                    },
+                  ),
+                  const Divider(height: 1),
+                ],
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.photo_camera),
