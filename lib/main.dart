@@ -57,94 +57,132 @@ int seuilOtsu(List<int> histogramme, int total) {
 /// Sert deux fois : sur la photo prise, et sur chaque image du viseur.
 Rect? cadreClair(List<int> clarte, int la, int ha) {
   if (la < 20 || ha < 20 || clarte.length < la * ha) return null;
+  final points = la * ha;
 
   final histogramme = List<int>.filled(256, 0);
-  for (var i = 0; i < la * ha; i++) {
+  for (var i = 0; i < points; i++) {
     histogramme[clarte[i]]++;
   }
-  final seuil = seuilOtsu(histogramme, la * ha);
 
-  // Un fond aussi clair que le papier : rien ne distingue les bords.
-  var clairs = 0;
-  for (var i = 0; i < la * ha; i++) {
-    if (clarte[i] >= seuil) clairs++;
-  }
-  final partClaire = clairs / (la * ha);
-  if (partClaire > 0.92 || partClaire < 0.08) return null;
+  /// Le rectangle que donne un seuil donné, ou null s'il ne tient pas.
+  Rect? auSeuil(int seuil) {
+    // Un fond aussi clair que le papier : rien ne distingue les bords.
+    var clairs = 0;
+    for (var i = 0; i < points; i++) {
+      if (clarte[i] >= seuil) clairs++;
+    }
+    final partClaire = clairs / points;
+    if (partClaire > 0.92 || partClaire < 0.08) return null;
 
-  List<int> plusLongueBande(List<double> parts, double minimum) {
-    // Longueur initiale négative : une bande d'une seule ligne compte déjà
-    // comme mieux que rien.
-    var meilleurDebut = -1, meilleureFin = -2;
-    var debut = -1;
-    for (var i = 0; i < parts.length; i++) {
-      if (parts[i] >= minimum) {
-        if (debut < 0) debut = i;
-        if (i - debut > meilleureFin - meilleurDebut) {
-          meilleurDebut = debut;
-          meilleureFin = i;
+    List<int> plusLongueBande(List<double> parts, double minimum) {
+      // Longueur initiale négative : une bande d'une seule ligne compte
+      // déjà comme mieux que rien.
+      var meilleurDebut = -1, meilleureFin = -2;
+      var debut = -1;
+      for (var i = 0; i < parts.length; i++) {
+        if (parts[i] >= minimum) {
+          if (debut < 0) debut = i;
+          if (i - debut > meilleureFin - meilleurDebut) {
+            meilleurDebut = debut;
+            meilleureFin = i;
+          }
+        } else {
+          debut = -1;
         }
-      } else {
-        debut = -1;
+      }
+      return [meilleurDebut, meilleureFin];
+    }
+
+    final partLignes = <double>[];
+    for (var y = 0; y < ha; y++) {
+      var n = 0;
+      for (var x = 0; x < la; x++) {
+        if (clarte[y * la + x] >= seuil) n++;
+      }
+      partLignes.add(n / la);
+    }
+    final partColonnes = <double>[];
+    for (var x = 0; x < la; x++) {
+      var n = 0;
+      for (var y = 0; y < ha; y++) {
+        if (clarte[y * la + x] >= seuil) n++;
+      }
+      partColonnes.add(n / ha);
+    }
+
+    final bandeY = plusLongueBande(partLignes, 0.5);
+    final bandeX = plusLongueBande(partColonnes, 0.5);
+    if (bandeY[0] < 0 || bandeX[0] < 0) return null;
+
+    // Les bandes sont cherchées séparément en lignes et en colonnes : deux
+    // objets clairs posés en équerre — le haut d'une nappe et la gauche
+    // d'une feuille — donnent chacun leur bande, et leur croisement
+    // désigne un rectangle qui n'est ni l'un ni l'autre. On vérifie donc
+    // que ce rectangle est clair sur toute sa surface.
+    var dedans = 0, surface = 0;
+    for (var y = bandeY[0]; y <= bandeY[1]; y++) {
+      for (var x = bandeX[0]; x <= bandeX[1]; x++) {
+        surface++;
+        if (clarte[y * la + x] >= seuil) dedans++;
       }
     }
-    return [meilleurDebut, meilleureFin];
+    if (surface == 0 || dedans / surface < 0.75) return null;
+
+    final hauteurTrouvee = bandeY[1] - bandeY[0] + 1;
+    final largeurTrouvee = bandeX[1] - bandeX[0] + 1;
+    // Trop petit : ce n'est pas le document mais un reflet. Trop grand :
+    // il n'y avait rien à retirer.
+    if (hauteurTrouvee < ha * 0.25 || largeurTrouvee < la * 0.25) return null;
+    if (hauteurTrouvee > ha * 0.97 && largeurTrouvee > la * 0.97) return null;
+
+    // Une marge, pour ne pas raboter le bord de la feuille lui-même.
+    final marge = la * 0.012;
+    var gauche = bandeX[0] - marge;
+    var haut = bandeY[0] - marge;
+    var droite = bandeX[1] + 1 + marge;
+    var bas = bandeY[1] + 1 + marge;
+    if (gauche < 0) gauche = 0;
+    if (haut < 0) haut = 0;
+    if (droite > la) droite = la.toDouble();
+    if (bas > ha) bas = ha.toDouble();
+    if (droite - gauche < 10 || bas - haut < 10) return null;
+    return Rect.fromLTRB(gauche, haut, droite, bas);
   }
 
-  final partLignes = <double>[];
-  for (var y = 0; y < ha; y++) {
-    var n = 0;
-    for (var x = 0; x < la; x++) {
-      if (clarte[y * la + x] >= seuil) n++;
+  var seuil = seuilOtsu(histogramme, points);
+  var retenu = auSeuil(seuil);
+
+  // Une seule coupure sépare deux populations, pas trois. Une feuille
+  // posée sur une nappe claire, elle-même posée sur un sol sombre, en fait
+  // trois : la coupure tombe entre le sol et le reste, et la nappe part
+  // avec le papier. C'est exactement ce qui faisait déborder le cadre.
+  //
+  // On recoupe donc ce qui est resté du côté clair, une fois ou deux, et
+  // on ne descend d'un cran que si cela retire vraiment quelque chose : le
+  // rectangle doit se réduire d'au moins un tiers. Sur une feuille posée
+  // sur une table sombre, la première coupure suffit et rien ne bouge.
+  for (var tour = 0; tour < 2; tour++) {
+    var restants = 0;
+    final sous = List<int>.filled(256, 0);
+    for (var v = seuil; v < 256; v++) {
+      sous[v] = histogramme[v];
+      restants += histogramme[v];
     }
-    partLignes.add(n / la);
+    if (restants < points * 0.05) break;
+    final plusFin = seuilOtsu(sous, restants);
+    if (plusFin <= seuil) break;
+    final candidat = auSeuil(plusFin);
+    if (candidat == null) break;
+    final avant = retenu == null
+        ? double.infinity
+        : retenu.width * retenu.height;
+    final apres = candidat.width * candidat.height;
+    if (apres > avant * 0.7) break;
+    if (apres < points * 0.06) break;
+    retenu = candidat;
+    seuil = plusFin;
   }
-  final partColonnes = <double>[];
-  for (var x = 0; x < la; x++) {
-    var n = 0;
-    for (var y = 0; y < ha; y++) {
-      if (clarte[y * la + x] >= seuil) n++;
-    }
-    partColonnes.add(n / ha);
-  }
-
-  final bandeY = plusLongueBande(partLignes, 0.5);
-  final bandeX = plusLongueBande(partColonnes, 0.5);
-  if (bandeY[0] < 0 || bandeX[0] < 0) return null;
-
-  // Les bandes sont cherchées séparément en lignes et en colonnes : deux
-  // objets clairs posés en équerre — le haut d'une nappe et la gauche d'une
-  // feuille — donnent chacun leur bande, et leur croisement désigne un
-  // rectangle qui n'est ni l'un ni l'autre. On vérifie donc que ce
-  // rectangle est bien clair sur toute sa surface avant de le proposer.
-  var dedans = 0, surface = 0;
-  for (var y = bandeY[0]; y <= bandeY[1]; y++) {
-    for (var x = bandeX[0]; x <= bandeX[1]; x++) {
-      surface++;
-      if (clarte[y * la + x] >= seuil) dedans++;
-    }
-  }
-  if (surface == 0 || dedans / surface < 0.75) return null;
-
-  final hauteurTrouvee = bandeY[1] - bandeY[0] + 1;
-  final largeurTrouvee = bandeX[1] - bandeX[0] + 1;
-  // Trop petit : ce n'est pas le document mais un reflet. Trop grand : il
-  // n'y avait rien à retirer.
-  if (hauteurTrouvee < ha * 0.25 || largeurTrouvee < la * 0.25) return null;
-  if (hauteurTrouvee > ha * 0.97 && largeurTrouvee > la * 0.97) return null;
-
-  // Une marge, pour ne pas raboter le bord de la feuille lui-même.
-  final marge = la * 0.012;
-  var gauche = bandeX[0] - marge;
-  var haut = bandeY[0] - marge;
-  var droite = bandeX[1] + 1 + marge;
-  var bas = bandeY[1] + 1 + marge;
-  if (gauche < 0) gauche = 0;
-  if (haut < 0) haut = 0;
-  if (droite > la) droite = la.toDouble();
-  if (bas > ha) bas = ha.toDouble();
-  if (droite - gauche < 10 || bas - haut < 10) return null;
-  return Rect.fromLTRB(gauche, haut, droite, bas);
+  return retenu;
 }
 
 /// Cherche le document par sa couleur, quand sa clarté ne suffit pas à le
