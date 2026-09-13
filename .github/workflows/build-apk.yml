@@ -159,7 +159,10 @@ jobs:
           # arrive avec des retours à la ligne et des espaces en trop. Le
           # texte utile ne contient ni l'un ni l'autre, on le nettoie donc
           # avant de s'en servir plutôt que d'échouer dessus.
-          CLE_PROPRE=$(printf '%s' "$CLE_BASE64" | tr -d '[:space:]')
+          # On ne retire pas seulement les espaces : un collage depuis un
+          # téléphone peut aussi charrier des caractères invisibles qu'aucun
+          # écran ne montre. On ne garde donc que l'alphabet du base64.
+          CLE_PROPRE=$(printf '%s' "$CLE_BASE64" | tr -cd 'A-Za-z0-9+/=')
           MDP_PROPRE=$(printf '%s' "$CLE_MDP" | tr -d '[:space:]')
           echo "::add-mask::$MDP_PROPRE"
 
@@ -175,8 +178,13 @@ jobs:
             echo "Pas de clé : APK non signé, il faudra désinstaller avant d'installer."
             exit 0
           fi
-          if ! printf '%s' "$CLE_PROPRE" | base64 -d > temp_app/android/app/cle.jks; then
-            echo "::error::Le secret CLEF_ANDROID_BASE64 n'est pas lisible. Recollez le contenu entier de cle-base64.txt, sans rien ajouter."
+          # La longueur dit tout de suite si le collage est complet : le
+          # fichier d'origine en fait 3556. Beaucoup moins, et c'est qu'il a
+          # été tronqué en cours de route.
+          LONGUEUR=${#CLE_PROPRE}
+          echo "Clé reçue : $LONGUEUR caractères utiles (attendu 3556)."
+          if ! printf '%s' "$CLE_PROPRE" | base64 -d > temp_app/android/app/cle.jks 2>/dev/null; then
+            echo "::error::Le secret CLEF_ANDROID_BASE64 n'est pas lisible ($LONGUEUR caractères reçus au lieu de 3556). Le collage est incomplet : rouvrez cle-base64.txt, tout sélectionner, copier, et remplacez la valeur du secret."
             exit 1
           fi
           # Vérifier tout de suite que la clé s'ouvre avec ce mot de passe :
