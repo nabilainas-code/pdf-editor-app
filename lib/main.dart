@@ -2958,6 +2958,168 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Scan d'un dossier : on photographie page après page, et l'ensemble
+  /// devient un seul document.
+  ///
+  /// Jusqu'ici une photo donnait un PDF d'une page. Scanner un contrat de
+  /// quatre pages obligeait à faire quatre fichiers puis à les rassembler
+  /// ailleurs — c'est-à-dire nulle part, depuis un téléphone.
+  Future<void> _scannerDossier(ImageSource source, String mode) async {
+    if (_occupe) return;
+    final pages = <img.Image>[];
+    final apercus = <Uint8List>[];
+
+    while (true) {
+      if (mounted) {
+        setState(() => statut = pages.isEmpty
+            ? "Photographiez la première page"
+            : "Photographiez la page ${pages.length + 1}");
+      }
+      final image = await _photoTraitee(source, mode);
+      if (!mounted) return;
+
+      if (image == null) {
+        // Prise abandonnée. S'il n'y a rien, on s'arrête ; sinon on garde
+        // ce qui est déjà pris et on demande quoi en faire, plutôt que de
+        // tout perdre pour un appui sur « retour ».
+        if (pages.isEmpty) {
+          setState(() => statut = "Scan annulé");
+          return;
+        }
+      } else {
+        pages.add(image);
+        try {
+          apercus.add(Uint8List.fromList(
+              img.encodeJpg(img.copyResize(image, width: 108), quality: 70)));
+        } catch (_) {
+          apercus.add(Uint8List(0));
+        }
+      }
+
+      var choix = await _feuilleDossier(pages.length, apercus);
+      if (!mounted) return;
+      while (choix == "retirer" && pages.isNotEmpty) {
+        pages.removeLast();
+        apercus.removeLast();
+        if (pages.isEmpty) break;
+        choix = await _feuilleDossier(pages.length, apercus);
+        if (!mounted) return;
+      }
+      if (pages.isEmpty) {
+        setState(() => statut = "Scan annulé");
+        return;
+      }
+      // La feuille refermée sans choix vaut « terminer » : mieux vaut un
+      // document de trop que des pages perdues.
+      if (choix != "suivante") break;
+    }
+
+    setState(() {
+      _occupe = true;
+      statut = pages.length == 1
+          ? "Assemblage du document..."
+          : "Assemblage des ${pages.length} pages...";
+    });
+    try {
+      await _ouvrirDepuisImages(pages, mode);
+    } catch (e) {
+      if (mounted) setState(() => statut = "Scan impossible : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Entre deux pages d'un dossier : ce qui est déjà pris, et la suite.
+  ///
+  /// La bande d'aperçus est là pour une raison précise : en scannant six
+  /// pages on ne sait plus où l'on en est, et rien n'est plus agaçant que
+  /// de s'apercevoir à la fin qu'il en manque une au milieu.
+  Future<String?> _feuilleDossier(int nombre, List<Uint8List> apercus) async {
+    if (!mounted) return "terminer";
+    return showModalBottomSheet<String>(
+      context: context,
+      // Ni glissement ni appui à côté : on ne perd pas six pages scannées
+      // par un geste de travers.
+      isDismissible: false,
+      enableDrag: false,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 18, 16, 2),
+              child: Text(
+                nombre == 1 ? "1 page prise" : "$nombre pages prises",
+                style:
+                    const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                "Elles formeront un seul document, dans cet ordre.",
+                style: TextStyle(fontSize: 13),
+              ),
+            ),
+            SizedBox(
+              height: 98,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                itemCount: apercus.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (c, i) => Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Expanded(
+                      child: Container(
+                        width: 58,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          border: Border.all(
+                            color: i == apercus.length - 1
+                                ? Theme.of(c).colorScheme.primary
+                                : Colors.black26,
+                            width: i == apercus.length - 1 ? 2 : 1,
+                          ),
+                        ),
+                        child: apercus[i].isEmpty
+                            ? null
+                            : Image.memory(apercus[i], fit: BoxFit.cover),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text("${i + 1}", style: const TextStyle(fontSize: 11)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            ListTile(
+              leading: const Icon(Icons.add_a_photo_outlined),
+              title: const Text("Page suivante"),
+              onTap: () => Navigator.pop(ctx, "suivante"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.check_circle_outline),
+              title: Text(nombre == 1
+                  ? "Terminer — 1 page"
+                  : "Terminer — $nombre pages"),
+              onTap: () => Navigator.pop(ctx, "terminer"),
+            ),
+            ListTile(
+              leading: const Icon(Icons.undo),
+              title: const Text("Retirer la dernière page"),
+              onTap: () => Navigator.pop(ctx, "retirer"),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// Scan d'une pièce d'identité : le recto, puis le verso si on le
   /// souhaite, posés tous deux sur une seule page.
   Future<void> _scannerIdentite(ImageSource source) async {
@@ -3216,6 +3378,18 @@ class _AccueilState extends State<Accueil> {
                     }
                   },
                 ),
+                if (mode != "identite")
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.burst_mode_outlined),
+                    title: const Text("Plusieurs pages"),
+                    subtitle: const Text(
+                        "Page après page, un seul document à la fin"),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _scannerDossier(ImageSource.camera, mode);
+                    },
+                  ),
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.photo_library),
