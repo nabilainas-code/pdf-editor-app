@@ -3109,6 +3109,58 @@ class _AccueilState extends State<Accueil> {
   /// Scan d'une page simple : une photo, un document.
   Future<void> _scannerPage(ImageSource source, String mode) async {
     if (_occupe) return;
+
+    // Le moteur de Google suit les quatre coins du document en direct et
+    // redresse une feuille photographiée de biais. La recherche de bords
+    // maison, elle, ne sait poser qu'un rectangle droit, et se fait piéger
+    // par un fond clair et coloré — une nappe vert pâle a la clarté du
+    // papier. Quand le moteur est là, c'est donc lui qui prend la photo.
+    //
+    // Le mode « photo » ne passe pas par lui : c'est l'image entière qu'on
+    // voulait, il n'y a rien à découper.
+    if (source == ImageSource.camera &&
+        mode != "photo" &&
+        !_scanGoogleIndisponible) {
+      try {
+        final prises = await _capturerAvecGoogle(1);
+        if (!mounted) return;
+        if (prises.isEmpty) {
+          setState(() => statut = "Scan annulé");
+          return;
+        }
+        setState(() {
+          _occupe = true;
+          statut = "Assemblage du document...";
+        });
+        try {
+          // La page revient déjà redressée et nettoyée. Seul le noir et
+          // blanc reste à appliquer si on l'a demandé ; le reste serait du
+          // traitement par-dessus du traitement.
+          await _ouvrirDepuisImages(
+            mode == "nb"
+                ? [_rehausserScan(prises.first, noirEtBlanc: true)]
+                : prises,
+            mode,
+          );
+          if (mounted) {
+            setState(
+                () => statut = "Document détecté et recadré sur ses bords");
+          }
+        } catch (e) {
+          if (mounted) setState(() => statut = "Scan impossible : $e");
+        } finally {
+          if (mounted) setState(() => _occupe = false);
+        }
+        return;
+      } catch (_) {
+        if (!mounted) return;
+        setState(() {
+          _scanGoogleIndisponible = true;
+          statut = "Scanner de Google indisponible — prise de vue classique";
+        });
+      }
+    }
+
     final image = await _photoTraitee(source, mode);
     if (image == null) return;
     setState(() {
@@ -3150,15 +3202,19 @@ class _AccueilState extends State<Accueil> {
   /// Rend une liste vide si l'on renonce dans son écran, et lève si le
   /// moteur n'est pas disponible sur l'appareil — à l'appelant de retomber
   /// alors sur la prise de vue classique.
-  Future<List<img.Image>> _capturerAvecGoogle(int pages) async {
+  Future<List<img.Image>> _capturerAvecGoogle(
+    int pages, {
+    ScannerMode filtre = ScannerMode.filter,
+  }) async {
     DocumentScanner? scanner;
     try {
       scanner = DocumentScanner(
         options: DocumentScannerOptions(
           documentFormats: const {DocumentFormat.jpeg},
-          // Le mode complet : bords, filtres et retouche, plutôt que la
-          // seule prise de vue.
-          mode: ScannerMode.filter,
+          // Par défaut, bords, filtres et retouche. En mode « base », le
+          // découpe et le redressement seuls : ce qu'il faut pour une
+          // photo qu'on veut recadrée mais pas blanchie.
+          mode: filtre,
           pageLimit: pages,
           isGalleryImport: true,
         ),
@@ -7612,7 +7668,25 @@ class _AccueilState extends State<Accueil> {
     // de plus pour rien.
     Uint8List? prise;
     if (source == ImageSource.camera) {
-      final cadree = await _photoTraitee(ImageSource.camera, "cadre");
+      img.Image? cadree;
+      // Le moteur de Google quand il est là, en mode « base » : il suit les
+      // quatre coins et redresse, sans appliquer les filtres du scan. Un
+      // portrait ou un logo garde donc ses couleurs.
+      if (!_scanGoogleIndisponible) {
+        try {
+          final prises =
+              await _capturerAvecGoogle(1, filtre: ScannerMode.base);
+          if (!mounted) return;
+          // Renoncé dans son écran : on n'enchaîne pas sur un autre
+          // appareil photo dans son dos.
+          if (prises.isEmpty) return;
+          cadree = prises.first;
+        } catch (_) {
+          if (!mounted) return;
+          setState(() => _scanGoogleIndisponible = true);
+        }
+      }
+      cadree ??= await _photoTraitee(ImageSource.camera, "cadre");
       if (cadree == null || !mounted) return;
       try {
         prise = Uint8List.fromList(img.encodeJpg(cadree, quality: 92));
