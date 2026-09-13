@@ -153,7 +153,15 @@ jobs:
         id: cle
         env:
           CLE_BASE64: ${{ secrets.CLEF_ANDROID_BASE64 }}
+          CLE_MDP: ${{ secrets.CLEF_ANDROID_MDP }}
         run: |
+          # Les deux secrets vont ensemble. La clé sans son mot de passe
+          # échouerait bien plus loin, dans un message de Gradle que
+          # personne ne rattache à ça.
+          if [ -n "$CLE_BASE64" ] && [ -z "$CLE_MDP" ]; then
+            echo "::error::Le secret CLEF_ANDROID_MDP est absent. La clé est là, son mot de passe non : ajoutez-le dans Settings → Secrets and variables → Actions."
+            exit 1
+          fi
           if [ -z "$CLE_BASE64" ]; then
             echo "presente=non" >> "$GITHUB_OUTPUT"
             echo "Pas de clé : APK non signé, il faudra désinstaller avant d'installer."
