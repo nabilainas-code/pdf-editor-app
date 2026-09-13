@@ -185,6 +185,25 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
   return retenu;
 }
 
+/// Vrai quand le texte contient de l'écriture arabe.
+///
+/// Les blocs retenus sont l'arabe lui-même, ses compléments (persan, ourdou),
+/// et les formes de présentation qu'on trouve parfois dans un PDF. Il suffit
+/// d'un seul caractère : une ligne arabe qui contient un chiffre ou un mot
+/// latin reste une ligne arabe, et doit s'écrire de droite à gauche.
+bool estArabe(String texte) {
+  for (final rune in texte.runes) {
+    if ((rune >= 0x0600 && rune <= 0x06FF) ||
+        (rune >= 0x0750 && rune <= 0x077F) ||
+        (rune >= 0x08A0 && rune <= 0x08FF) ||
+        (rune >= 0xFB50 && rune <= 0xFDFF) ||
+        (rune >= 0xFE70 && rune <= 0xFEFF)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// Fait faire un quart de tour à une image, dans le sens demandé.
 ///
 /// Écrit ici plutôt que repris de la bibliothèque d'images : celle-ci ne
@@ -5105,6 +5124,18 @@ class _AccueilState extends State<Accueil> {
     },
   };
 
+  /// Police arabe embarquée, avec sa graisse.
+  ///
+  /// Les Liberation ne portent aucun caractère arabe. Une ligne arabe
+  /// réécrite avec elles ressortait en symboles latins sans aucun rapport :
+  /// les points de code étaient bien là, mais la police n'avait aucun dessin
+  /// à leur donner.
+  ///
+  /// Amiri est une police naskh sous licence libre, de la même famille de
+  /// qualité que les Liberation pour le latin.
+  static const String _policeArabe = 'assets/fonts/Amiri-Regular.ttf';
+  static const String _policeArabeGrasse = 'assets/fonts/Amiri-Bold.ttf';
+
   /// Octets des polices, une fois lus. Vide tant que le chargement n'a pas
   /// eu lieu (ou s'il a échoué) : on retombe alors sur les polices standard,
   /// et l'application marche comme avant.
@@ -5127,15 +5158,18 @@ class _AccueilState extends State<Accueil> {
   Future<void> _chargerPolices() async {
     if (_policesChargees) return;
     _policesChargees = true;
-    for (final famille in _fichiersPolice.values) {
-      for (final chemin in famille.values) {
-        if (_octetsPolice.containsKey(chemin)) continue;
-        try {
-          final donnees = await rootBundle.load(chemin);
-          _octetsPolice[chemin] = donnees.buffer.asUint8List();
-        } catch (_) {
-          // Police absente ou illisible : on s'en passe pour celle-là.
-        }
+    final chemins = <String>[
+      for (final famille in _fichiersPolice.values) ...famille.values,
+      _policeArabe,
+      _policeArabeGrasse,
+    ];
+    for (final chemin in chemins) {
+      if (_octetsPolice.containsKey(chemin)) continue;
+      try {
+        final donnees = await rootBundle.load(chemin);
+        _octetsPolice[chemin] = donnees.buffer.asUint8List();
+      } catch (_) {
+        // Police absente ou illisible : on s'en passe pour celle-là.
       }
     }
   }
@@ -5160,7 +5194,13 @@ class _AccueilState extends State<Accueil> {
       _documentDesPolices = document;
     }
 
-    final chemin = _fichiersPolice[mot.famille]?[style];
+    // L'écriture décide de la police avant la famille demandée : une ligne
+    // arabe n'a que faire d'être en Times ou en Courier, elle a besoin
+    // d'une police qui sache la dessiner. Amiri n'a pas d'italique ; le
+    // gras, si.
+    final chemin = estArabe(mot.texte)
+        ? (style == PdfFontStyle.bold ? _policeArabeGrasse : _policeArabe)
+        : _fichiersPolice[mot.famille]?[style];
     final octets = chemin == null ? null : _octetsPolice[chemin];
     if (octets != null) {
       final cle = "$chemin|$corps";
@@ -6090,14 +6130,27 @@ class _AccueilState extends State<Accueil> {
     final dessin = _dessinTexte(mot, zone);
     final ecrit = _texteSelonPolice(dessin.police, mot.texte);
     final encre = mot.couleurTexte ?? PdfColor(0, 0, 0);
+
+    // L'arabe ne s'écrit pas seulement de droite à gauche : ses lettres
+    // changent de dessin selon leur place dans le mot. Le sens indiqué ici
+    // déclenche les deux dans la bibliothèque — la mise en forme des
+    // lettres liées, puis la remise dans l'ordre visuel. Il lui faut une
+    // police embarquée : une police standard d'un PDF n'irait pas.
+    final arabe = estArabe(mot.texte) && dessin.police is PdfTrueTypeFont;
     page.graphics.drawString(
       ecrit,
       dessin.police,
       bounds: dessin.rect,
       brush: PdfSolidBrush(encre),
       format: PdfStringFormat(
-        alignment: mot.boiteLibre ? mot.alignement : PdfTextAlignment.left,
+        // Une ligne arabe commence au bord droit de son cadre : l'aligner à
+        // gauche l'aurait décalée de toute la place qu'elle n'occupe pas.
+        alignment: mot.boiteLibre
+            ? mot.alignement
+            : (arabe ? PdfTextAlignment.right : PdfTextAlignment.left),
         lineAlignment: PdfVerticalAlignment.middle,
+        textDirection:
+            arabe ? PdfTextDirection.rightToLeft : PdfTextDirection.none,
       ),
     );
 

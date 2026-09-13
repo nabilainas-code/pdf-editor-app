@@ -32,5 +32,9 @@ flutter:
   # elles savent écrire tirets cadratins, puces et apostrophes
   # typographiques, et sont dessinées aux largeurs d'Arial, Times New
   # Roman et Courier New.
+  #
+  # Amiri (SIL OFL 1.1) pour l'arabe : les Liberation n'en portent aucun
+  # caractère, et une ligne arabe réécrite avec elles ressortait en
+  # symboles latins sans rapport.
   assets:
     - assets/fonts/
