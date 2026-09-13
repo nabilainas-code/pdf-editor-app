@@ -3122,8 +3122,11 @@ class _AccueilState extends State<Accueil> {
         ),
       );
       final resultat = await scanner.scanDocument();
+      // Le moteur rend une liste qui peut être absente : pas de page prise,
+      // ou prise abandonnée. On la traite comme vide plutôt que de la lire.
+      final chemins = resultat.images ?? const <String>[];
       final images = <img.Image>[];
-      for (final chemin in resultat.images) {
+      for (final chemin in chemins) {
         final decodee = img.decodeImage(await File(chemin).readAsBytes());
         if (decodee != null) images.add(decodee);
       }
