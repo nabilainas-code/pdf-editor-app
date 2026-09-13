@@ -185,6 +185,24 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
   return retenu;
 }
 
+/// Découpe une image sur un rectangle, sans jamais sortir de ses bords :
+/// un rectangle arrondi au point près peut déborder d'une unité, et la
+/// bibliothèque d'images, elle, ne pardonne pas.
+img.Image decouperSur(img.Image source, Rect zone) {
+  var gauche = zone.left.round();
+  var haut = zone.top.round();
+  if (gauche < 0) gauche = 0;
+  if (haut < 0) haut = 0;
+  if (gauche >= source.width || haut >= source.height) return source;
+  var largeur = zone.width.round();
+  var hauteur = zone.height.round();
+  if (gauche + largeur > source.width) largeur = source.width - gauche;
+  if (haut + hauteur > source.height) hauteur = source.height - haut;
+  if (largeur < 1 || hauteur < 1) return source;
+  return img.copyCrop(source,
+      x: gauche, y: haut, width: largeur, height: hauteur);
+}
+
 /// Cherche le document par sa couleur, quand sa clarté ne suffit pas à le
 /// distinguer.
 ///
@@ -440,6 +458,15 @@ class MotDetecte {
   /// repart toujours de l'original plutôt que d'empiler les découpes.
   Uint8List? imageSource;
 
+  /// Le dernier recadrage demandé, en points de l'image d'origine.
+  ///
+  /// C'est lui qui rend le recadrage non destructif : la découpe repart
+  /// toujours de l'original, jamais de la version déjà coupée. On peut donc
+  /// resserrer puis rélargir autant qu'on veut sans perdre un pixel, et
+  /// rouvrir le recadrage reprend là où on s'était arrêté au lieu de
+  /// repartir de l'image entière.
+  Rect? recadrage;
+
   /// Taille qu'avait le cadre la première fois qu'on y a touché.
   ///
   /// Sert à reconnaître qu'on est en train de l'étirer bien au-delà de la
@@ -498,7 +525,8 @@ class MotDetecte {
 /// l'historique (annuler/rétablir) et aux pages qu'on met de côté en
 /// changeant de page : sans copie, l'état gardé et la page vivante
 /// seraient le même objet, et annuler ne ramènerait rien.
-MotDetecte copieDe(MotDetecte m) => MotDetecte(
+MotDetecte copieDe(MotDetecte m) {
+  final copie = MotDetecte(
       m.texte,
       m.zone,
       gras: m.gras,
@@ -520,7 +548,10 @@ MotDetecte copieDe(MotDetecte m) => MotDetecte(
       pixelsSource: m.pixelsSource,
       tailleSource: m.tailleSource,
       decalageSource: m.decalageSource,
-    );
+  );
+  copie.recadrage = m.recadrage;
+  return copie;
+}
 
 /// Ce que le contrôle avant envoi a remarqué, et le geste qui y répond.
 ///
@@ -2627,7 +2658,8 @@ class _AccueilState extends State<Accueil> {
   ///
   /// Rend le rectangle retenu, en pixels de la photo — ou null si on
   /// renonce à cette photo.
-  Future<Rect?> _verifierCadrage(img.Image source, Rect? propose) async {
+  Future<Rect?> _verifierCadrage(img.Image source, Rect? propose,
+      {String? titre}) async {
     // Une copie réduite pour l'affichage : encoder la photo pleine
     // résolution à chaque fois ferait attendre pour rien.
     final apercu = source.width > 1000
@@ -2653,9 +2685,10 @@ class _AccueilState extends State<Accueil> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                   child: Text(
-                    trouve
-                        ? "Bords trouvés — corrigez le cadre si besoin"
-                        : "Bords non trouvés — placez le cadre vous-même",
+                    titre ??
+                        (trouve
+                            ? "Bords trouvés — corrigez le cadre si besoin"
+                            : "Bords non trouvés — placez le cadre vous-même"),
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Colors.white, fontSize: 14),
                   ),
@@ -8132,6 +8165,69 @@ class _AccueilState extends State<Accueil> {
 
   /// Applique une forme à une photo posée. Toujours depuis l'image
   /// d'origine : on ne découpe jamais une découpe.
+  /// Recadre une photo posée dans la page, sans jamais l'abîmer.
+  ///
+  /// La découpe part toujours de l'image d'origine, gardée de côté : on
+  /// resserre, on rélargit, on revient à l'image entière, autant de fois
+  /// qu'on veut, et la photo ne perd rien au passage. Recouper une image
+  /// déjà coupée, en revanche, aurait été sans retour.
+  ///
+  /// L'écran est celui du cadrage d'un scan : la photo en grand, un cadre
+  /// à quatre coins, et rien de fait tant qu'on n'a pas dit oui.
+  Future<void> _recadrerImage(MotDetecte mot) async {
+    final doc = document;
+    final source = mot.imageSource ?? mot.imageFlottante;
+    if (doc == null || source == null || _occupe) return;
+    final decodee = img.decodeImage(source);
+    if (decodee == null) {
+      setState(() => statut = "Photo illisible");
+      return;
+    }
+    if (!mounted) return;
+    // Le cadre proposé est celui de la dernière découpe : on reprend là où
+    // on s'était arrêté, au lieu de tout refaire depuis l'image entière.
+    final retenu = await _verifierCadrage(decodee, mot.recadrage,
+        titre: "Tirez les coins sur ce que vous voulez garder");
+    if (retenu == null || !mounted) return;
+
+    setState(() {
+      _occupe = true;
+      statut = "Recadrage...";
+    });
+    try {
+      final coupee = decouperSur(decodee, retenu);
+      final octets = Uint8List.fromList(img.encodePng(coupee));
+      final avant = await _etatActuel(doc);
+      if (!mounted) return;
+      setState(() {
+        historique.add(avant);
+        futur.clear();
+        mot.imageSource ??= source;
+        mot.imageFlottante = octets;
+        mot.recadrage = retenu;
+        // La photo garde sa largeur et sa place sur la page, et prend ses
+        // nouvelles proportions : elle ne saute pas ailleurs sous le doigt.
+        if (coupee.width > 0) {
+          mot.ratioSignature = coupee.height / coupee.width;
+          var hauteur = mot.zone.width * mot.ratioSignature;
+          if (mot.zone.top + hauteur > taillePage.height) {
+            hauteur = taillePage.height - mot.zone.top;
+          }
+          if (hauteur > 4) {
+            mot.zone = Rect.fromLTWH(
+                mot.zone.left, mot.zone.top, mot.zone.width, hauteur);
+          }
+        }
+        statut = "Photo recadrée (${_enMm(mot.zone.width)} × "
+            "${_enMm(mot.zone.height)} mm) — l'originale est gardée";
+      });
+    } catch (e) {
+      if (mounted) setState(() => statut = "Recadrage impossible : $e");
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
   Future<void> _formeDeLImage(MotDetecte mot, String forme) async {
     final doc = document;
     final source = mot.imageSource ?? mot.imageFlottante;
@@ -8141,8 +8237,12 @@ class _AccueilState extends State<Accueil> {
       statut = "Découpe en cours...";
     });
     try {
-      final decodee = img.decodeImage(source);
+      var decodee = img.decodeImage(source);
       if (decodee == null) throw Exception("image illisible");
+      // Un recadrage déjà fait tient : la forme s'applique à la photo telle
+      // qu'on la voit, et non à l'image entière d'avant la découpe.
+      final coupe = mot.recadrage;
+      if (coupe != null) decodee = decouperSur(decodee, coupe);
       img.Image resultat;
       // Le cadre doit suivre la forme : un disque dans un cadre plus large
       // que haut laisserait des marges vides à gauche et à droite, et la
@@ -10100,6 +10200,19 @@ class _AccueilState extends State<Accueil> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _envoyerVersUnePage(mot);
+                },
+              ),
+            if (mot.imageFlottante != null)
+              ListTile(
+                leading: const Icon(Icons.crop),
+                title: const Text("Recadrer la photo"),
+                subtitle: Text(mot.recadrage == null
+                    ? "Garder la partie qui vous intéresse"
+                    : "Déjà recadrée — l'originale est gardée, "
+                        "vous pouvez rélargir"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _recadrerImage(mot);
                 },
               ),
             if (mot.imageFlottante != null)
