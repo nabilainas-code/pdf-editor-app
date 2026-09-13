@@ -2827,7 +2827,9 @@ class _AccueilState extends State<Accueil> {
           builder: (_) => EcranViseur(
             titre: mode == "identite"
                 ? "Cadrez la pièce d'identité"
-                : "Cadrez le document",
+                : mode == "cadre"
+                    ? "Cadrez la photo"
+                    : "Cadrez le document",
           ),
         ),
       );
@@ -2916,6 +2918,10 @@ class _AccueilState extends State<Accueil> {
             y: retenu.top.round(),
             width: retenu.width.round(),
             height: retenu.height.round());
+    // Le mode « cadre » sert aux photos qu'on pose dans la page : on veut
+    // le recadrage sur les bords, pas le rehaussement, qui blanchit le
+    // papier et conviendrait mal à un portrait ou à un logo en couleur.
+    if (mode == "cadre") return coupee;
     return mode == "nb"
         ? _rehausserScan(coupee, noirEtBlanc: true)
         : _rehausserScan(coupee);
@@ -7572,19 +7578,44 @@ class _AccueilState extends State<Accueil> {
     );
     if (source == null || !mounted) return;
 
+    // Une photo prise sur le moment cadre toujours trop large : la carte,
+    // le portrait ou le logo occupent un coin de l'image, tout le reste est
+    // la table. Elle passe donc par le viseur et par la vérification du
+    // cadre, exactement comme un scan — c'est ce qui manquait ici, alors
+    // que le scanner le faisait déjà. Une image déjà rangée dans le
+    // téléphone, elle, est prise telle quelle : elle a été cadrée une fois
+    // pour toutes, et redemander un cadrage à chaque logo serait un geste
+    // de plus pour rien.
+    Uint8List? prise;
+    if (source == ImageSource.camera) {
+      final cadree = await _photoTraitee(ImageSource.camera, "cadre");
+      if (cadree == null || !mounted) return;
+      try {
+        prise = Uint8List.fromList(img.encodeJpg(cadree, quality: 92));
+      } catch (e) {
+        if (mounted) {
+          setState(() => statut = "Photo impossible à préparer : $e");
+        }
+        return;
+      }
+    }
+
     setState(() => _occupe = true);
     try {
-      final choisie = await ImagePicker().pickImage(
-        source: source,
-        // Assez fin pour une impression nette : une photo d'identité de
-        // 35 × 45 mm demande environ 530 points de haut à 300 points par
-        // pouce. Assez sobre pour ne pas charger vingt mégaoctets en
-        // mémoire sur un téléphone.
-        maxWidth: 2400,
-        maxHeight: 2400,
-      );
-      if (choisie == null) return;
-      final octets = await choisie.readAsBytes();
+      if (prise == null) {
+        final choisie = await ImagePicker().pickImage(
+          source: source,
+          // Assez fin pour une impression nette : une photo d'identité de
+          // 35 × 45 mm demande environ 530 points de haut à 300 points par
+          // pouce. Assez sobre pour ne pas charger vingt mégaoctets en
+          // mémoire sur un téléphone.
+          maxWidth: 2400,
+          maxHeight: 2400,
+        );
+        if (choisie == null) return;
+        prise = await choisie.readAsBytes();
+      }
+      final octets = prise!;
       final decodee = img.decodeImage(octets);
       if (decodee == null || decodee.width <= 0 || decodee.height <= 0) {
         if (mounted) setState(() => statut = "Photo illisible");
