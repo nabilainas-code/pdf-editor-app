@@ -4365,7 +4365,7 @@ class _AccueilState extends State<Accueil> {
   /// un couloir de colonne, ou un écart bien plus large qu'une espace.
   ///
   /// C'est ce qui garde la mise en page quand on corrige un nom : sur
-  /// « certifie que :        Monsieur AINAS Nabil », les deux parties
+  /// « certifie que :        Monsieur X », les deux parties
   /// restent deux lignes, et réécrire la seconde ne touche pas la
   /// première. Renvoie une liste vide quand il n'y a rien à couper — la
   /// ligne est alors gardée telle que le document la donne, au caractère
