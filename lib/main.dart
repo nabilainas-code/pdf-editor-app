@@ -203,9 +203,78 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
 /// occupe trois à six.
 bool texteIncoherent(String texte, Rect zone) {
   final utile = texte.trim();
-  if (utile.length < 4 || zone.width <= 0) return false;
-  return zone.width / utile.length < 1.5;
+  if (utile.length < 4) return false;
+
+  // Premier signe : trop de texte pour la place. Le fichier déclare une
+  // phrase entière comme étant le contenu d'un seul signe.
+  if (zone.width > 0 && zone.width / utile.length < 1.5) return true;
+
+  // Deuxième signe : la même lettre répétée. Les signes absents de la table
+  // de correspondance sont tous lus de la même façon et donnent tous la
+  // même lettre — d'où ces « ت ت ت ت ت » à la place d'une phrase. Aucun
+  // texte réel ne fait ça.
+  //
+  // Le tatweel, ce trait qui étire une lettre arabe, est écarté du compte :
+  // lui se répète légitimement, et souvent.
+  final lettres = <int>[];
+  for (final rune in utile.runes) {
+    if (rune != 0x0640 && (estLettreArabe(rune) || estLettreLatine(rune))) {
+      lettres.add(rune);
+    }
+  }
+  if (lettres.length >= 6) {
+    var serie = 1;
+    var plusLongue = 1;
+    for (var i = 1; i < lettres.length; i++) {
+      serie = lettres[i] == lettres[i - 1] ? serie + 1 : 1;
+      if (serie > plusLongue) plusLongue = serie;
+    }
+    if (plusLongue >= 5) return true;
+
+    // Le compte par lettre ne se juge que sur une ligne assez longue : sur
+    // six lettres, « لا لا لا » ferait un faux positif, et c'est une
+    // tournure ordinaire.
+    if (lettres.length >= 10) {
+      final comptes = <int, int>{};
+      for (final lettre in lettres) {
+        comptes[lettre] = (comptes[lettre] ?? 0) + 1;
+      }
+      var maximum = 0;
+      for (final n in comptes.values) {
+        if (n > maximum) maximum = n;
+      }
+      if (maximum / lettres.length > 0.6) return true;
+    }
+  }
+
+  // Troisième signe : deux écritures collées à l'intérieur d'un même mot.
+  // Un mot latin au milieu d'un mot arabe, sans espace, ne s'écrit pas —
+  // il ne peut venir que d'une mauvaise lecture.
+  final codes = utile.runes.toList();
+  for (var i = 1; i < codes.length; i++) {
+    final avant = codes[i - 1];
+    final apres = codes[i];
+    if (estLettreArabe(avant) && estLettreLatine(apres)) return true;
+    if (estLettreLatine(avant) && estLettreArabe(apres)) return true;
+  }
+  return false;
 }
+
+/// Vrai pour une lettre de l'écriture arabe.
+bool estLettreArabe(int rune) =>
+    (rune >= 0x0620 && rune <= 0x064A) ||
+    (rune >= 0x0656 && rune <= 0x06FF) ||
+    (rune >= 0x0750 && rune <= 0x077F) ||
+    (rune >= 0x08A0 && rune <= 0x08FF) ||
+    (rune >= 0xFB50 && rune <= 0xFDFF) ||
+    (rune >= 0xFE70 && rune <= 0xFEFF);
+
+/// Vrai pour une lettre de l'alphabet latin, accents compris.
+bool estLettreLatine(int rune) =>
+    (rune >= 0x41 && rune <= 0x5A) ||
+    (rune >= 0x61 && rune <= 0x7A) ||
+    (rune >= 0xC0 && rune <= 0xFF && rune != 0xD7 && rune != 0xF7) ||
+    (rune >= 0x0100 && rune <= 0x017F);
 
 /// Vrai quand le texte contient de l'écriture arabe.
 ///
