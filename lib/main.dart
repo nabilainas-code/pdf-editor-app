@@ -4292,6 +4292,97 @@ class _AccueilState extends State<Accueil> {
   /// page à la fois, et seulement au moment où on l'ouvre — reconnaître le
   /// texte des trente pages d'un dossier dès l'ouverture ferait attendre
   /// des minutes pour des pages qu'on ne regardera peut-être jamais.
+  /// Récupère le vrai texte d'une page que le fichier décrit mal, en
+  /// paragraphes entiers.
+  ///
+  /// Certains outils déclarent le texte d'un paragraphe complet comme étant
+  /// le contenu d'un seul signe, placé à son début — et ne déclarent rien
+  /// pour les signes suivants. La lecture ligne par ligne n'en tire alors
+  /// que du charabia, alors que le texte est bel et bien là, entier.
+  ///
+  /// On le récupère donc à la source : chaque mot qui porte à lui seul une
+  /// longue suite de caractères est le texte d'un paragraphe. Le paragraphe
+  /// devient un bloc modifiable d'un seul tenant, parce que le fichier ne
+  /// dit nulle part où couper les lignes — il ne dit que le texte.
+  ///
+  /// Rend null quand rien n'est récupérable, et l'on s'en tient alors à la
+  /// protection : mieux vaut une ligne qu'on refuse de modifier qu'une
+  /// ligne détruite.
+  List<MotDetecte>? _blocsRecuperes(List<TextLine> lignes) {
+    final ancres = <({String texte, TextLine ligne})>[];
+    for (final ligne in lignes) {
+      for (final mot in ligne.wordCollection) {
+        final texte = mot.text.trim();
+        // Vingt caractères dans un seul mot : aucun mot réel n'est aussi
+        // long, c'est forcément une phrase entière déclarée d'un bloc.
+        if (texte.length >= 20) {
+          ancres.add((texte: texte, ligne: ligne));
+        }
+      }
+    }
+    if (ancres.isEmpty) return null;
+
+    ancres.sort((a, b) {
+      final vertical = a.ligne.bounds.top.compareTo(b.ligne.bounds.top);
+      return vertical != 0
+          ? vertical
+          : a.ligne.bounds.left.compareTo(b.ligne.bounds.left);
+    });
+
+    // Le même paragraphe est parfois déclaré deux fois, sur deux signes
+    // voisins, à un point final près. On ne le garde qu'une fois, dans sa
+    // version la plus complète.
+    final gardees = <({String texte, TextLine ligne})>[];
+    for (final ancre in ancres) {
+      final precedente = gardees.isEmpty ? null : gardees.last;
+      if (precedente != null) {
+        final a = precedente.texte;
+        final b = ancre.texte;
+        if (a.startsWith(b) || b.startsWith(a)) {
+          if (b.length > a.length) gardees[gardees.length - 1] = ancre;
+          continue;
+        }
+      }
+      gardees.add(ancre);
+    }
+
+    final blocs = <MotDetecte>[];
+    for (var i = 0; i < gardees.length; i++) {
+      final ancre = gardees[i];
+      final haut = ancre.ligne.bounds.top;
+      final basLimite = i + 1 < gardees.length
+          ? gardees[i + 1].ligne.bounds.top
+          : double.infinity;
+
+      // Le bloc occupe toutes les lignes qui vont de son ancre jusqu'à
+      // l'ancre suivante : c'est la place réelle du paragraphe à l'écran.
+      var zone = ancre.ligne.bounds;
+      for (final ligne in lignes) {
+        final centre = ligne.bounds.center.dy;
+        if (centre >= haut - 0.5 && centre < basLimite - 0.5) {
+          zone = zone.expandToInclude(ligne.bounds);
+        }
+      }
+      if (zone.width < 10 || zone.height < 4) continue;
+
+      blocs.add(MotDetecte(
+        ancre.texte,
+        zone,
+        gras: ancre.ligne.fontStyle.contains(PdfFontStyle.bold),
+        italique: ancre.ligne.fontStyle.contains(PdfFontStyle.italic),
+        famille: _familleDepuisNom(ancre.ligne.fontName),
+        tailleManuelle: ancre.ligne.fontSize > 0 ? ancre.ligne.fontSize : null,
+        // Un paragraphe entier dans un cadre : le texte y passe à la ligne
+        // tout seul, et se range à droite comme l'arabe le demande.
+        boiteLibre: true,
+        alignement: estArabe(ancre.texte)
+            ? PdfTextAlignment.right
+            : PdfTextAlignment.left,
+      ));
+    }
+    return blocs.isEmpty ? null : blocs;
+  }
+
   Future<void> _analyserPage(PdfDocument doc, int index) async {
       final extracteur = PdfTextExtractor(doc);
       final lignes = extracteur.extractTextLines(
@@ -4312,7 +4403,7 @@ class _AccueilState extends State<Accueil> {
       final couloirs = _couloirsVides(boitesMots);
       couloirsParPage[index] = couloirs;
 
-      final trouvesTexte = <MotDetecte>[];
+      var trouvesTexte = <MotDetecte>[];
 
       for (final ligne in lignes) {
         if (ligne.text.trim().isEmpty) continue;
@@ -4363,6 +4454,31 @@ class _AccueilState extends State<Accueil> {
       for (final ligne in trouvesTexte) {
         ligne.illisible = texteIncoherent(ligne.texte, ligne.zone);
       }
+
+      // Mais avant de renoncer, chercher le vrai texte là où il se cache :
+      // dans les paragraphes déclarés d'un bloc. Quand on le trouve, les
+      // lignes illisibles cèdent la place aux paragraphes récupérés, et le
+      // document redevient modifiable.
+      var recuperes = 0;
+      if (trouvesTexte.any((l) => l.illisible)) {
+        final blocs = _blocsRecuperes(lignes);
+        if (blocs != null) {
+          // Les lignes qui tombent dans un bloc récupéré disparaissent au
+          // profit de celui-ci : elles disaient n'importe quoi de la même
+          // place.
+          final restantes = trouvesTexte.where((ligne) {
+            for (final bloc in blocs) {
+              if (bloc.zone.overlaps(ligne.zone)) return false;
+            }
+            return !ligne.illisible;
+          }).toList();
+          trouvesTexte = [...blocs, ...restantes];
+          recuperes = blocs.length;
+          for (final ligne in trouvesTexte) {
+            ligne.illisible = texteIncoherent(ligne.texte, ligne.zone);
+          }
+        }
+      }
       final malLues = trouvesTexte.where((l) => l.illisible).length;
 
       if (trouvesTexte.isNotEmpty) {
@@ -4376,10 +4492,13 @@ class _AccueilState extends State<Accueil> {
           final colonnes = couloirs.isEmpty
               ? ""
               : ", ${couloirs.length + 1} colonnes";
-          statut = malLues > 0
-              ? "$malLues ligne(s) mal décrites par le fichier : protégées, "
-                  "elles ne peuvent pas être réécrites (tout le reste "
-                  "fonctionne)"
+          statut = recuperes > 0
+              ? "Document mal décrit : $recuperes paragraphe(s) récupérés "
+                  "entiers — ils se modifient d'un seul tenant"
+              : malLues > 0
+                  ? "$malLues ligne(s) mal décrites par le fichier : "
+                      "protégées, elles ne peuvent pas être réécrites (tout "
+                      "le reste fonctionne)"
               : nbPages > 1
                   ? "Page ${index + 1} sur $nbPages — ${trouvesTexte.length} ligne(s)$colonnes"
                   : "${trouvesTexte.length} ligne(s) détectée(s)$colonnes";
