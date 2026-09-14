@@ -185,6 +185,28 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
   return retenu;
 }
 
+/// Vrai quand le texte annoncé par le fichier ne peut pas tenir dans le
+/// cadre où il est censé être écrit.
+///
+/// Un PDF ne contient pas toujours du texte : il contient des numéros de
+/// dessin, plus une table qui dit à quelle lettre chaque numéro correspond.
+/// Certains outils fabriquent cette table de travers — on en voit beaucoup
+/// sur les documents arabes — et déclarent une phrase entière comme étant
+/// le contenu d'un seul signe large de quelques points.
+///
+/// Le document s'affiche parfaitement : l'affichage dessine des formes, il
+/// n'a que faire du sens. Mais ce que l'application lit n'a plus aucun
+/// rapport avec la place occupée, et réécrire une telle ligne la détruit.
+///
+/// Un point et demi par caractère est un plancher très bas : aucune police
+/// lisible n'écrit plus serré, même minuscule. Une ligne ordinaire en
+/// occupe trois à six.
+bool texteIncoherent(String texte, Rect zone) {
+  final utile = texte.trim();
+  if (utile.length < 4 || zone.width <= 0) return false;
+  return zone.width / utile.length < 1.5;
+}
+
 /// Vrai quand le texte contient de l'écriture arabe.
 ///
 /// Les blocs retenus sont l'arabe lui-même, ses compléments (persan, ourdou),
@@ -512,6 +534,12 @@ class MotDetecte {
   /// repart toujours de l'original plutôt que d'empiler les découpes.
   Uint8List? imageSource;
 
+  /// Vrai quand le fichier annonce pour cette ligne un texte qui ne peut
+  /// pas être le sien (voir texteIncoherent). La ligne reste affichée et
+  /// intacte : elle est seulement protégée contre la réécriture, qui la
+  /// remplacerait par du charabia.
+  bool illisible = false;
+
   /// Le dernier recadrage demandé, en points de l'image d'origine.
   ///
   /// C'est lui qui rend le recadrage non destructif : la découpe repart
@@ -604,6 +632,7 @@ MotDetecte copieDe(MotDetecte m) {
       decalageSource: m.decalageSource,
   );
   copie.recadrage = m.recadrage;
+  copie.illisible = m.illisible;
   return copie;
 }
 
@@ -1497,6 +1526,17 @@ class _AccueilState extends State<Accueil> {
   /// tapé sur une autre ligne est validé avant : passer d'une ligne à
   /// l'autre abandonnait la saisie en cours sans rien dire.
   Future<void> _ecrireSurLaLigne(MotDetecte mot) async {
+    // Une ligne que le fichier décrit mal ne se réécrit pas : ce qui serait
+    // posé à la place n'aurait aucun rapport avec ce qu'on voit. Elle reste
+    // affichée, intacte, et tout le reste lui est ouvert — la déplacer,
+    // l'effacer, écrire par-dessus dans une zone libre.
+    if (mot.illisible) {
+      setState(() => statut =
+          "Cette ligne est mal décrite par le fichier : la réécrire la "
+          "remplacerait par du charabia. Utilisez « Ajouter du texte » "
+          "par-dessus.");
+      return;
+    }
     final enCours = motEnEditionDirecte;
     if (enCours != null && enCours != mot) {
       await _validerEditionDirecte();
@@ -4249,6 +4289,13 @@ class _AccueilState extends State<Accueil> {
         }
       }
 
+      // Repérer tout de suite les lignes que le fichier décrit mal : il
+      // vaut mieux refuser de les modifier que de les détruire en silence.
+      for (final ligne in trouvesTexte) {
+        ligne.illisible = texteIncoherent(ligne.texte, ligne.zone);
+      }
+      final malLues = trouvesTexte.where((l) => l.illisible).length;
+
       if (trouvesTexte.isNotEmpty) {
         setState(() {
           document = doc;
@@ -4260,9 +4307,13 @@ class _AccueilState extends State<Accueil> {
           final colonnes = couloirs.isEmpty
               ? ""
               : ", ${couloirs.length + 1} colonnes";
-          statut = nbPages > 1
-              ? "Page ${index + 1} sur $nbPages — ${trouvesTexte.length} ligne(s)$colonnes"
-              : "${trouvesTexte.length} ligne(s) détectée(s)$colonnes";
+          statut = malLues > 0
+              ? "$malLues ligne(s) mal décrites par le fichier : protégées, "
+                  "elles ne peuvent pas être réécrites (tout le reste "
+                  "fonctionne)"
+              : nbPages > 1
+                  ? "Page ${index + 1} sur $nbPages — ${trouvesTexte.length} ligne(s)$colonnes"
+                  : "${trouvesTexte.length} ligne(s) détectée(s)$colonnes";
         });
         // Même un document au vrai texte a besoin de l'image de sa page :
         // c'est elle qui dit de quelle couleur est le papier juste à côté
@@ -7583,7 +7634,10 @@ class _AccueilState extends State<Accueil> {
         statut = "Tapez le mot à chercher";
         return;
       }
-      final lignes = mots.where((m) => m.texte.isNotEmpty).toList()
+      // Une ligne mal décrite par le fichier est écartée : remplacer un
+      // mot dedans voudrait dire la réécrire, donc la détruire.
+      final lignes =
+          mots.where((m) => m.texte.isNotEmpty && !m.illisible).toList()
         ..sort((a, b) {
           final vertical = a.zone.top.compareTo(b.zone.top);
           return vertical != 0 ? vertical : a.zone.left.compareTo(b.zone.left);
@@ -8857,6 +8911,33 @@ class _AccueilState extends State<Accueil> {
           _amenerEnVue(dehors.first.zone);
         },
         grave: true,
+      ));
+    }
+
+    // Des lignes que le fichier décrit mal : elles s'impriment bien, mais
+    // l'application ne peut pas les réécrire. Le dire une fois vaut mieux
+    // que de laisser buter dessus ligne après ligne.
+    final malDecrites = mots.where((m) => m.illisible).toList();
+    if (malDecrites.isNotEmpty) {
+      constats.add(_Constat(
+        icone: Icons.menu_book_outlined,
+        titre: malDecrites.length == 1
+            ? "Une ligne est mal décrite par le fichier"
+            : "${malDecrites.length} lignes sont mal décrites par le fichier",
+        detail: "Le document s'affiche et s'imprime correctement, mais il "
+            "annonce pour ces lignes un texte qui n'est pas le leur. Elles "
+            "sont protégées : impossible de les réécrire, ce qui les "
+            "détruirait. Tout le reste fonctionne — déplacer, effacer, "
+            "signer, et écrire par-dessus avec « Ajouter du texte ».",
+        actionTitre: "Me montrer la première",
+        action: () async {
+          setState(() {
+            selection
+              ..clear()
+              ..add(malDecrites.first);
+            statut = "Ligne protégée : le fichier la décrit mal";
+          });
+        },
       ));
     }
 
