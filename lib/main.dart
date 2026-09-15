@@ -5333,11 +5333,7 @@ class _AccueilState extends State<Accueil> {
     // Même relevé que l'effacement : sur le bandeau sombre d'un CV, le
     // pourtour ramenait du blanc, et le champ d'écriture posait un
     // rectangle blanc sur la colonne dès qu'on touchait une ligne.
-    final proche = _fondAuDessusEtDessous(zonePdf);
-    if (proche != null) {
-      return Color.fromARGB(255, proche[0], proche[1], proche[2]);
-    }
-    final fond = _fondAutour(zonePdf);
+    final fond = _fondDeReference(zonePdf);
     if (fond == null) return Colors.white;
     return Color.fromARGB(255, fond[0], fond[1], fond[2]);
   }
@@ -5495,10 +5491,25 @@ class _AccueilState extends State<Accueil> {
   /// teinte dominante parmi les pixels qui tranchent nettement sur le fond
   /// local. Marche donc aussi bien pour du noir sur blanc que pour du blanc
   /// sur un bandeau sombre ou un titre en couleur.
+  /// Le fond sur lequel une ligne est posée.
+  ///
+  /// Relevé au-dessus et au-dessous d'abord, sur la largeur de la ligne
+  /// elle-même. Le pourtour ne sert qu'en dernier recours : au bord d'une
+  /// colonne sombre, il ramène le blanc de la page d'à côté, ce qui fausse
+  /// tout ce qui s'appuie dessus.
+  List<int>? _fondDeReference(Rect zonePdf) =>
+      _fondAuDessusEtDessous(zonePdf) ?? _fondAutour(zonePdf);
+
   PdfColor? _couleurEncre(Rect zonePdf) {
     final image = imageDecodee;
     if (image == null) return null;
-    final fond = _fondAutour(zonePdf);
+    // Le même fond que celui dont l'écran et l'effacement se servent. Avec
+    // le seul pourtour, une ligne blanche posée sur la colonne sombre d'un
+    // CV était comparée au blanc de la page voisine : l'application prenait
+    // alors le bleu nuit du fond pour de l'encre, et écrivait la ligne en
+    // bleu nuit sur du bleu nuit. L'adresse disparaissait à l'écran dès
+    // qu'on la touchait, et dans le fichier dès qu'on validait.
+    final fond = _fondDeReference(zonePdf);
     if (fond == null) return null;
     final echelle = echelleOcr;
 
