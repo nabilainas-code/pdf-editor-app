@@ -1573,6 +1573,10 @@ class _AccueilState extends State<Accueil> {
   void initState() {
     super.initState();
     controleurDirect.addListener(_memoriserSelection);
+    // Les touches de déplacement et d'effacement sont lues avant le champ :
+    // c'est ce qui permet de passer d'une ligne à l'autre au bout du texte,
+    // au lieu de buter contre le bord.
+    focusDirect.onKeyEvent = _toucheDansLaLigne;
     _chargerPolices();
     _init();
     _chargerRecents();
@@ -1833,7 +1837,52 @@ class _AccueilState extends State<Accueil> {
   /// colonne. Le curseur d'Android ne se déplace qu'à l'intérieur de son
   /// propre champ : chaque ligne du document en étant un, on ne pouvait pas
   /// le glisser d'une ligne à la suivante. Ces deux flèches font le trajet.
-  Future<void> _ligneVoisine(int sens) async {
+  /// Ce que font les touches de bord dans la ligne qu'on écrit.
+  ///
+  /// Au bout d'une ligne, un traitement de texte passe à la suivante ; ici
+  /// le curseur butait contre le bord et il fallait viser la ligne voisine
+  /// au doigt. Reculer ou effacer depuis le tout début remonte donc à la
+  /// fin de la ligne du dessus, avancer depuis la toute fin descend au
+  /// début de celle du dessous.
+  ///
+  /// Une zone de texte libre garde ses touches haut et bas : elle contient
+  /// plusieurs lignes à elle seule, et on s'y déplace dedans.
+  KeyEventResult _toucheDansLaLigne(FocusNode noeud, KeyEvent evenement) {
+    if (evenement is! KeyDownEvent) return KeyEventResult.ignored;
+    final mot = motEnEditionDirecte;
+    if (mot == null || _occupe) return KeyEventResult.ignored;
+
+    final choix = controleurDirect.selection;
+    // Du texte surligné : les touches lui appartiennent.
+    if (!choix.isValid || !choix.isCollapsed) return KeyEventResult.ignored;
+    final position = choix.baseOffset;
+    final longueur = controleurDirect.text.length;
+    final touche = evenement.logicalKey;
+
+    if (position <= 0 &&
+        (touche == LogicalKeyboardKey.backspace ||
+            touche == LogicalKeyboardKey.arrowLeft)) {
+      _ligneVoisine(-1);
+      return KeyEventResult.handled;
+    }
+    if (position >= longueur && touche == LogicalKeyboardKey.arrowRight) {
+      _ligneVoisine(1, curseurAuDebut: true);
+      return KeyEventResult.handled;
+    }
+    if (!mot.boiteLibre) {
+      if (touche == LogicalKeyboardKey.arrowUp) {
+        _ligneVoisine(-1);
+        return KeyEventResult.handled;
+      }
+      if (touche == LogicalKeyboardKey.arrowDown) {
+        _ligneVoisine(1, curseurAuDebut: true);
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
+  }
+
+  Future<void> _ligneVoisine(int sens, {bool curseurAuDebut = false}) async {
     final depart = motEnEditionDirecte;
     if (depart == null || _occupe) return;
 
@@ -1862,6 +1911,13 @@ class _AccueilState extends State<Accueil> {
       return;
     }
     await _ecrireSurLaLigne(cible);
+    if (!mounted) return;
+    // En descendant, le curseur se pose au début : on arrive par la gauche,
+    // comme on est parti par la droite. En montant, il reste à la fin, où
+    // _ecrireSurLaLigne l'a déjà mis — c'est là qu'on reprend la frappe.
+    if (curseurAuDebut) {
+      controleurDirect.selection = const TextSelection.collapsed(offset: 0);
+    }
   }
 
   /// Le gras porte sur ce qui est surligné, et sur toute la ligne à défaut.
