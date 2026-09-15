@@ -14,6 +14,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
+// Deuxième entrée vers la même bibliothèque, sous un nom à elle : « TextLine »
+// existe aussi chez Google, et le compilateur refuse de choisir. Nommer la
+// sienne lève l'ambiguïté sans toucher au reste du fichier.
+import 'package:syncfusion_flutter_pdf/pdf.dart' as sfpdf;
 
 /// Seuil qui sépare au mieux deux populations de clarté dans une image :
 /// ici le papier, clair, et ce qu'il y a autour — table, sol, ombre.
@@ -4308,8 +4312,8 @@ class _AccueilState extends State<Accueil> {
   /// Rend null quand rien n'est récupérable, et l'on s'en tient alors à la
   /// protection : mieux vaut une ligne qu'on refuse de modifier qu'une
   /// ligne détruite.
-  List<MotDetecte>? _blocsRecuperes(List<TextLine> lignes) {
-    final ancres = <({String texte, TextLine ligne})>[];
+  List<MotDetecte>? _blocsRecuperes(List<sfpdf.TextLine> lignes) {
+    final ancres = <({String texte, sfpdf.TextLine ligne})>[];
     for (final ligne in lignes) {
       for (final mot in ligne.wordCollection) {
         final texte = mot.text.trim();
@@ -4332,7 +4336,7 @@ class _AccueilState extends State<Accueil> {
     // Le même paragraphe est parfois déclaré deux fois, sur deux signes
     // voisins, à un point final près. On ne le garde qu'une fois, dans sa
     // version la plus complète.
-    final gardees = <({String texte, TextLine ligne})>[];
+    final gardees = <({String texte, sfpdf.TextLine ligne})>[];
     for (final ancre in ancres) {
       final precedente = gardees.isEmpty ? null : gardees.last;
       if (precedente != null) {
