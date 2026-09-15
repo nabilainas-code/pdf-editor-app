@@ -2093,6 +2093,23 @@ class _AccueilState extends State<Accueil> {
       _retirerRepere(mot);
       return;
     }
+    // Rien n'a changé : on referme sans toucher à la page.
+    //
+    // Sans ce garde-fou, refermer une ligne la réécrivait toujours —
+    // effacement du fond compris — même quand on n'y avait rien touché.
+    // Passer d'une ligne à l'autre au clavier réécrivait donc chaque ligne
+    // traversée, alors qu'on n'avait fait que déplacer le curseur : c'est
+    // ce qui déplaçait les lignes et laissait des bandes sombres.
+    //
+    // La règle vaut au-delà du clavier : ouvrir une ligne pour la relire,
+    // puis refermer, ne doit rien changer au document.
+    if (texte == mot.texte &&
+        gras == mot.gras &&
+        italique == mot.italique &&
+        souligne == mot.souligne &&
+        taille == mot.tailleManuelle) {
+      return;
+    }
     await _appliquerModification(mot,
         texte: texte,
         gras: gras,
