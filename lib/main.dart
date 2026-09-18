@@ -8274,7 +8274,31 @@ class _AccueilState extends State<Accueil> {
       width: graine,
       height: graine,
     );
-    final zone = _aligner(_etendreSurEncre(depart));
+    // Un objet déjà reconnu à l'ouverture de la page — photo, cachet,
+    // signature — donne directement son contour. Plus besoin de laisser le
+    // cadre s'étendre de proche en proche, ni de le rectifier ensuite : ce
+    // qui se voit d'un coup d'œil se prend d'un seul appui.
+    //
+    // Le plus petit objet contenant le doigt l'emporte : une photo posée
+    // sur un bandeau ne doit pas faire prendre le bandeau entier.
+    ObjetRepere? vise;
+    for (final objet in objetsReperes) {
+      if (!objet.zone.contains(Offset(xPage, yPage))) continue;
+      final surface = objet.zone.width * objet.zone.height;
+      if (vise == null || surface < vise.zone.width * vise.zone.height) {
+        vise = objet;
+      }
+    }
+
+    final zone =
+        vise != null ? _aligner(vise.zone) : _aligner(_etendreSurEncre(depart));
+    final nomDeLObjet = vise == null
+        ? ""
+        : vise.nature == "photo"
+            ? "Photo reconnue"
+            : vise.nature == "cachet"
+                ? "Cachet reconnu"
+                : "Signature reconnue";
     final cadre = MotDetecte("", zone);
     setState(() {
       mots = [...mots, cadre];
@@ -8285,9 +8309,12 @@ class _AccueilState extends State<Accueil> {
       modeTampon = true;
       enAjoutTexte = false;
       enCollage = false;
-      statut = zone.width > graine + 1 || zone.height > graine + 1
-          ? "Entouré — « Détacher » pour l'emporter, la gomme pour l'effacer"
-          : "Rien trouvé ici — étirez le cadre par ses coins";
+      statut = vise != null
+          ? "$nomDeLObjet — « Détacher » pour l'emporter d'un seul tenant"
+          : zone.width > graine + 1 || zone.height > graine + 1
+              ? "Entouré — « Détacher » pour l'emporter, la gomme pour "
+                  "l'effacer"
+              : "Rien trouvé ici — étirez le cadre par ses coins";
     });
   }
 
