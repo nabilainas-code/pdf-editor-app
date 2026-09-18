@@ -4400,6 +4400,70 @@ class _AccueilState extends State<Accueil> {
   /// page à la fois, et seulement au moment où on l'ouvre — reconnaître le
   /// texte des trente pages d'un dossier dès l'ouverture ferait attendre
   /// des minutes pour des pages qu'on ne regardera peut-être jamais.
+  /// Les frontières verticales où le fond de la page change de couleur.
+  ///
+  /// Une séparation de colonnes ne se voit pas toujours à un blanc entre
+  /// deux textes : sur un CV à bandeau, c'est un changement de couleur qui
+  /// sépare la colonne sombre de la page blanche. Rien dans le fichier ne
+  /// le dit — il faut le lire sur l'image de la page.
+  ///
+  /// Ces frontières rejoignent les couloirs détectés entre les textes, et
+  /// tout ce qui s'y appuie en profite d'un coup : la largeur qu'une ligne
+  /// a le droit d'occuper quand on la réécrit, l'étendue de son effacement,
+  /// et le découpage d'une ligne qui enjambe deux colonnes.
+  List<double> _frontieresDeFond() {
+    final source = imageDecodee;
+    if (source == null || echelleOcr <= 0) return const [];
+    const largeurAnalyse = 400;
+    final reduction =
+        source.width > largeurAnalyse ? source.width / largeurAnalyse : 1.0;
+    final la = (source.width / reduction).round();
+    final ha = (source.height / reduction).round();
+    if (la < 40 || ha < 40) return const [];
+    final petite = img.copyResize(source, width: la, height: ha);
+
+    // Couleur moyenne de chaque colonne de points.
+    final moyR = List<double>.filled(la, 0);
+    final moyV = List<double>.filled(la, 0);
+    final moyB = List<double>.filled(la, 0);
+    for (var x = 0; x < la; x++) {
+      var r = 0.0, v = 0.0, b = 0.0;
+      for (var y = 0; y < ha; y++) {
+        final p = petite.getPixel(x, y);
+        r += p.r.toDouble();
+        v += p.g.toDouble();
+        b += p.b.toDouble();
+      }
+      moyR[x] = r / ha;
+      moyV[x] = v / ha;
+      moyB[x] = b / ha;
+    }
+
+    // Un vrai bandeau change franchement, et d'un coup. On compare donc
+    // deux colonnes voisines, pas une colonne à la moyenne de la page.
+    final frontieres = <double>[];
+    for (var x = 1; x < la; x++) {
+      final dr = moyR[x] - moyR[x - 1];
+      final dv = moyV[x] - moyV[x - 1];
+      final db = moyB[x] - moyB[x - 1];
+      if (dr * dr + dv * dv + db * db < 55 * 55) continue;
+      final position = x * reduction / echelleOcr;
+      // Une frontière collée au bord ne sépare rien.
+      if (position < taillePage.width * 0.08 ||
+          position > taillePage.width * 0.92) {
+        continue;
+      }
+      // Deux frontières voisines sont la même : un bord a une épaisseur.
+      if (frontieres.isNotEmpty &&
+          (position - frontieres.last).abs() < taillePage.width * 0.03) {
+        continue;
+      }
+      frontieres.add(position);
+      if (frontieres.length >= 4) break;
+    }
+    return frontieres;
+  }
+
   /// Objets repérés sur la page affichée. Vide tant que la recherche n'a
   /// pas eu lieu.
   List<ObjetRepere> objetsReperes = [];
@@ -4785,6 +4849,22 @@ class _AccueilState extends State<Accueil> {
             ligne.couleurTexte ??= _couleurEncre(ligne.zone);
           }
         }
+        // Le fond de la page connu, on peut y lire les frontières que le
+        // texte seul ne montre pas : le bord d'un bandeau de couleur est
+        // une séparation de colonnes aussi nette qu'un blanc.
+        final frontieres = _frontieresDeFond();
+        if (frontieres.isNotEmpty) {
+          final ensemble = <double>[...couloirs];
+          for (final bord in frontieres) {
+            if (ensemble.every(
+                (c) => (c - bord).abs() > taillePage.width * 0.03)) {
+              ensemble.add(bord);
+            }
+          }
+          ensemble.sort();
+          couloirsParPage[index] = ensemble;
+        }
+
         // Les objets posés sur la page — photos, cachets, signatures — se
         // cherchent une fois, après l'image de la page dont ils dépendent.
         // Pour l'instant on se contente de les annoncer : rien n'est touché
