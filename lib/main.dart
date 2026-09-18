@@ -10398,6 +10398,72 @@ class _AccueilState extends State<Accueil> {
   /// C'est ce qui manquait pour bouger un tampon : jusqu'ici un cadre vide
   /// ne servait qu'à effacer, et rien ne permettait d'emporter avec soi ce
   /// qui était imprimé dessous.
+  /// Vrai quand les quatre coins du morceau découpé ne lui appartiennent
+  /// pas : une même teinte unie aux quatre angles, nettement différente de
+  /// son centre.
+  ///
+  /// C'est la signature d'un objet rond — ou à coins arrondis — posé sur un
+  /// fond uni. Le rectangle qu'on découpe emporte alors quatre coins de
+  /// fond, et une photo ronde détachée d'une colonne sombre se retrouve
+  /// avec quatre angles bleu nuit une fois posée sur du blanc.
+  ///
+  /// Une photo rectangulaire, elle, occupe ses coins : ils ne se
+  /// ressemblent pas entre eux, et le test la laisse tranquille.
+  bool _coinsEtrangers(img.Image piece) {
+    final cote = piece.width < piece.height ? piece.width : piece.height;
+    if (cote < 24) return false;
+    final pas = (cote * 0.12).round().clamp(3, 40);
+
+    List<double>? moyenne(int x0, int y0) {
+      var r = 0.0, v = 0.0, b = 0.0, n = 0;
+      for (var y = y0; y < y0 + pas; y++) {
+        for (var x = x0; x < x0 + pas; x++) {
+          if (x < 0 || y < 0 || x >= piece.width || y >= piece.height) continue;
+          final p = piece.getPixel(x, y);
+          // Un point déjà transparent ne compte pas : le morceau a déjà été
+          // détouré une fois.
+          if (p.a == 0) return null;
+          r += p.r.toDouble();
+          v += p.g.toDouble();
+          b += p.b.toDouble();
+          n++;
+        }
+      }
+      if (n == 0) return null;
+      return [r / n, v / n, b / n];
+    }
+
+    final coins = <List<double>>[];
+    for (final position in [
+      [0, 0],
+      [piece.width - pas, 0],
+      [0, piece.height - pas],
+      [piece.width - pas, piece.height - pas],
+    ]) {
+      final m = moyenne(position[0], position[1]);
+      if (m == null) return false;
+      coins.add(m);
+    }
+
+    double ecart(List<double> a, List<double> b) {
+      final dr = a[0] - b[0], dv = a[1] - b[1], db = a[2] - b[2];
+      return dr * dr + dv * dv + db * db;
+    }
+
+    // Les quatre coins doivent se ressembler entre eux.
+    for (var i = 1; i < coins.length; i++) {
+      if (ecart(coins[0], coins[i]) > 30 * 30) return false;
+    }
+    // Et le centre doit s'en écarter franchement, sans quoi le morceau est
+    // uni d'un bout à l'autre et il n'y a rien à retirer.
+    final centre = moyenne(
+      (piece.width / 2 - pas / 2).round(),
+      (piece.height / 2 - pas / 2).round(),
+    );
+    if (centre == null) return false;
+    return ecart(coins[0], centre) > 70 * 70;
+  }
+
   Future<void> _decouperCadre(MotDetecte mot) async {
     final doc = document;
     if (doc == null || _occupe) return;
@@ -10426,6 +10492,24 @@ class _AccueilState extends State<Accueil> {
         return;
       }
 
+      // Un objet rond découpé dans un rectangle emporte quatre coins de
+      // fond qui ne sont pas à lui. Quand ces coins se ressemblent tous et
+      // tranchent avec le centre, on les retire tout de suite : c'est le
+      // même détourage que « Forme de la photo », appliqué sans avoir à le
+      // demander. L'original est gardé de côté, donc « Rectangle d'origine »
+      // les ramène, et ↶ aussi.
+      var octets = image;
+      var detoure = false;
+      try {
+        final piece = img.decodeImage(image);
+        if (piece != null && _coinsEtrangers(piece)) {
+          octets = Uint8List.fromList(img.encodePng(_detourerLeFond(piece)));
+          detoure = true;
+        }
+      } catch (_) {
+        // Détourage impossible : on garde le morceau tel quel, entier.
+      }
+
       historique.add(avant);
       futur.clear();
       _effacerRect(doc.pages[pageActive], zone, mot);
@@ -10434,16 +10518,21 @@ class _AccueilState extends State<Accueil> {
         mot.texte = "";
         mot.redessine = false;
         mot.zone = zone;
-        mot.imageFlottante = image;
+        if (detoure) mot.imageSource = image;
+        mot.imageFlottante = octets;
         mot.ratioSignature =
             zone.width <= 0 ? 1 : zone.height / zone.width;
         selection
           ..clear()
           ..add(mot);
-        statut = etendu
-            ? "Détaché (cadre élargi pour ne rien couper) — tirez-le où "
-                "vous voulez"
-            : "Détaché — tirez-le où vous voulez, les coins pour la taille";
+        statut = detoure
+            ? "Détaché et détouré : le fond uni des coins a été retiré "
+                "(« Forme de la photo » pour revenir au rectangle)"
+            : etendu
+                ? "Détaché (cadre élargi pour ne rien couper) — tirez-le où "
+                    "vous voulez"
+                : "Détaché — tirez-le où vous voulez, les coins pour la "
+                    "taille";
       });
 
       if (imageDeFond != null) await _rafraichirApercuOcr(doc);
