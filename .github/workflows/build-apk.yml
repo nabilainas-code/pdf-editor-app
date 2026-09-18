@@ -25,9 +25,30 @@ jobs:
           cp -r assets temp_app/assets
           cp pubspec.yaml temp_app/pubspec.yaml
 
+      # L'icône de l'application. Les cinq tailles sont fabriquées et
+      # gardées dans le dépôt : rien à installer ni à convertir ici, et ce
+      # qu'on voit dans le dépôt est exactement ce qui arrive sur le
+      # téléphone. Le dossier « anydpi » du gabarit est retiré : s'il reste,
+      # Android l'utilise et ignore ces images.
+      - name: Poser l'icône de l'application
+        run: |
+          rm -rf temp_app/android/app/src/main/res/mipmap-anydpi-v26
+          for densite in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p temp_app/android/app/src/main/res/mipmap-$densite
+            cp assets/icones/$densite.png \
+               temp_app/android/app/src/main/res/mipmap-$densite/ic_launcher.png
+          done
+          ls -la temp_app/android/app/src/main/res/mipmap-*/
+
       - name: Autoriser l'accès à internet et l'ouverture de PDF
         run: |
           sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />' temp_app/android/app/src/main/AndroidManifest.xml
+          # Le nom affiché sous l'icône. Sans ça, Android garde celui du
+          # projet fabriqué par la compilation : l'application s'appelait
+          # « temp_app » sur le téléphone, y compris dans les demandes
+          # d'autorisation.
+          sed -i 's/android:label="temp_app"/android:label="Mon éditeur PDF"/' temp_app/android/app/src/main/AndroidManifest.xml
+          grep -n 'android:label' temp_app/android/app/src/main/AndroidManifest.xml
           cat > /tmp/fix_manifest.py << 'PYEOF'
           path = 'temp_app/android/app/src/main/AndroidManifest.xml'
           content = open(path).read()
