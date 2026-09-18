@@ -1257,6 +1257,11 @@ class _AccueilState extends State<Accueil> {
   /// dans un champ posé exactement sur la ligne, à sa place et à sa taille,
   /// au lieu de passer par la boîte « Modifier la ligne » qui masque la page.
   MotDetecte? motEnEditionDirecte;
+
+  /// Bord au-delà duquel le champ d'écriture ne doit pas s'élargir : là où
+  /// le fond de la ligne change. Mesuré une fois, à l'ouverture — le
+  /// mesurer à chaque image ferait ramer l'affichage.
+  double limiteDroiteEcriture = 0;
   final TextEditingController controleurDirect = TextEditingController();
 
   /// Dernier surlignage vu dans le champ d'écriture, et le texte qu'il
@@ -1661,6 +1666,7 @@ class _AccueilState extends State<Accueil> {
       modeTampon = false;
       cadreTampon = null;
       motEnEditionDirecte = mot;
+      limiteDroiteEcriture = _bordDuFond(mot.zone);
       selectionMemorisee = null;
       texteDeLaSelection = "";
       controleurDirect.text = mot.texte;
@@ -5769,6 +5775,45 @@ class _AccueilState extends State<Accueil> {
   List<int>? _fondDeReference(Rect zonePdf) =>
       _fondAuDessusEtDessous(zonePdf) ?? _fondAutour(zonePdf);
 
+  /// Jusqu'où, vers la droite, le fond de cette ligne reste le même.
+  ///
+  /// Le champ d'écriture s'élargit au fil de la frappe pour ne pas couper
+  /// la fin du texte, et son fond est peint de la couleur relevée sous la
+  /// ligne. Sur la colonne sombre d'un CV, il débordait donc du bleu nuit
+  /// sur le blanc de la page voisine — un petit rectangle de couleur qui
+  /// sortait de la colonne.
+  ///
+  /// On cherche ici l'endroit où le fond cesse d'être le même, et le champ
+  /// s'arrêtera là. Sur une page blanche ordinaire, rien ne change avant le
+  /// bord : la mesure rend la largeur de la page et rien ne bouge.
+  double _bordDuFond(Rect zone) {
+    final image = imageDecodee;
+    final fond = _fondDeReference(zone);
+    if (image == null || fond == null || echelleOcr <= 0) {
+      return taillePage.width;
+    }
+    final y =
+        (zone.center.dy * echelleOcr).round().clamp(0, image.height - 1);
+    var debut = (zone.right * echelleOcr).round();
+    if (debut < 0) debut = 0;
+    var dehors = 0;
+    for (var x = debut; x < image.width; x++) {
+      final p = image.getPixel(x, y);
+      final dr = p.r.toDouble() - fond[0];
+      final dv = p.g.toDouble() - fond[1];
+      final db = p.b.toDouble() - fond[2];
+      if (dr * dr + dv * dv + db * db > 60 * 60) {
+        dehors++;
+        // Un point isolé peut être de l'encre voisine ; c'est un changement
+        // franc et durable qu'on cherche.
+        if (dehors >= 4) return (x - dehors) / echelleOcr;
+      } else {
+        dehors = 0;
+      }
+    }
+    return taillePage.width;
+  }
+
   PdfColor? _couleurEncre(Rect zonePdf) {
     final image = imageDecodee;
     if (image == null) return null;
@@ -6066,7 +6111,14 @@ class _AccueilState extends State<Accueil> {
     // Jamais au-delà du bord droit de la page, même si le cadre a été poussé
     // à gauche du bord : un champ qui dépasse déborde à l'écran.
     final gaucheUtile = mot.zone.left < 0 ? 0.0 : mot.zone.left;
-    final maxi = taillePage.width - gaucheUtile - 2;
+    var bord = taillePage.width;
+    // Le fond change avant le bord de la page : le champ s'arrête là, sans
+    // quoi il pose la couleur de sa colonne sur celle d'à côté.
+    if (limiteDroiteEcriture > gaucheUtile + 8 &&
+        limiteDroiteEcriture < bord) {
+      bord = limiteDroiteEcriture;
+    }
+    final maxi = bord - gaucheUtile - 2;
     if (maxi > 0 && largeur > maxi) largeur = maxi;
     if (largeur < 1) largeur = mot.zone.width;
 
