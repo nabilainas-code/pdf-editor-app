@@ -1666,6 +1666,7 @@ class _AccueilState extends State<Accueil> {
       modeTampon = false;
       cadreTampon = null;
       motEnEditionDirecte = mot;
+      _appuisAuBord = 0;
       limiteDroiteEcriture = _bordDuFond(mot.zone);
       selectionMemorisee = null;
       texteDeLaSelection = "";
@@ -1878,10 +1879,34 @@ class _AccueilState extends State<Accueil> {
   ///
   /// Une zone de texte libre garde ses touches haut et bas : elle contient
   /// plusieurs lignes à elle seule, et on s'y déplace dedans.
+  /// Nombre d'appuis de suite sur une flèche alors que le curseur est déjà
+  /// au bout de la ligne. Il en faut deux pour changer de ligne : le
+  /// premier sert à atteindre le bout, et amener le curseur à la fin d'un
+  /// mot ne doit pas faire quitter la ligne.
+  int _appuisAuBord = 0;
+
+  /// Vrai pendant un changement de ligne. Les appuis s'enchaînent vite, et
+  /// deux changements menés en même temps validaient la même ligne deux
+  /// fois.
+  bool _changementDeLigne = false;
+
+  Future<void> _changerDeLigne(int sens, {bool curseurAuDebut = false}) async {
+    if (_changementDeLigne) return;
+    _changementDeLigne = true;
+    try {
+      await _ligneVoisine(sens, curseurAuDebut: curseurAuDebut);
+    } finally {
+      _changementDeLigne = false;
+      _appuisAuBord = 0;
+    }
+  }
+
   KeyEventResult _toucheDansLaLigne(FocusNode noeud, KeyEvent evenement) {
     if (evenement is! KeyDownEvent) return KeyEventResult.ignored;
     final mot = motEnEditionDirecte;
-    if (mot == null || _occupe) return KeyEventResult.ignored;
+    if (mot == null || _occupe || _changementDeLigne) {
+      return KeyEventResult.ignored;
+    }
 
     final choix = controleurDirect.selection;
     // Du texte surligné : les touches lui appartiennent.
@@ -1890,23 +1915,40 @@ class _AccueilState extends State<Accueil> {
     final longueur = controleurDirect.text.length;
     final touche = evenement.logicalKey;
 
-    if (position <= 0 &&
-        (touche == LogicalKeyboardKey.backspace ||
-            touche == LogicalKeyboardKey.arrowLeft)) {
-      _ligneVoisine(-1);
+    // Effacer depuis le tout début : il n'y a rien à effacer ici, la touche
+    // serait perdue. On remonte donc à la fin de la ligne du dessus, et
+    // c'est ce que demandait le geste.
+    if (position <= 0 && touche == LogicalKeyboardKey.backspace) {
+      _changerDeLigne(-1);
       return KeyEventResult.handled;
     }
-    if (position >= longueur && touche == LogicalKeyboardKey.arrowRight) {
-      _ligneVoisine(1, curseurAuDebut: true);
+
+    // Les flèches, elles, demandent deux appuis au bout de la ligne. Le
+    // premier amène le curseur au bout — c'est ce qu'on veut neuf fois sur
+    // dix, pour corriger la fin d'un mot. Le second seulement change de
+    // ligne. Sans cette règle, il devenait impossible de poser le curseur
+    // après la dernière lettre : on quittait la ligne aussitôt.
+    final auDebut = position <= 0 && touche == LogicalKeyboardKey.arrowLeft;
+    final aLaFin =
+        position >= longueur && touche == LogicalKeyboardKey.arrowRight;
+    if (auDebut || aLaFin) {
+      _appuisAuBord++;
+      if (_appuisAuBord < 2) return KeyEventResult.handled;
+      _changerDeLigne(auDebut ? -1 : 1, curseurAuDebut: aLaFin);
       return KeyEventResult.handled;
     }
+    _appuisAuBord = 0;
+
+    // Haut et bas changent de ligne directement : c'est leur seul rôle sur
+    // une ligne simple. Une zone de texte libre les garde pour elle, elle
+    // contient plusieurs lignes.
     if (!mot.boiteLibre) {
       if (touche == LogicalKeyboardKey.arrowUp) {
-        _ligneVoisine(-1);
+        _changerDeLigne(-1);
         return KeyEventResult.handled;
       }
       if (touche == LogicalKeyboardKey.arrowDown) {
-        _ligneVoisine(1, curseurAuDebut: true);
+        _changerDeLigne(1, curseurAuDebut: true);
         return KeyEventResult.handled;
       }
     }
