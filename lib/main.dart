@@ -189,6 +189,31 @@ Rect? cadreClair(List<int> clarte, int la, int ha) {
   return retenu;
 }
 
+/// Un objet repéré sur l'image de la page : une photo, un cachet, une
+/// signature. Avec sa forme, pour pouvoir le prendre du bon geste.
+///
+/// Le fichier PDF ne dit pas où sont ses images — la bibliothèque n'expose
+/// rien qui les liste. On les cherche donc sur l'image de la page, comme
+/// l'œil le ferait. Avantage : la même recherche marche sur un document né
+/// numérique et sur un scan, qui n'a par définition aucune image déclarée.
+class ObjetRepere {
+  /// Sa place dans la page, en points du PDF.
+  final Rect zone;
+
+  /// "rond" ou "rectangle" : la forme de son contour.
+  final String forme;
+
+  /// "photo", "cachet" ou "signature".
+  final String nature;
+
+  /// Part de son rectangle qu'il occupe réellement. Un disque en occupe
+  /// environ 79 centièmes, un rectangle plein la totalité, une signature
+  /// très peu.
+  final double remplissage;
+
+  const ObjetRepere(this.zone, this.forme, this.nature, this.remplissage);
+}
+
 /// Vrai quand le texte annoncé par le fichier ne peut pas tenir dans le
 /// cadre où il est censé être écrit.
 ///
@@ -4369,6 +4394,160 @@ class _AccueilState extends State<Accueil> {
   /// page à la fois, et seulement au moment où on l'ouvre — reconnaître le
   /// texte des trente pages d'un dossier dès l'ouverture ferait attendre
   /// des minutes pour des pages qu'on ne regardera peut-être jamais.
+  /// Objets repérés sur la page affichée. Vide tant que la recherche n'a
+  /// pas eu lieu.
+  List<ObjetRepere> objetsReperes = [];
+
+  /// Cherche les objets posés sur la page : photos, cachets, signatures.
+  ///
+  /// Sur l'image de la page, tout ce qui n'est pas la couleur du papier est
+  /// marqué, puis rassemblé en taches d'un seul tenant. Une tache assez
+  /// grande qui ne recouvre aucune ligne de texte est un objet.
+  ///
+  /// Sa forme se lit dans la part de son rectangle qu'il occupe : un disque
+  /// en remplit un peu moins de quatre cinquièmes (π/4), un rectangle plein
+  /// la quasi-totalité. C'est ce qui distingue une photo ronde d'une photo
+  /// carrée sans rien demander à personne.
+  ///
+  /// Sa nature se lit dans ses couleurs : beaucoup de teintes différentes,
+  /// c'est une photo ; peu de teintes et peu de matière, c'est de l'encre —
+  /// cachet s'il est coloré, signature s'il est sombre.
+  List<ObjetRepere> _repererLesObjets() {
+    final source = imageDecodee;
+    if (source == null || echelleOcr <= 0) return const [];
+
+    // Analyse sur une image réduite : une photo se voit aussi bien, et le
+    // calcul reste supportable sur un téléphone.
+    const largeurAnalyse = 500;
+    final reduction =
+        source.width > largeurAnalyse ? source.width / largeurAnalyse : 1.0;
+    final la = (source.width / reduction).round();
+    final ha = (source.height / reduction).round();
+    if (la < 40 || ha < 40) return const [];
+    final petite = img.copyResize(source, width: la, height: ha);
+
+    // La couleur du papier : la plus répandue de la page.
+    final comptes = <int, int>{};
+    for (var y = 0; y < ha; y += 2) {
+      for (var x = 0; x < la; x += 2) {
+        final p = petite.getPixel(x, y);
+        final cle = ((p.r.toInt() >> 3) << 10) |
+            ((p.g.toInt() >> 3) << 5) |
+            (p.b.toInt() >> 3);
+        comptes[cle] = (comptes[cle] ?? 0) + 1;
+      }
+    }
+    var clePapier = 0;
+    var maxPapier = -1;
+    comptes.forEach((cle, n) {
+      if (n > maxPapier) {
+        maxPapier = n;
+        clePapier = cle;
+      }
+    });
+    final papierR = ((clePapier >> 10) & 0x1F) * 8;
+    final papierV = ((clePapier >> 5) & 0x1F) * 8;
+    final papierB = (clePapier & 0x1F) * 8;
+
+    // Ce qui n'est pas du papier.
+    final matiere = Uint8List(la * ha);
+    for (var y = 0; y < ha; y++) {
+      for (var x = 0; x < la; x++) {
+        final p = petite.getPixel(x, y);
+        final dr = p.r.toDouble() - papierR;
+        final dv = p.g.toDouble() - papierV;
+        final db = p.b.toDouble() - papierB;
+        if (dr * dr + dv * dv + db * db > 60 * 60) matiere[y * la + x] = 1;
+      }
+    }
+
+    // Taches d'un seul tenant. Parcours en largeur avec une pile, plutôt
+    // qu'en récursif : une photo pleine page ferait déborder la pile.
+    final vus = Uint8List(la * ha);
+    final trouves = <ObjetRepere>[];
+    final pile = <int>[];
+    final surfaceMini = (la * ha * 0.004).round().clamp(40, 100000);
+
+    for (var depart = 0; depart < la * ha; depart++) {
+      if (matiere[depart] == 0 || vus[depart] == 1) continue;
+      pile
+        ..clear()
+        ..add(depart);
+      vus[depart] = 1;
+      var gauche = la, droite = 0, haut = ha, bas = 0, surface = 0;
+      final teintes = <int>{};
+
+      while (pile.isNotEmpty) {
+        final i = pile.removeLast();
+        final x = i % la;
+        final y = i ~/ la;
+        surface++;
+        if (x < gauche) gauche = x;
+        if (x > droite) droite = x;
+        if (y < haut) haut = y;
+        if (y > bas) bas = y;
+        if (teintes.length < 400) {
+          final p = petite.getPixel(x, y);
+          teintes.add(((p.r.toInt() >> 4) << 8) |
+              ((p.g.toInt() >> 4) << 4) |
+              (p.b.toInt() >> 4));
+        }
+        if (x > 0 && matiere[i - 1] == 1 && vus[i - 1] == 0) {
+          vus[i - 1] = 1;
+          pile.add(i - 1);
+        }
+        if (x < la - 1 && matiere[i + 1] == 1 && vus[i + 1] == 0) {
+          vus[i + 1] = 1;
+          pile.add(i + 1);
+        }
+        if (y > 0 && matiere[i - la] == 1 && vus[i - la] == 0) {
+          vus[i - la] = 1;
+          pile.add(i - la);
+        }
+        if (y < ha - 1 && matiere[i + la] == 1 && vus[i + la] == 0) {
+          vus[i + la] = 1;
+          pile.add(i + la);
+        }
+      }
+
+      if (surface < surfaceMini) continue;
+      final largeur = droite - gauche + 1;
+      final hauteur = bas - haut + 1;
+      if (largeur < 12 || hauteur < 12) continue;
+      // Une tache qui couvre presque toute la page est le fond, pas un
+      // objet posé dessus.
+      if (largeur > la * 0.95 && hauteur > ha * 0.95) continue;
+
+      // Retour aux points du PDF.
+      final zone = Rect.fromLTWH(
+        gauche * reduction / echelleOcr,
+        haut * reduction / echelleOcr,
+        largeur * reduction / echelleOcr,
+        hauteur * reduction / echelleOcr,
+      );
+      // Une tache posée sur du texte n'est pas un objet : c'est du texte.
+      var surDuTexte = false;
+      for (final ligne in mots) {
+        if (ligne.texte.isNotEmpty && ligne.zone.overlaps(zone.deflate(1))) {
+          surDuTexte = true;
+          break;
+        }
+      }
+      if (surDuTexte) continue;
+
+      final remplissage = surface / (largeur * hauteur);
+      final carre = (largeur - hauteur).abs() <= (largeur + hauteur) * 0.12;
+      final forme =
+          (carre && remplissage > 0.68 && remplissage < 0.88) ? "rond" : "rectangle";
+      final nature = teintes.length >= 40
+          ? "photo"
+          : (remplissage < 0.35 ? "signature" : "cachet");
+      trouves.add(ObjetRepere(zone, forme, nature, remplissage));
+      if (trouves.length >= 24) break;
+    }
+    return trouves;
+  }
+
   /// Récupère le vrai texte d'une page que le fichier décrit mal, en
   /// paragraphes entiers.
   ///
@@ -4600,6 +4779,23 @@ class _AccueilState extends State<Accueil> {
             ligne.couleurTexte ??= _couleurEncre(ligne.zone);
           }
         }
+        // Les objets posés sur la page — photos, cachets, signatures — se
+        // cherchent une fois, après l'image de la page dont ils dépendent.
+        // Pour l'instant on se contente de les annoncer : rien n'est touché
+        // tant que la justesse de la recherche n'est pas établie.
+        final objets = _repererLesObjets();
+        if (mounted && objets.isNotEmpty) {
+          final ronds = objets.where((o) => o.forme == "rond").length;
+          final photos = objets.where((o) => o.nature == "photo").length;
+          setState(() {
+            objetsReperes = objets;
+            statut = "${objets.length} objet(s) repéré(s) sur la page : "
+                "$photos photo(s), $ronds en rond";
+          });
+        } else if (mounted) {
+          setState(() => objetsReperes = objets);
+        }
+
         pagesAnalysees.add(index);
         motsParPage[index] = mots;
         return;
