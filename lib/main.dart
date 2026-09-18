@@ -1632,7 +1632,36 @@ class _AccueilState extends State<Accueil> {
   /// Ouvre l'écriture directement sur la ligne, dans la page. Ce qui était
   /// tapé sur une autre ligne est validé avant : passer d'une ligne à
   /// l'autre abandonnait la saisie en cours sans rien dire.
-  Future<void> _ecrireSurLaLigne(MotDetecte mot) async {
+  /// Où poser le curseur dans une ligne qu'on vient de toucher, d'après
+  /// l'endroit exact du doigt.
+  ///
+  /// Sans ça, le curseur se posait toujours à la fin : pour corriger une
+  /// lettre au milieu d'un mot, il fallait ensuite reculer caractère par
+  /// caractère. Ici le doigt désigne directement la lettre.
+  int _positionSousLeDoigt(MotDetecte mot, double xDansLaLigne) {
+    if (mot.texte.isEmpty) return 0;
+    try {
+      final peintre = TextPainter(
+        text: TextSpan(
+          text: mot.texte,
+          style: TextStyle(
+            fontSize: _tailleEditionDirecte(mot),
+            height: 1.0,
+            fontWeight: mot.gras ? FontWeight.bold : FontWeight.normal,
+            fontStyle: mot.italique ? FontStyle.italic : FontStyle.normal,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final trouve =
+          peintre.getPositionForOffset(Offset(xDansLaLigne, 0)).offset;
+      return trouve.clamp(0, mot.texte.length);
+    } catch (_) {
+      return mot.texte.length;
+    }
+  }
+
+  Future<void> _ecrireSurLaLigne(MotDetecte mot, {double? xDansLaLigne}) async {
     // Une ligne que le fichier décrit mal ne se réécrit pas : ce qui serait
     // posé à la place n'aurait aucun rapport avec ce qu'on voit. Elle reste
     // affichée, intacte, et tout le reste lui est ouvert — la déplacer,
@@ -1671,8 +1700,11 @@ class _AccueilState extends State<Accueil> {
       selectionMemorisee = null;
       texteDeLaSelection = "";
       controleurDirect.text = mot.texte;
-      controleurDirect.selection =
-          TextSelection.collapsed(offset: mot.texte.length);
+      controleurDirect.selection = TextSelection.collapsed(
+        offset: xDansLaLigne == null
+            ? mot.texte.length
+            : _positionSousLeDoigt(mot, xDansLaLigne),
+      );
       grasDirect = mot.gras;
       italiqueDirect = mot.italique;
       souligneDirect = mot.souligne;
@@ -12558,16 +12590,26 @@ class _AccueilState extends State<Accueil> {
                                     // écrire n'aurait aucun sens, il la
                                     // sélectionne pour la déplacer ou la
                                     // redimensionner tout de suite.
-                                    onTap: _occupe
+                                    // onTapUp plutôt que onTap : lui seul
+                                    // dit *où* le doigt s'est posé, et c'est
+                                    // cette place qui décide où va le
+                                    // curseur dans la ligne.
+                                    onTapUp: _occupe
                                         ? null
-                                        : () {
+                                        : (details) {
                                             if (mot.estFlottant) {
                                               setState(() => selection
                                                 ..clear()
                                                 ..add(mot));
                                               return;
                                             }
-                                            _ecrireSurLaLigne(mot);
+                                            _ecrireSurLaLigne(
+                                              mot,
+                                              xDansLaLigne: echelle > 0
+                                                  ? details.localPosition.dx /
+                                                      echelle
+                                                  : null,
+                                            );
                                           },
                                     // Le double-tap sert à sélectionner
                                     // (ajoute/retire du groupe rouge, pour
