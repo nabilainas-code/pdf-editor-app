@@ -4722,14 +4722,30 @@ class _AccueilState extends State<Accueil> {
           ? gardees[i + 1].ligne.bounds.top
           : double.infinity;
 
-      // Le bloc occupe toutes les lignes qui vont de son ancre jusqu'à
-      // l'ancre suivante : c'est la place réelle du paragraphe à l'écran.
-      var zone = ancre.ligne.bounds;
+      // Le bloc descend depuis son ancre, ligne après ligne, et s'arrête au
+      // premier vrai blanc.
+      //
+      // S'arrêter seulement à l'ancre suivante ne suffisait pas : le dernier
+      // paragraphe d'une page n'en a pas, et son bloc avalait alors tout ce
+      // qui restait en dessous — le pied de page compris. Un écart de plus
+      // d'une ligne et demie entre deux lignes marque la fin d'un
+      // paragraphe ; c'est là qu'on s'arrête.
+      final candidates = <sfpdf.TextLine>[];
       for (final ligne in lignes) {
         final centre = ligne.bounds.center.dy;
         if (centre >= haut - 0.5 && centre < basLimite - 0.5) {
-          zone = zone.expandToInclude(ligne.bounds);
+          candidates.add(ligne);
         }
+      }
+      candidates.sort((a, b) => a.bounds.top.compareTo(b.bounds.top));
+      final hauteurLigne =
+          ancre.ligne.bounds.height <= 0 ? 12.0 : ancre.ligne.bounds.height;
+      var zone = ancre.ligne.bounds;
+      var basAtteint = ancre.ligne.bounds.bottom;
+      for (final ligne in candidates) {
+        if (ligne.bounds.top - basAtteint > hauteurLigne * 1.8) break;
+        zone = zone.expandToInclude(ligne.bounds);
+        if (ligne.bounds.bottom > basAtteint) basAtteint = ligne.bounds.bottom;
       }
       if (zone.width < 10 || zone.height < 4) continue;
 
