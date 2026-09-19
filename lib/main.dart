@@ -1433,6 +1433,14 @@ class _AccueilState extends State<Accueil> {
   Map<String, dynamic>? travailEnCours;
   List<Map<String, dynamic>> recents = [];
 
+  /// Les documents qu'on a demandé à garder — « Mes documents ».
+  ///
+  /// Différents des récents, qui sont une commodité : les dix derniers
+  /// ouverts, remplacés au fil de l'eau. Ici rien ne disparaît tant qu'on
+  /// ne le retire pas. C'est la réponse au PDF reçu par messagerie, qu'on
+  /// veut retrouver dans l'application et pas dans la boîte mail.
+  List<Map<String, dynamic>> mesDocuments = [];
+
   String? outilTrace;
   final List<Offset> traceEnCours = [];
   double epaisseurStylo = 2;
@@ -1610,6 +1618,7 @@ class _AccueilState extends State<Accueil> {
     _chargerPolices();
     _init();
     _chargerRecents();
+    _chargerMesDocuments();
     _minuteurSauvegarde = Timer.periodic(
         const Duration(seconds: 20), (_) => _sauvegardeAuto());
   }
@@ -9955,6 +9964,124 @@ class _AccueilState extends State<Accueil> {
     }
   }
 
+  /// Relit la liste des documents gardés.
+  Future<void> _chargerMesDocuments() async {
+    try {
+      final dossier = await _dossierApp();
+      final fichier = File('${dossier.path}/mes_documents.json');
+      if (!await fichier.exists()) return;
+      final brut = jsonDecode(await fichier.readAsString());
+      if (brut is! List) return;
+      final liste = <Map<String, dynamic>>[];
+      for (final e in brut) {
+        if (e is Map<String, dynamic> &&
+            await File(e['chemin'] as String? ?? '').exists()) {
+          liste.add(e);
+        }
+      }
+      if (mounted) setState(() => mesDocuments = liste);
+    } catch (_) {
+      // Liste illisible : on repart d'une liste vide plutôt que d'empêcher
+      // l'application de s'ouvrir.
+    }
+  }
+
+  /// Un nom de fichier utilisable, tiré du nom du document.
+  String _nomDeFichier(String nom) {
+    var propre = nom.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
+    if (propre.isEmpty) propre = "document";
+    if (!propre.toLowerCase().endsWith('.pdf')) propre = '$propre.pdf';
+    return propre;
+  }
+
+  /// Range le document ouvert dans « Mes documents ».
+  ///
+  /// Une copie à part : le fichier d'origine peut être dans la mémoire
+  /// temporaire d'une messagerie, qui l'effacera sans prévenir.
+  Future<void> _garderDansMesDocuments() async {
+    final octets = octetsDocument;
+    if (octets == null) {
+      setState(() => statut = "Aucun document ouvert à garder");
+      return;
+    }
+    try {
+      final dossier = await _dossierApp();
+      final coin = Directory('${dossier.path}/mes_documents');
+      if (!await coin.exists()) await coin.create(recursive: true);
+      final chemin =
+          '${coin.path}/${DateTime.now().millisecondsSinceEpoch}.pdf';
+      await File(chemin).writeAsBytes(octets, flush: true);
+
+      final entree = {
+        'nom': nomDocument,
+        'chemin': chemin,
+        'date': DateTime.now().toIso8601String(),
+      };
+      // Le même nom gardé deux fois remplace l'ancien : on garde le
+      // document, pas ses versions successives.
+      final anciens =
+          mesDocuments.where((e) => e['nom'] == nomDocument).toList();
+      for (final vieux in anciens) {
+        try {
+          await File(vieux['chemin'] as String).delete();
+        } catch (_) {}
+      }
+      final liste = [
+        entree,
+        for (final e in mesDocuments)
+          if (e['nom'] != nomDocument) e
+      ];
+      await File('${dossier.path}/mes_documents.json')
+          .writeAsString(jsonEncode(liste), flush: true);
+      if (!mounted) return;
+      setState(() {
+        mesDocuments = liste;
+        statut = anciens.isEmpty
+            ? "Gardé dans « Mes documents » — il restera même si le mail "
+                "disparaît"
+            : "« $nomDocument » remplacé dans « Mes documents »";
+      });
+    } catch (e) {
+      if (mounted) setState(() => statut = "Impossible de le garder : $e");
+    }
+  }
+
+  /// Retire un document gardé, et efface la copie.
+  Future<void> _retirerDeMesDocuments(Map<String, dynamic> entree) async {
+    try {
+      await File(entree['chemin'] as String).delete();
+    } catch (_) {}
+    final restants =
+        mesDocuments.where((e) => e['chemin'] != entree['chemin']).toList();
+    try {
+      final dossier = await _dossierApp();
+      await File('${dossier.path}/mes_documents.json')
+          .writeAsString(jsonEncode(restants), flush: true);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      mesDocuments = restants;
+      statut = "Retiré de « Mes documents »";
+    });
+  }
+
+  /// Partage le document tel qu'il est ouvert, sans rien y changer.
+  Future<void> _partagerTelQuel() async {
+    final octets = octetsDocument;
+    if (octets == null) {
+      setState(() => statut = "Aucun document ouvert à partager");
+      return;
+    }
+    try {
+      final dossier = await getTemporaryDirectory();
+      final fichier = File('${dossier.path}/${_nomDeFichier(nomDocument)}');
+      await fichier.writeAsBytes(octets, flush: true);
+      await Share.shareXFiles([XFile(fichier.path)], text: nomDocument);
+    } catch (e) {
+      if (mounted) setState(() => statut = "Partage impossible : $e");
+    }
+  }
+
   /// Garde une copie du document ouvert et l'inscrit en tête des récents.
   Future<void> _noterRecent(String nom, Uint8List octets) async {
     try {
@@ -11638,6 +11765,33 @@ class _AccueilState extends State<Accueil> {
                   "partager tel quel.",
               action: _occupe ? null : () => _importerDocument(),
             ),
+            if (mesDocuments.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 18, 4, 6),
+                child: Text(
+                  "Mes documents",
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant),
+                ),
+              ),
+              for (final e in mesDocuments)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.bookmark_outline),
+                  title: Text(e['nom'] as String? ?? "Document",
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text("Gardé ${_ilYA(e['date'] as String?)}"),
+                  onTap: _occupe ? null : () => _ouvrirRecent(e),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    tooltip: "Retirer de mes documents et effacer la copie",
+                    onPressed:
+                        _occupe ? null : () => _retirerDeMesDocuments(e),
+                  ),
+                ),
+            ],
             if (recents.isNotEmpty) ...[
               Padding(
                 padding: const EdgeInsets.fromLTRB(4, 18, 4, 6),
@@ -11686,6 +11840,22 @@ class _AccueilState extends State<Accueil> {
       appBar: AppBar(
         title: const Text("Mon éditeur PDF"),
         actions: [
+          // Partager ce qu'on lit : c'est le geste le plus demandé après
+          // l'ouverture, et il n'avait aucun bouton à lui.
+          if (octetsDocument != null)
+            IconButton(
+              icon: const Icon(Icons.share),
+              tooltip: "Partager ce document",
+              onPressed: _occupe ? null : _partagerTelQuel,
+            ),
+          // Garder un document reçu par messagerie : sa copie temporaire
+          // disparaîtra, celle-ci non.
+          if (octetsDocument != null)
+            IconButton(
+              icon: const Icon(Icons.bookmark_add_outlined),
+              tooltip: "Garder dans mes documents",
+              onPressed: _occupe ? null : _garderDansMesDocuments,
+            ),
           IconButton(
             icon: const Icon(Icons.document_scanner),
             tooltip: "Scanner un document (appareil photo)",
