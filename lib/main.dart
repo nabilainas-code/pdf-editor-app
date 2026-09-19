@@ -2917,6 +2917,20 @@ class _AccueilState extends State<Accueil> {
     try {
       final path = await _channel.invokeMethod<String>("getInitialPdfPath");
       if (path != null) {
+        // Le nom du fichier reçu : sans lui, tous les documents ouverts
+        // depuis une messagerie s'appelleraient « Document », et le
+        // suivant gardé effacerait le précédent.
+        final morceaux = path.split(RegExp(r'[/\\]'));
+        final brut = morceaux.isEmpty ? '' : morceaux.last.trim();
+        if (brut.isNotEmpty) {
+          // Un nom venu d'une URL peut être encodé (%20) ; s'il ne l'est
+          // pas, le décodage échoue sur un % isolé et on garde le brut.
+          try {
+            nomDocument = Uri.decodeComponent(brut);
+          } catch (_) {
+            nomDocument = brut;
+          }
+        }
         await _chargerPourLecture(File(path).readAsBytesSync());
         return;
       }
@@ -10012,15 +10026,27 @@ class _AccueilState extends State<Accueil> {
           '${coin.path}/${DateTime.now().millisecondsSinceEpoch}.pdf';
       await File(chemin).writeAsBytes(octets, flush: true);
 
+      // Le même nom gardé deux fois remplace l'ancien : on garde le
+      // document, pas ses versions successives. Mais un document sans nom
+      // connu s'appelle « Document » comme tous les autres : dans ce cas
+      // on numérote au lieu d'effacer, sinon chaque pièce jointe gardée
+      // ferait disparaître la précédente.
+      var nom = nomDocument.trim();
+      if (nom.isEmpty) nom = "Document";
+      if (nom == "Document") {
+        var numero = 2;
+        final base = nom;
+        while (mesDocuments.any((e) => e['nom'] == nom)) {
+          nom = "$base ($numero)";
+          numero++;
+        }
+      }
       final entree = {
-        'nom': nomDocument,
+        'nom': nom,
         'chemin': chemin,
         'date': DateTime.now().toIso8601String(),
       };
-      // Le même nom gardé deux fois remplace l'ancien : on garde le
-      // document, pas ses versions successives.
-      final anciens =
-          mesDocuments.where((e) => e['nom'] == nomDocument).toList();
+      final anciens = mesDocuments.where((e) => e['nom'] == nom).toList();
       for (final vieux in anciens) {
         try {
           await File(vieux['chemin'] as String).delete();
@@ -10029,7 +10055,7 @@ class _AccueilState extends State<Accueil> {
       final liste = [
         entree,
         for (final e in mesDocuments)
-          if (e['nom'] != nomDocument) e
+          if (e['nom'] != nom) e
       ];
       await File('${dossier.path}/mes_documents.json')
           .writeAsString(jsonEncode(liste), flush: true);
@@ -10037,9 +10063,9 @@ class _AccueilState extends State<Accueil> {
       setState(() {
         mesDocuments = liste;
         statut = anciens.isEmpty
-            ? "Gardé dans « Mes documents » — il restera même si le mail "
-                "disparaît"
-            : "« $nomDocument » remplacé dans « Mes documents »";
+            ? "« $nom » gardé dans « Mes documents » — il restera même si "
+                "le mail disparaît"
+            : "« $nom » remplacé dans « Mes documents »";
       });
     } catch (e) {
       if (mounted) setState(() => statut = "Impossible de le garder : $e");
