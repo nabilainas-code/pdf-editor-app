@@ -1267,6 +1267,11 @@ class _AccueilState extends State<Accueil> {
   /// le fond de la ligne change. Mesuré une fois, à l'ouverture — le
   /// mesurer à chaque image ferait ramer l'affichage.
   double limiteDroiteEcriture = 0;
+
+  /// Le même bord, mais du côté gauche : une ligne arabe s'appuie sur son
+  /// bord droit et s'allonge vers la gauche. C'est de ce côté-là qu'elle
+  /// risque de sortir de sa colonne.
+  double limiteGaucheEcriture = 0;
   final TextEditingController controleurDirect = TextEditingController();
 
   /// Dernier surlignage vu dans le champ d'écriture, et le texte qu'il
@@ -1655,6 +1660,9 @@ class _AccueilState extends State<Accueil> {
   int _positionSousLeDoigt(MotDetecte mot, double xDansLaLigne) {
     if (mot.texte.isEmpty) return 0;
     try {
+      // Une ligne arabe est collée au bord droit de son cadre : mesurée de
+      // gauche à droite, le doigt serait tombé plusieurs mots plus loin.
+      final arabe = estArabe(mot.texte);
       final peintre = TextPainter(
         text: TextSpan(
           text: mot.texte,
@@ -1665,8 +1673,10 @@ class _AccueilState extends State<Accueil> {
             fontStyle: mot.italique ? FontStyle.italic : FontStyle.normal,
           ),
         ),
-        textDirection: TextDirection.ltr,
-      )..layout();
+        textDirection: arabe ? TextDirection.rtl : TextDirection.ltr,
+      )..layout(
+          maxWidth: arabe ? _rectContenu(mot).width : double.infinity,
+        );
       final trouve =
           peintre.getPositionForOffset(Offset(xDansLaLigne, 0)).offset;
       return trouve.clamp(0, mot.texte.length);
@@ -1711,6 +1721,7 @@ class _AccueilState extends State<Accueil> {
       motEnEditionDirecte = mot;
       _appuisAuBord = 0;
       limiteDroiteEcriture = _bordDuFond(mot.zone);
+      limiteGaucheEcriture = _bordDuFondGauche(mot.zone);
       selectionMemorisee = null;
       texteDeLaSelection = "";
       controleurDirect.text = mot.texte;
@@ -6012,6 +6023,33 @@ class _AccueilState extends State<Accueil> {
     return taillePage.width;
   }
 
+  /// Le pendant de [_bordDuFond] du côté gauche. Une ligne arabe part de
+  /// son bord droit : c'est vers la gauche qu'elle s'allonge, et donc de ce
+  /// côté qu'il faut savoir où son fond s'arrête.
+  double _bordDuFondGauche(Rect zone) {
+    final image = imageDecodee;
+    final fond = _fondDeReference(zone);
+    if (image == null || fond == null || echelleOcr <= 0) return 0;
+    final y =
+        (zone.center.dy * echelleOcr).round().clamp(0, image.height - 1);
+    var debut = (zone.left * echelleOcr).round();
+    if (debut > image.width - 1) debut = image.width - 1;
+    var dehors = 0;
+    for (var x = debut; x >= 0; x--) {
+      final p = image.getPixel(x, y);
+      final dr = p.r.toDouble() - fond[0];
+      final dv = p.g.toDouble() - fond[1];
+      final db = p.b.toDouble() - fond[2];
+      if (dr * dr + dv * dv + db * db > 60 * 60) {
+        dehors++;
+        if (dehors >= 4) return (x + dehors) / echelleOcr;
+      } else {
+        dehors = 0;
+      }
+    }
+    return 0;
+  }
+
   PdfColor? _couleurEncre(Rect zonePdf) {
     final image = imageDecodee;
     if (image == null) return null;
@@ -6163,6 +6201,13 @@ class _AccueilState extends State<Accueil> {
       mesure = police.measureString(texte);
     }
 
+    // L'arabe s'écrit de droite à gauche : sa ligne est accrochée à son
+    // bord droit, et c'est vers la gauche qu'elle s'allonge. Toute la
+    // géométrie qui suit s'inverse donc, sans quoi un texte rallongé
+    // poussait la ligne au-delà de sa marge droite en laissant un blanc à
+    // gauche — exactement à l'envers de ce qu'on attend.
+    final arabe = estArabe(mot.texte) && police is PdfTrueTypeFont;
+
     // Largeur disponible pour ne pas déborder : le bord de la page pour une
     // ligne normale ; la largeur fixe de la boîte pour une zone libre, dont
     // le cadre ne s'agrandit jamais au contenu (c'est ce qui permet de
@@ -6171,14 +6216,26 @@ class _AccueilState extends State<Accueil> {
     // La laisser s'étaler jusqu'au bord de la page donne un rectangle de
     // mesure qui traverse le couloir, et l'effacement de ce rectangle vient
     // barrer la colonne d'à côté — une bande sombre en travers du blanc.
-    var bordDroite = taillePage.width;
-    for (final couloir in couloirsColonnes) {
-      if (couloir > zone.left + 1 && couloir < bordDroite) {
-        bordDroite = couloir;
+    final double largeurDispo;
+    if (mot.boiteLibre) {
+      largeurDispo = zone.width - 4;
+    } else if (arabe) {
+      var bordGauche = 0.0;
+      for (final couloir in couloirsColonnes) {
+        if (couloir < zone.right - 1 && couloir > bordGauche) {
+          bordGauche = couloir;
+        }
       }
+      largeurDispo = zone.right - bordGauche - 2;
+    } else {
+      var bordDroite = taillePage.width;
+      for (final couloir in couloirsColonnes) {
+        if (couloir > zone.left + 1 && couloir < bordDroite) {
+          bordDroite = couloir;
+        }
+      }
+      largeurDispo = bordDroite - zone.left - 2;
     }
-    final largeurDispo =
-        mot.boiteLibre ? zone.width - 4 : bordDroite - zone.left - 2;
 
     // Nombre de lignes que le texte occupera dans la boîte.
     //
@@ -6215,16 +6272,26 @@ class _AccueilState extends State<Accueil> {
       }
     }
 
-    final largeur = mot.boiteLibre
+    var largeur = mot.boiteLibre
         ? zone.width
         : (mesure.width > zone.width ? mesure.width : zone.width) + 2;
     // Un poil d'interligne, sinon les lignes se touchent.
     final hauteurTexte = mesure.height * lignes * (lignes > 1 ? 1.18 : 1.0);
     final hauteur =
         hauteurTexte > zone.height ? hauteurTexte : zone.height;
+    // Le texte arabe est aligné sur le bord droit du rectangle : pour qu'il
+    // reste à sa place quand il s'allonge, c'est le bord gauche qui recule.
+    var gauche = zone.left;
+    if (arabe && !mot.boiteLibre) {
+      gauche = zone.right - largeur;
+      if (gauche < 0) {
+        gauche = 0;
+        largeur = zone.right > 1 ? zone.right : largeur;
+      }
+    }
     return (
       rect: Rect.fromLTWH(
-        zone.left,
+        gauche,
         // Une boîte qui se déroule sur plusieurs lignes grandit vers le
         // bas, à partir d'où elle a été posée. La centrer la ferait
         // remonter par-dessus ce qui est écrit au-dessus.
@@ -6281,7 +6348,7 @@ class _AccueilState extends State<Accueil> {
           fontStyle: mot.italique ? FontStyle.italic : FontStyle.normal,
         ),
       ),
-      textDirection: TextDirection.ltr,
+      textDirection: estArabe(texte) ? TextDirection.rtl : TextDirection.ltr,
       maxLines: mot.boiteLibre ? null : 1,
     )..layout(
         maxWidth: mot.boiteLibre
@@ -6303,22 +6370,43 @@ class _AccueilState extends State<Accueil> {
       );
     }
 
-    // Un peu d'air à droite pour le curseur.
+    // Un peu d'air pour le curseur.
     var largeur = peintre.width / echelle + 4;
     if (largeur < mot.zone.width) largeur = mot.zone.width;
-    // Jamais au-delà du bord droit de la page, même si le cadre a été poussé
-    // à gauche du bord : un champ qui dépasse déborde à l'écran.
-    final gaucheUtile = mot.zone.left < 0 ? 0.0 : mot.zone.left;
-    var bord = taillePage.width;
-    // Le fond change avant le bord de la page : le champ s'arrête là, sans
-    // quoi il pose la couleur de sa colonne sur celle d'à côté.
-    if (limiteDroiteEcriture > gaucheUtile + 8 &&
-        limiteDroiteEcriture < bord) {
-      bord = limiteDroiteEcriture;
+
+    // Une ligne arabe est accrochée à son bord droit : le champ s'allonge
+    // vers la gauche, et c'est de ce côté-là qu'il faut l'arrêter. Le
+    // faire grandir vers la droite, comme pour une ligne latine, poussait
+    // le texte hors de sa marge droite en laissant un blanc derrière lui.
+    var gauche = mot.zone.left;
+    if (estArabe(texte)) {
+      final droiteUtile =
+          mot.zone.right > taillePage.width ? taillePage.width : mot.zone.right;
+      var bordGauche = 0.0;
+      if (limiteGaucheEcriture > 0 &&
+          limiteGaucheEcriture < droiteUtile - 8) {
+        bordGauche = limiteGaucheEcriture;
+      }
+      final maxiArabe = droiteUtile - bordGauche - 2;
+      if (maxiArabe > 0 && largeur > maxiArabe) largeur = maxiArabe;
+      if (largeur < 1) largeur = mot.zone.width;
+      gauche = droiteUtile - largeur;
+      if (gauche < 0) gauche = 0;
+    } else {
+      // Jamais au-delà du bord droit de la page, même si le cadre a été
+      // poussé à gauche du bord : un champ qui dépasse déborde à l'écran.
+      final gaucheUtile = mot.zone.left < 0 ? 0.0 : mot.zone.left;
+      var bord = taillePage.width;
+      // Le fond change avant le bord de la page : le champ s'arrête là,
+      // sans quoi il pose la couleur de sa colonne sur celle d'à côté.
+      if (limiteDroiteEcriture > gaucheUtile + 8 &&
+          limiteDroiteEcriture < bord) {
+        bord = limiteDroiteEcriture;
+      }
+      final maxi = bord - gaucheUtile - 2;
+      if (maxi > 0 && largeur > maxi) largeur = maxi;
+      if (largeur < 1) largeur = mot.zone.width;
     }
-    final maxi = bord - gaucheUtile - 2;
-    if (maxi > 0 && largeur > maxi) largeur = maxi;
-    if (largeur < 1) largeur = mot.zone.width;
 
     // Le cadre reste centré sur la ligne d'origine s'il doit grandir en
     // hauteur : sinon le texte semblerait descendre d'un cran.
@@ -6327,7 +6415,7 @@ class _AccueilState extends State<Accueil> {
     if (hauteurTexte > hauteur) hauteur = hauteurTexte;
 
     return Rect.fromLTWH(
-      mot.zone.left,
+      gauche,
       mot.zone.center.dy - hauteur / 2,
       largeur,
       hauteur,
@@ -13081,12 +13169,34 @@ class _AccueilState extends State<Accueil> {
                                           // ça, le champ (un peu plus haut)
                                           // déborderait de sa case.
                                           child: OverflowBox(
-                                            alignment: Alignment.centerLeft,
+                                            // Une ligne arabe est accrochée
+                                            // à son bord droit : c'est de
+                                            // là qu'elle doit déborder.
+                                            alignment: estArabe(
+                                                    controleurDirect.text)
+                                                ? Alignment.centerRight
+                                                : Alignment.centerLeft,
                                             maxHeight: double.infinity,
                                             child: TextField(
                                               controller: controleurDirect,
                                               focusNode: focusDirect,
                                               autofocus: true,
+                                              // Taper de l'arabe dans un
+                                              // champ latin plaçait le
+                                              // curseur et le texte du
+                                              // mauvais côté : on écrivait
+                                              // à l'envers de ce qu'on
+                                              // lisait dans la page.
+                                              textDirection: estArabe(
+                                                      controleurDirect.text)
+                                                  ? TextDirection.rtl
+                                                  : TextDirection.ltr,
+                                              textAlign: mot.boiteLibre
+                                                  ? TextAlign.start
+                                                  : (estArabe(controleurDirect
+                                                          .text)
+                                                      ? TextAlign.right
+                                                      : TextAlign.left),
                                               // Une zone de texte libre se
                                               // déroule sur plusieurs
                                               // lignes, comme ce qui sera
