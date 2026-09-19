@@ -276,7 +276,33 @@ bool texteIncoherent(String texte, Rect zone) {
     }
   }
 
-  // Troisième signe : deux écritures collées à l'intérieur d'un même mot.
+  // Troisième signe : des caractères qui n'ont rien à faire là. Une table
+  // de correspondance fausse ne renvoie pas seulement de mauvaises lettres :
+  // elle renvoie des signes d'autres écritures, des symboles de dessin, ou
+  // des codes de la zone privée qu'aucune police ne sait dessiner — d'où
+  // les petits rectangles vides qui s'affichent à leur place.
+  //
+  // Un seul caractère de la zone privée ou un seul losange de remplacement
+  // suffit : aucun texte réel n'en contient. Pour les autres écritures, il
+  // en faut deux, pour ne pas confondre avec une citation.
+  var etrangers = 0;
+  for (final rune in utile.runes) {
+    if ((rune >= 0xE000 && rune <= 0xF8FF) ||
+        rune == 0xFFFD ||
+        (rune < 0x20 && rune != 0x09 && rune != 0x0A && rune != 0x0D)) {
+      return true;
+    }
+    // Grec, cyrillique, hébreu, flèches, symboles mathématiques, traits de
+    // tableau, formes géométriques : rien de tout cela ne se mêle à une
+    // phrase ordinaire.
+    if ((rune >= 0x0370 && rune <= 0x05FF) ||
+        (rune >= 0x2190 && rune <= 0x2BFF)) {
+      etrangers++;
+      if (etrangers >= 2) return true;
+    }
+  }
+
+  // Quatrième signe : deux écritures collées à l'intérieur d'un même mot.
   // Un mot latin au milieu d'un mot arabe, sans espace, ne s'écrit pas —
   // il ne peut venir que d'une mauvaise lecture.
   final codes = utile.runes.toList();
