@@ -1164,6 +1164,11 @@ class _AccueilState extends State<Accueil> {
   /// gardées ensuite.
   final Map<int, Uint8List> vignettes = {};
 
+  /// Le document tel qu'il était avant la dernière organisation des pages.
+  /// Retirer une page est la seule opération qui fait disparaître quelque
+  /// chose : elle garde donc de quoi revenir en arrière d'un seul geste.
+  Uint8List? octetsAvantPages;
+
   /// Les couloirs blancs qui séparent les colonnes, page par page. Repérés
   /// à l'analyse, ils servent ensuite à ne jamais recoller deux colonnes en
   /// une seule ligne, et à savoir où s'arrête un paragraphe.
@@ -11167,6 +11172,9 @@ class _AccueilState extends State<Accueil> {
           case "origine":
             _revenirAuDocumentOrigine();
             break;
+          case "pages":
+            _organiserLesPages();
+            break;
           case "ouvrir":
             _importerDocument();
             break;
@@ -11234,6 +11242,16 @@ class _AccueilState extends State<Accueil> {
               leading: Icon(Icons.restore),
               title: Text("Revenir au document d'origine"),
               subtitle: Text("Abandonne toutes les modifications"),
+            ),
+          ),
+        if (modeLecture && nbPages > 1 && octetsDocument != null)
+          const PopupMenuItem(
+            value: "pages",
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.reorder),
+              title: Text("Organiser les pages"),
+              subtitle: Text("En retirer, les remettre dans l'ordre"),
             ),
           ),
         const PopupMenuItem(
@@ -12170,40 +12188,357 @@ class _AccueilState extends State<Accueil> {
     );
   }
 
+  /// Organiser les pages : en retirer, les remettre, les déplacer.
+  ///
+  /// Une page retirée reste visible, barrée, avec un bouton pour la
+  /// remettre : on voit ce qu'on s'apprête à faire avant de le faire, et
+  /// rien n'est touché tant que la planche n'est pas validée.
+  Future<void> _organiserLesPages() async {
+    if (_occupe || octetsDocument == null || nbPages <= 1) return;
+    await _preparerVignettes();
+    if (!mounted) return;
+
+    final ordre = <int>[for (var i = 0; i < nbPages; i++) i];
+    final retirees = <int>{};
+
+    final valide = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, refaire) {
+          final restantes = nbPages - retirees.length;
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(ctx).size.height * 0.88,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+                    child: Text(
+                      "Organiser les pages",
+                      style: TextStyle(
+                          fontSize: 17, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
+                    child: Text(
+                      "Les flèches déplacent la page, la corbeille la "
+                      "retire. Rien n'est modifié tant que vous n'avez pas "
+                      "validé.",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                  Flexible(
+                    child: GridView.builder(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 3,
+                        childAspectRatio: 0.52,
+                        mainAxisSpacing: 12,
+                        crossAxisSpacing: 12,
+                      ),
+                      itemCount: ordre.length,
+                      itemBuilder: (c, i) {
+                        final page = ordre[i];
+                        final retiree = retirees.contains(page);
+                        final vignette = vignettes[page];
+                        // La dernière page encore là ne peut pas être
+                        // retirée : un document sans page n'existe pas.
+                        final peutRetirer = retiree || restantes > 1;
+                        return Column(
+                          children: [
+                            Expanded(
+                              child: Opacity(
+                                opacity: retiree ? 0.35 : 1,
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    border: Border.all(
+                                      color: retiree
+                                          ? Colors.red
+                                          : Colors.black26,
+                                      width: retiree ? 2 : 1,
+                                    ),
+                                  ),
+                                  child: vignette == null
+                                      ? const Center(
+                                          child: Icon(
+                                              Icons.description_outlined,
+                                              color: Colors.black26))
+                                      : Image.memory(vignette,
+                                          fit: BoxFit.contain),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              retiree ? "retirée" : "page ${page + 1}",
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: retiree ? Colors.red : null,
+                              ),
+                            ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(
+                                      minWidth: 30, minHeight: 30),
+                                  tooltip: "Déplacer avant",
+                                  icon: const Icon(Icons.chevron_left,
+                                      size: 22),
+                                  onPressed: i == 0
+                                      ? null
+                                      : () => refaire(() {
+                                            final avant = ordre[i - 1];
+                                            ordre[i - 1] = ordre[i];
+                                            ordre[i] = avant;
+                                          }),
+                                ),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(
+                                      minWidth: 30, minHeight: 30),
+                                  tooltip:
+                                      retiree ? "Remettre" : "Retirer",
+                                  icon: Icon(
+                                    retiree
+                                        ? Icons.undo
+                                        : Icons.delete_outline,
+                                    size: 20,
+                                    color: retiree ? null : Colors.red,
+                                  ),
+                                  onPressed: !peutRetirer
+                                      ? null
+                                      : () => refaire(() {
+                                            if (retiree) {
+                                              retirees.remove(page);
+                                            } else {
+                                              retirees.add(page);
+                                            }
+                                          }),
+                                ),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(
+                                      minWidth: 30, minHeight: 30),
+                                  tooltip: "Déplacer après",
+                                  icon: const Icon(Icons.chevron_right,
+                                      size: 22),
+                                  onPressed: i >= ordre.length - 1
+                                      ? null
+                                      : () => refaire(() {
+                                            final apres = ordre[i + 1];
+                                            ordre[i + 1] = ordre[i];
+                                            ordre[i] = apres;
+                                          }),
+                                ),
+                              ],
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextButton(
+                            onPressed: () => Navigator.pop(ctx, false),
+                            child: const Text("Annuler"),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          flex: 2,
+                          child: FilledButton.icon(
+                            onPressed: () => Navigator.pop(ctx, true),
+                            icon: const Icon(Icons.check),
+                            label: Text(restantes == nbPages
+                                ? "Valider ($nbPages pages)"
+                                : "Valider ($nbPages → $restantes pages)"),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+
+    if (valide != true || !mounted) return;
+    final resultat = [
+      for (final page in ordre)
+        if (!retirees.contains(page)) page
+    ];
+    await _appliquerOrdreDesPages(resultat);
+  }
+
+  /// Reconstruit le document dans l'ordre demandé.
+  ///
+  /// Deux chemins, parce qu'ils ne se valent pas. Si l'ordre est conservé
+  /// et qu'on ne fait que retirer des pages, les pages restantes ne sont
+  /// pas touchées du tout : polices, liens et champs de formulaire passent
+  /// intacts. Dès qu'une page change de place, le document doit être
+  /// reconstruit page par page — ce qui fige les champs de formulaire.
+  Future<void> _appliquerOrdreDesPages(List<int> ordre) async {
+    final octets = octetsDocument;
+    if (octets == null || ordre.isEmpty) return;
+
+    var identique = ordre.length == nbPages;
+    if (identique) {
+      for (var i = 0; i < ordre.length; i++) {
+        if (ordre[i] != i) {
+          identique = false;
+          break;
+        }
+      }
+    }
+    if (identique) {
+      setState(() => statut = "Rien n'a changé dans l'ordre des pages");
+      return;
+    }
+
+    // L'ordre reste croissant : c'est une suppression, pas un déplacement.
+    var croissant = true;
+    for (var i = 1; i < ordre.length; i++) {
+      if (ordre[i] <= ordre[i - 1]) {
+        croissant = false;
+        break;
+      }
+    }
+
+    setState(() {
+      _occupe = true;
+      statut = "Organisation des pages...";
+    });
+    try {
+      final source = PdfDocument(inputBytes: octets);
+      List<int> sortieOctets;
+      if (croissant) {
+        final gardees = ordre.toSet();
+        for (var i = source.pages.count - 1; i >= 0; i--) {
+          if (!gardees.contains(i)) source.pages.removeAt(i);
+        }
+        sortieOctets = await source.save();
+        source.dispose();
+      } else {
+        final sortie = PdfDocument();
+        sortie.pageSettings.margins.all = 0;
+        for (final index in ordre) {
+          final depart = source.pages[index];
+          final taille = Size(depart.size.width, depart.size.height);
+          sortie.pageSettings.size = taille;
+          final page = sortie.pages.add();
+          page.graphics.drawPdfTemplate(
+              depart.createTemplate(), Offset.zero, taille);
+        }
+        sortieOctets = await sortie.save();
+        sortie.dispose();
+        source.dispose();
+      }
+
+      final nouveaux = Uint8List.fromList(sortieOctets);
+      final avant = octets;
+      final retirees = nbPages - ordre.length;
+      await _chargerPourLecture(nouveaux);
+      if (!mounted) return;
+      setState(() {
+        octetsAvantPages = avant;
+        statut = retirees > 0
+            ? "$retirees page(s) retirée(s) — ${ordre.length} pages"
+            : "Pages remises dans l'ordre — ${ordre.length} pages";
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(retirees > 0
+              ? "$retirees page(s) retirée(s)"
+              : "Ordre des pages modifié"),
+          duration: const Duration(seconds: 8),
+          action: SnackBarAction(
+            label: "Annuler",
+            onPressed: _annulerOrganisationDesPages,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => statut = "Organisation impossible : $e");
+      }
+    } finally {
+      if (mounted) setState(() => _occupe = false);
+    }
+  }
+
+  /// Remet le document tel qu'il était avant la dernière organisation.
+  Future<void> _annulerOrganisationDesPages() async {
+    final avant = octetsAvantPages;
+    if (avant == null || _occupe) return;
+    octetsAvantPages = null;
+    await _chargerPourLecture(avant);
+    if (mounted) {
+      setState(() => statut = "Pages remises comme avant");
+    }
+  }
+
+  /// Dessine en petit toutes les pages du document, une fois pour toutes.
+  /// Sert à la planche « aller à une page » comme à l'organisation des
+  /// pages : les deux montrent le même document.
+  Future<void> _preparerVignettes() async {
+    if (vignettes.length >= nbPages) return;
+    final doc = document;
+    setState(() {
+      _occupe = true;
+      statut = "Préparation des pages...";
+    });
+    try {
+      final octets = doc != null
+          ? Uint8List.fromList(await _octetsAvecSignatures(doc))
+          : octetsDocument;
+      if (octets != null) {
+        var index = 0;
+        await for (final rendu in Printing.raster(octets, dpi: 16)) {
+          vignettes[index] = await rendu.toPng();
+          index++;
+        }
+      }
+    } catch (_) {
+      // Sans vignette, la planche montre quand même les numéros : on
+      // peut toujours aller à sa page.
+    } finally {
+      if (mounted) {
+        setState(() {
+          _occupe = false;
+          statut = "Page ${pageActive + 1} sur $nbPages";
+        });
+      }
+    }
+  }
+
   /// Toutes les pages en vignettes : on touche celle qu'on veut. Sur un
   /// dossier de trente pages, atteindre la page 22 en appuyant vingt et une
   /// fois sur la flèche n'aurait aucun sens.
   Future<void> _feuillePages() async {
     if (_occupe || nbPages <= 1) return;
-    final doc = document;
-    if (vignettes.length < nbPages) {
-      setState(() {
-        _occupe = true;
-        statut = "Préparation des pages...";
-      });
-      try {
-        final octets = doc != null
-            ? Uint8List.fromList(await _octetsAvecSignatures(doc))
-            : octetsDocument;
-        if (octets != null) {
-          var index = 0;
-          await for (final rendu in Printing.raster(octets, dpi: 16)) {
-            vignettes[index] = await rendu.toPng();
-            index++;
-          }
-        }
-      } catch (_) {
-        // Sans vignette, la planche montre quand même les numéros : on
-        // peut toujours aller à sa page.
-      } finally {
-        if (mounted) {
-          setState(() {
-            _occupe = false;
-            statut = "Page ${pageActive + 1} sur $nbPages";
-          });
-        }
-      }
-    }
+    await _preparerVignettes();
     if (!mounted) return;
     final choix = await showModalBottomSheet<int>(
       context: context,
