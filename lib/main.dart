@@ -230,13 +230,19 @@ class ObjetRepere {
 /// Un point et demi par caractère est un plancher très bas : aucune police
 /// lisible n'écrit plus serré, même minuscule. Une ligne ordinaire en
 /// occupe trois à six.
-bool texteIncoherent(String texte, Rect zone) {
+bool texteIncoherent(String texte, Rect zone, {bool boite = false}) {
   final utile = texte.trim();
   if (utile.length < 4) return false;
 
   // Premier signe : trop de texte pour la place. Le fichier déclare une
   // phrase entière comme étant le contenu d'un seul signe.
-  if (zone.width > 0 && zone.width / utile.length < 1.5) return true;
+  //
+  // Le test ne vaut que pour une ligne. Un paragraphe récupéré occupe
+  // plusieurs lignes dans son cadre : y comparer sa longueur à la largeur
+  // d'une seule l'aurait condamné aussitôt retrouvé.
+  if (!boite && zone.width > 0 && zone.width / utile.length < 1.5) {
+    return true;
+  }
 
   // Deuxième signe : la même lettre répétée. Les signes absents de la table
   // de correspondance sont tous lus de la même façon et donnent tous la
@@ -276,31 +282,38 @@ bool texteIncoherent(String texte, Rect zone) {
     }
   }
 
-  // Troisième signe : des caractères qui n'ont rien à faire là. Une table
-  // de correspondance fausse ne renvoie pas seulement de mauvaises lettres :
-  // elle renvoie des signes d'autres écritures, des symboles de dessin, ou
-  // des codes de la zone privée qu'aucune police ne sait dessiner — d'où
-  // les petits rectangles vides qui s'affichent à leur place.
+  // Troisième signe : des caractères qui n'ont rien à faire là.
   //
-  // Un seul caractère de la zone privée ou un seul losange de remplacement
-  // suffit : aucun texte réel n'en contient. Pour les autres écritures, il
-  // en faut deux, pour ne pas confondre avec une citation.
-  var etrangers = 0;
+  // Quand un fichier ne dit pas à quelle lettre correspond un signe, le
+  // numéro interne du signe se retrouve lu comme si c'était un caractère.
+  // Ces numéros vont de quelques dizaines à quelques milliers : lus ainsi,
+  // ils tombent dans l'arménien, les syllabaires du Grand Nord canadien,
+  // le khmer — ou dans des cases vides du répertoire, et c'est alors le
+  // petit rectangle qu'aucune police ne sait dessiner.
+  //
+  // C'est exactement ce qui arrive sur les documents fabriqués par
+  // certains générateurs de PDF : le texte est bien là, mais déclaré en
+  // bloc sur un signe sur dix, et tous les autres ne renvoient rien.
+  //
+  // Une zone privée ou un caractère de contrôle suffit : aucun texte réel
+  // n'en contient. Pour une autre écriture, il en faut deux, et seulement
+  // dans une ligne qui contient par ailleurs de l'arabe ou du latin — un
+  // document entièrement écrit dans une autre langue reste modifiable.
+  var improbables = 0;
+  var attendus = 0;
   for (final rune in utile.runes) {
     if ((rune >= 0xE000 && rune <= 0xF8FF) ||
         rune == 0xFFFD ||
         (rune < 0x20 && rune != 0x09 && rune != 0x0A && rune != 0x0D)) {
       return true;
     }
-    // Grec, cyrillique, hébreu, flèches, symboles mathématiques, traits de
-    // tableau, formes géométriques : rien de tout cela ne se mêle à une
-    // phrase ordinaire.
-    if ((rune >= 0x0370 && rune <= 0x05FF) ||
-        (rune >= 0x2190 && rune <= 0x2BFF)) {
-      etrangers++;
-      if (etrangers >= 2) return true;
+    if (estLettreArabe(rune) || estLettreLatine(rune)) {
+      attendus++;
+    } else if (!_ecritureCourante(rune)) {
+      improbables++;
     }
   }
+  if (attendus > 0 && improbables >= 2) return true;
 
   // Quatrième signe : deux écritures collées à l'intérieur d'un même mot.
   // Un mot latin au milieu d'un mot arabe, sans espace, ne s'écrit pas —
@@ -314,6 +327,29 @@ bool texteIncoherent(String texte, Rect zone) {
   }
   return false;
 }
+
+/// Vrai pour un caractère qui peut apparaître dans un document ordinaire :
+/// ponctuation, chiffres, symboles courants, et les écritures vivantes que
+/// l'on croise vraiment. Tout le reste — syllabaires rares, cases vides du
+/// répertoire — trahit un numéro de signe lu par erreur comme un caractère.
+bool _ecritureCourante(int rune) =>
+    rune <= 0x024F || // latin, ponctuation et chiffres
+    (rune >= 0x0370 && rune <= 0x03FF) || // grec
+    (rune >= 0x0400 && rune <= 0x052F) || // cyrillique
+    (rune >= 0x0590 && rune <= 0x05FF) || // hébreu
+    (rune >= 0x0600 && rune <= 0x06FF) ||
+    (rune >= 0x0750 && rune <= 0x077F) ||
+    (rune >= 0x0900 && rune <= 0x097F) || // devanagari
+    (rune >= 0x08A0 && rune <= 0x08FF) ||
+    (rune >= 0x0E00 && rune <= 0x0E7F) || // thaï
+    (rune >= 0x2000 && rune <= 0x206F) || // ponctuation typographique
+    (rune >= 0x20A0 && rune <= 0x20CF) || // monnaies
+    (rune >= 0x2100 && rune <= 0x214F) ||
+    (rune >= 0x3000 && rune <= 0x30FF) || // japonais
+    (rune >= 0x4E00 && rune <= 0x9FFF) || // chinois
+    (rune >= 0xAC00 && rune <= 0xD7AF) || // coréen
+    (rune >= 0xFB50 && rune <= 0xFDFF) ||
+    (rune >= 0xFE70 && rune <= 0xFEFF);
 
 /// Vrai pour une lettre de l'écriture arabe.
 bool estLettreArabe(int rune) =>
@@ -4933,7 +4969,8 @@ class _AccueilState extends State<Accueil> {
       // Repérer tout de suite les lignes que le fichier décrit mal : il
       // vaut mieux refuser de les modifier que de les détruire en silence.
       for (final ligne in trouvesTexte) {
-        ligne.illisible = texteIncoherent(ligne.texte, ligne.zone);
+        ligne.illisible = texteIncoherent(ligne.texte, ligne.zone,
+            boite: ligne.boiteLibre);
       }
 
       // Mais avant de renoncer, chercher le vrai texte là où il se cache :
@@ -4956,7 +4993,8 @@ class _AccueilState extends State<Accueil> {
           trouvesTexte = [...blocs, ...restantes];
           recuperes = blocs.length;
           for (final ligne in trouvesTexte) {
-            ligne.illisible = texteIncoherent(ligne.texte, ligne.zone);
+            ligne.illisible = texteIncoherent(ligne.texte, ligne.zone,
+                boite: ligne.boiteLibre);
           }
         }
       }
