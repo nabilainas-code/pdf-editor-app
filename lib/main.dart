@@ -1485,7 +1485,11 @@ class _AccueilState extends State<Accueil> {
   /// plusieurs. Les compter par lignes annonçait « 4 occurrences » là où il
   /// y en avait douze, et « Remplacer » — au singulier — les remplaçait
   /// toutes d'un coup dans la ligne visée.
-  List<(MotDetecte, int)> resultatsRecherche = [];
+  /// Les occurrences trouvées : la ligne, puis le début et la fin de
+  /// l'occurrence dans son texte. La fin est notée, et non déduite de la
+  /// longueur du terme : en arabe, « غراب » se trouve dans « الْغُرَابُ »,
+  /// où il occupe neuf caractères et non quatre.
+  List<(MotDetecte, int, int)> resultatsRecherche = [];
   int indexRecherche = 0;
 
   /// Chercher « d » trouvait le d de chaque mot du document. Ces deux
@@ -8518,26 +8522,91 @@ class _AccueilState extends State<Accueil> {
   /// Relève toutes les lignes contenant le terme cherché, dans l'ordre où
   /// on les lit : de haut en bas, puis de gauche à droite.
   /// Vrai si la lettre n'appartient pas à un mot : c'est ce qui borne une
-  /// recherche « mot entier ».
+  /// recherche « mot entier ». Les lettres arabes en font partie, sans quoi
+  /// « mot entier » se serait déclenché au milieu de chaque mot arabe.
   bool _horsMot(String source, int position) {
     if (position < 0 || position >= source.length) return true;
-    return !RegExp(r'[A-Za-zÀ-ÖØ-öø-ÿ0-9]').hasMatch(source[position]);
+    return !RegExp(r'[A-Za-zÀ-ÖØ-öø-ÿ0-9\u0600-\u06FF\u0750-\u077F]')
+        .hasMatch(source[position]);
   }
 
-  /// Positions du terme dans une ligne, selon les réglages en cours.
-  List<int> _positionsDansLigne(String source, String terme) {
+  /// Le texte réduit à ce qui compte pour une recherche, avec la position
+  /// d'origine de chaque caractère gardé.
+  ///
+  /// Un texte arabe vocalisé porte ses voyelles sous forme de petits signes
+  /// posés sur les lettres. « الْغُرَابُ » s'écrit avec neuf caractères pour
+  /// quatre lettres. Chercher « غراب » n'y trouvait donc rien : la
+  /// comparaison se faisait signe par signe. C'est la règle partout
+  /// ailleurs — on cherche un mot, pas sa vocalisation.
+  ///
+  /// Les variantes de l'alif (أ إ آ ٱ) sont ramenées à l'alif nu, et l'alif
+  /// bref final (ى) au yâ : personne ne se souvient de laquelle porte la
+  /// hamza en tapant sa recherche.
+  ///
+  /// La liste des positions permet de retrouver, dans le texte d'origine,
+  /// exactement la portion à surligner ou à remplacer.
+  ({String allege, List<int> origine}) _sansVoyelles(String source,
+      {required bool minuscules}) {
+    final tampon = StringBuffer();
+    final origine = <int>[];
+    for (var i = 0; i < source.length; i++) {
+      var c = source.codeUnitAt(i);
+      // Voyelles, nunation, signes de lecture, et le tatweel qui étire une
+      // lettre sans rien dire.
+      if ((c >= 0x064B && c <= 0x065F) ||
+          c == 0x0640 ||
+          c == 0x0670 ||
+          (c >= 0x06D6 && c <= 0x06ED) ||
+          (c >= 0x200B && c <= 0x200F) ||
+          (c >= 0x202A && c <= 0x202E)) {
+        continue;
+      }
+      if (c == 0x0622 || c == 0x0623 || c == 0x0625 || c == 0x0671) {
+        c = 0x0627;
+      } else if (c == 0x0649) {
+        c = 0x064A;
+      }
+      if (minuscules) {
+        // Caractère par caractère, et seulement quand la minuscule tient
+        // en un caractère : la liste des positions doit rester alignée.
+        final bas = String.fromCharCode(c).toLowerCase();
+        if (bas.length == 1) c = bas.codeUnitAt(0);
+      }
+      tampon.writeCharCode(c);
+      origine.add(i);
+    }
+    return (allege: tampon.toString(), origine: origine);
+  }
+
+  /// Début et fin de chaque occurrence du terme dans une ligne, selon les
+  /// réglages en cours. Les deux sont donnés dans le texte d'origine, celui
+  /// qui sera surligné ou remplacé.
+  List<(int, int)> _positionsDansLigne(String source, String terme) {
     if (terme.isEmpty) return const [];
-    final ou = respecterCasse ? source : source.toLowerCase();
-    final quoi = respecterCasse ? terme : terme.toLowerCase();
-    final trouvees = <int>[];
+    final minuscules = !respecterCasse;
+    final reduit = _sansVoyelles(source, minuscules: minuscules);
+    final cherche = _sansVoyelles(terme, minuscules: minuscules);
+    final ou = reduit.allege;
+    final quoi = cherche.allege;
+    if (quoi.isEmpty) return const [];
+    final trouvees = <(int, int)>[];
     var i = 0;
     while (i <= ou.length - quoi.length) {
       final position = ou.indexOf(quoi, i);
       if (position < 0) break;
+      final debut = reduit.origine[position];
+      // La fin est prise au caractère gardé suivant : les voyelles posées
+      // sur la dernière lettre trouvée font partie de l'occurrence, et
+      // doivent disparaître avec elle.
+      final apres = position + quoi.length;
+      final fin =
+          apres < reduit.origine.length ? reduit.origine[apres] : source.length;
+      // La borne se juge sur le texte allégé : dans le texte d'origine, le
+      // caractère qui précède peut être une voyelle posée sur la lettre
+      // d'avant, qui aurait passé pour une séparation de mots.
       final borne = !motEntier ||
-          (_horsMot(source, position - 1) &&
-              _horsMot(source, position + quoi.length));
-      if (borne) trouvees.add(position);
+          (_horsMot(ou, position - 1) && _horsMot(ou, apres));
+      if (borne) trouvees.add((debut, fin));
       i = position + 1;
     }
     return trouvees;
@@ -8562,8 +8631,8 @@ class _AccueilState extends State<Accueil> {
         });
       resultatsRecherche = [
         for (final ligne in lignes)
-          for (final position in _positionsDansLigne(ligne.texte, terme))
-            (ligne, position),
+          for (final (debut, fin) in _positionsDansLigne(ligne.texte, terme))
+            (ligne, debut, fin),
       ];
       statut = resultatsRecherche.isEmpty
           ? (nbPages > 1
@@ -8645,11 +8714,11 @@ class _AccueilState extends State<Accueil> {
     if (resultatsRecherche.isEmpty || _occupe) return;
     final terme = _champRecherche.text.trim();
     if (terme.isEmpty) return;
-    final (ligne, position) = resultatsRecherche[indexRecherche];
-    if (position + terme.length > ligne.texte.length) return;
+    final (ligne, debut, fin) = resultatsRecherche[indexRecherche];
+    if (fin > ligne.texte.length || debut >= fin) return;
     // Cette occurrence-là, et elle seule : « Remplacer » est au singulier.
-    final nouveau = ligne.texte.replaceRange(
-        position, position + terme.length, _champRemplacement.text);
+    final nouveau =
+        ligne.texte.replaceRange(debut, fin, _champRemplacement.text);
     if (nouveau == ligne.texte) return;
 
     await _appliquerModification(ligne,
@@ -8718,9 +8787,8 @@ class _AccueilState extends State<Accueil> {
   String _texteRemplace(String source, String terme, String parQuoi) {
     final positions = _positionsDansLigne(source, terme);
     var sortie = source;
-    for (final position in positions.reversed) {
-      sortie =
-          sortie.replaceRange(position, position + terme.length, parQuoi);
+    for (final (debut, fin) in positions.reversed) {
+      sortie = sortie.replaceRange(debut, fin, parQuoi);
     }
     return sortie;
   }
