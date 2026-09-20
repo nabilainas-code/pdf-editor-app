@@ -301,6 +301,8 @@ bool texteIncoherent(String texte, Rect zone, {bool boite = false}) {
   // document entièrement écrit dans une autre langue reste modifiable.
   var improbables = 0;
   var attendus = 0;
+  var plusPetit = 0x110000;
+  var plusGrand = 0;
   for (final rune in utile.runes) {
     if ((rune >= 0xE000 && rune <= 0xF8FF) ||
         rune == 0xFFFD ||
@@ -311,9 +313,18 @@ bool texteIncoherent(String texte, Rect zone, {bool boite = false}) {
       attendus++;
     } else if (!_ecritureCourante(rune)) {
       improbables++;
+      if (rune < plusPetit) plusPetit = rune;
+      if (rune > plusGrand) plusGrand = rune;
     }
   }
   if (attendus > 0 && improbables >= 2) return true;
+
+  // Et une ligne entièrement faite de ces caractères-là, si elle les prend
+  // très loin les uns des autres, n'est écrite dans aucune langue : une
+  // vraie phrase puise ses lettres dans un seul alphabet, donc dans une
+  // plage étroite. Des numéros de signes, eux, s'éparpillent sur des
+  // milliers de cases — ici de l'arménien au khmer dans le même mot.
+  if (improbables >= 2 && plusGrand - plusPetit > 0x400) return true;
 
   // Quatrième signe : deux écritures collées à l'intérieur d'un même mot.
   // Un mot latin au milieu d'un mot arabe, sans espace, ne s'écrit pas —
@@ -4816,7 +4827,13 @@ class _AccueilState extends State<Accueil> {
         final texte = mot.text.trim();
         // Vingt caractères dans un seul mot : aucun mot réel n'est aussi
         // long, c'est forcément une phrase entière déclarée d'un bloc.
-        if (texte.length >= 20) {
+        //
+        // Sauf quand ce bloc est lui-même du charabia : un paquet de
+        // numéros de signes fait aussi vingt caractères, et en faire un
+        // paragraphe reviendrait à poser le charabia par-dessus le vrai
+        // texte, au lieu de le remplacer.
+        if (texte.length >= 20 &&
+            !texteIncoherent(texte, ligne.bounds, boite: true)) {
           ancres.add((texte: texte, ligne: ligne));
         }
       }
